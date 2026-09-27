@@ -1,0 +1,12 @@
+{
+  "snapshot": "2026-09-26T04:56:47.106Z",
+  "protocol_entries": 62,
+  "squads_multisigs": 54,
+  "multisigs_zero_timelock": 37,
+  "longest_timelock_hours": 24.0,
+  "multisigs_timelock_ge_72h": 0,
+  "programs_tracked": 183,
+  "programs_single_key_upgrade_authority": 8,
+  "multisigs_with_timelock_changes": "16/43",
+  "median_fastest_execution_minutes": 0.6
+}

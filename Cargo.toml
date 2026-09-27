@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/bulkhead-core", "crates/bulkhead-diff", "programs/floor", "programs/vault", "programs/harbor"]
+exclude = ["programs/tests"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/shuv-amp/bulkhead"
+rust-version = "1.75"
+
+[profile.release]
+overflow-checks = true

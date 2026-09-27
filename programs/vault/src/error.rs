@@ -1,0 +1,63 @@
+//! Vault errors (`docs/05-PROGRAM-SPEC.md §5`). Codes start at 8000: disjoint
+//! from Floor (7000+), Anchor (6000+) and the abort code `0x464C4F52`.
+
+use pinocchio::error::ProgramError;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VaultError {
+    InvalidInstruction = 8000,
+    WrongAccountType,
+    WrongAddress,
+    AlreadyInitialized,
+    NotRegistrar,
+    NotAdmin,
+    NotGuardian,
+    NoQuorum,
+    MissingSignature,
+    WrongCaller,
+    WrongVault,
+    WrongMint,
+    WrongTokenProgram,
+    ExtensionNotAllowed,
+    RecipientOwnerMismatch,
+    BadPriceAccount,
+    NotSealed,
+    AlreadySealed,
+    SealNotExecutable,
+    ImportExceedsBalance,
+    VaultCountMismatch,
+    InvalidLimits,
+    InvalidAsset,
+    InvalidGuardians,
+    DelayBelowMinimum,
+    LaneClosed,
+    QueueFull,
+    Frozen,
+    FreezeTooLong,
+    TicketNotDue,
+    TicketNotPending,
+    ExtensionTooLong,
+    TicketsPending,
+    ChangeNotExecutable,
+    ChangeVetoed,
+    ChangeExpired,
+    ChangeExecuted,
+    Abdicated,
+    LedgerUnsound,
+    LedgerCorrupt,
+    NoSlot,
+    DuplicateAccount,
+    CannotEject,
+    GenesisOnly,
+    DestinationNotSettled,
+    NothingToExit,
+    ZeroAmount,
+    Overflow,
+}
+
+impl From<VaultError> for ProgramError {
+    fn from(e: VaultError) -> Self {
+        ProgramError::Custom(e as u32)
+    }
+}

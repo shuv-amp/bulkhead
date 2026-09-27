@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulkhead Status</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #14161a; --muted: #5b6270; --line: #e3e6eb;
+    --ok: #127a3e; --warn: #9a5b00; --bad: #b3261e; --accent: #2447d6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --card: #171a21; --ink: #e8eaee; --muted: #9aa3b2; --line: #262b35;
+      --ok: #4cc17a; --warn: #e0a33a; --bad: #ef6b62; --accent: #7d97ff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #171a21; --ink: #e8eaee; --muted: #9aa3b2; --line: #262b35;
+    --ok: #4cc17a; --warn: #e0a33a; --bad: #ef6b62; --accent: #7d97ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .big { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row span:first-child { color: var(--muted); }
+  .row span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  .pill.bad { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+  .headline { font-size: 17px; margin: 0 0 18px; padding: 14px 18px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); }
+  .headline b { font-variant-numeric: tabular-nums; }
+  form { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; margin-bottom: 18px; }
+  form label { font-size: 12px; color: var(--muted); display: grid; gap: 3px; }
+  input { font: 13px var(--mono); padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); min-width: 0; }
+  button { grid-column: 1 / -1; justify-self: start; font: 600 14px system-ui; padding: 8px 14px; border-radius: 8px; border: 0; background: var(--accent); color: white; cursor: pointer; }
+  .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .err { color: var(--bad); white-space: pre-wrap; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 22px; }
+  @media (max-width: 560px) { form { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bulkhead status</h1>
+  <p class="sub">The worst case, live, from the chain's own state: the same formulas as the Vault's <code>attest</code> instruction (checked equal to it in the end-to-end test).</p>
+  <form id="f">
+    <label>RPC <input name="rpc" placeholder="http://127.0.0.1:8899"></label>
+    <label>Vault program <input name="vault" placeholder="Bulkhead Vault program id"></label>
+    <label>Protocol program <input name="protocol" placeholder="the protocol's program id"></label>
+    <label>Mints (comma separated) <input name="mints" placeholder="mint, mint"></label>
+    <label>Floor program (optional) <input name="floor"></label>
+    <label>Protected program (optional) <input name="protected"></label>
+    <button>Load</button>
+  </form>
+  <div id="out"></div>
+  <footer>Refreshes every 10 seconds. Guardians can stop, never steal; loosening waits at least 72 hours. <a href="https://github.com/shuv-amp/bulkhead">Source</a></footer>
+</main>
+<script type="module">
+import { Rpc, decodeProtocol, decodeVault, decodeFloor } from "../lib/solana.mjs";
+import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
+import { attestLocal } from "../lib/limits.mjs";
+
+const form = document.getElementById("f");
+const out = document.getElementById("out");
+const params = new URLSearchParams(location.search);
+for (const [k, v] of params) if (form.elements[k]) form.elements[k].value = v;
+
+const fmt = (raw, decimals) => {
+  const n = Number(raw) / 10 ** decimals;
+  return n.toLocaleString(undefined, { maximumFractionDigits: n < 100 ? 2 : 0 });
+};
+const ago = (s) => {
+  const d = Math.round(Date.now() / 1000 - s);
+  return d < 90 ? `${d}s ago` : d < 5400 ? `${Math.round(d / 60)}m ago` : d < 172800 ? `${Math.round(d / 3600)}h ago` : `${Math.round(d / 86400)}d ago`;
+};
+const until = (s) => {
+  const d = Math.round(s - Date.now() / 1000);
+  return d <= 0 ? "no" : d < 5400 ? `yes, ${Math.round(d / 60)} more minutes` : `yes, ${Math.round(d / 3600)} more hours`;
+};
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+async function render() {
+  const f = Object.fromEntries(new FormData(form));
+  if (!f.rpc || !f.vault || !f.protocol || !f.mints) return;
+  const rpc = new Rpc(f.rpc);
+  const vc = await new VaultClient(f.vault, f.protocol).init();
+  const protocol = decodeProtocol((await rpc.account(vc.protocol)).bytes);
+  const now = await rpc.call("getBlockTime", [await rpc.call("getSlot", [{ commitment: "confirmed" }])]);
+  const live = protocol.guardians.filter((_, i) => now - protocol.lastHeartbeat[i] <= protocol.heartbeatIntervalS).length;
+  let html = "";
+  let headline = [];
+  for (const mint of f.mints.split(",").map((m) => m.trim()).filter(Boolean)) {
+    const { vault, vaultTokens } = await vc.vault(mint);
+    const v = decodeVault((await rpc.account(vault)).bytes);
+    const tokens = await rpc.account(vaultTokens);
+    const balance = new DataView(tokens.bytes.buffer, tokens.bytes.byteOffset).getBigUint64(64, true);
+    const a = attestLocal(v, protocol, balance, now);
+    const d = v.decimals;
+    headline.push(`${fmt(a.availableNow, d)} now, at most ${fmt(a.worst1h, d)} in an hour and ${fmt(a.worst24h, d)} in a day`);
+    const frozen = a.frozenUntil > now;
+    html += `<div class="card">
+      <h2>Vault · <span class="mono">${esc(mint.slice(0, 6))}…</span></h2>
+      <div class="big">${fmt(a.balance, d)}</div>
+      <div class="row"><span>Instant unbacked outflow now</span><span>${fmt(a.availableNow, d)}</span></div>
+      <div class="row"><span>Worst case, nobody acts for 1h</span><span>${fmt(a.worst1h, d)}</span></div>
+      <div class="row"><span>Worst case, nobody acts for 24h</span><span>${fmt(a.worst24h, d)}</span></div>
+      <div class="row"><span>Frozen</span><span class="${frozen ? "warn" : "ok"}">${until(a.frozenUntil)}</span></div>
+      <div class="row"><span>Pending tickets</span><span>${a.pendingTickets} (${fmt(a.queued, d)})</span></div>
+      <div class="row"><span>Limits</span><span>${v.limits.shortBps / 100}% / ${v.limits.shortWindowS / 3600}h · ${v.limits.longBps / 100}% / ${v.limits.longWindowS / 3600}h</span></div>
+      <div class="row"><span>Paid out (backed / unbacked)</span><span>${fmt(v.backedOut, d)} / ${fmt(v.unbackedOut, d)}</span></div>
+    </div>`;
+  }
+  html = `<div class="card">
+      <h2>Protocol</h2>
+      <div class="row"><span>Sealed</span><span class="${protocol.sealed ? "ok" : "warn"}">${protocol.sealed ? "yes" : "no (releases disabled)"}</span></div>
+      <div class="row"><span>Frozen</span><span class="${protocol.frozenUntil > now ? "warn" : "ok"}">${until(protocol.frozenUntil)}</span></div>
+      <div class="row"><span>Live guardians</span><span class="${live >= protocol.threshold ? "ok" : "bad"}">${live} of ${protocol.guardians.length} (quorum ${protocol.threshold})</span></div>
+      <div class="row"><span>Any loosening waits</span><span>${Math.round(protocol.loosenDelayS / 3600)} hours (minimum 72, a constant)</span></div>
+      <div class="row"><span>Admin</span><span class="mono">${esc(protocol.admin)}</span></div>
+    </div>` + html;
+  if (f.floor && f.protected) {
+    const fc = await new FloorClient(f.floor, f.protected).init();
+    const acc = await rpc.account(fc.config);
+    if (acc) {
+      const fl = decodeFloor(acc.bytes);
+      // L2BEAT's Security Council bar: >= 8 members and a >= 75% threshold. Its third
+      // rule (>= 50% of members outside the team) is not visible on-chain.
+      const n = fl.guardians.length;
+      const councilBar = n >= 8 && fl.threshold * 4 >= n * 3;
+      html += `<div class="card">
+        <h2>Floor · upgrade key</h2>
+        <div class="big ${fl.status === "live" ? "ok" : "bad"}">${fl.status === "live" ? "Live" : "Stopped"}</div>
+        <div class="row"><span>New code waits</span><span>${Math.round(fl.upgradeDelayS / 3600)} hours${fl.upgradeDelayS >= 604800 ? ' <span class="pill ok">Stage-1-grade exit window</span>' : ""}</span></div>
+        <div class="row"><span>Stop button staged</span><span class="${fl.abortStaged ? "ok" : "bad"}">${fl.abortStaged ? "yes" : "no"}</span></div>
+        <div class="row"><span>Snapshot for instant restore</span><span class="${fl.snapshotPinned ? "ok" : "warn"}">${fl.snapshotPinned ? "pinned" : "not pinned"}</span></div>
+        <div class="row"><span>sBPF v3 (SIMD-0500 ready)</span><span class="${fl.elfIsV3 ? "ok" : "warn"}">${fl.elfIsV3 ? "yes" : "no: build and test a v3 binary"}</span></div>
+        <div class="row"><span>Live guardians</span><span>${fl.guardians.filter((_, i) => now - fl.lastHeartbeat[i] <= fl.heartbeatIntervalS).length} of ${fl.guardians.length} (quorum ${fl.threshold})</span></div>
+        <div class="row"><span>L2BEAT Security Council bar</span><span class="${councilBar ? "ok" : "warn"}">${councilBar ? "met" : "not met"}: ${n} guardians, quorum ${fl.threshold} (bar: ≥ 8, ≥ 75%; outside members not visible on-chain)</span></div>
+        <div class="row"><span>Pending proposal</span><span>${fl.pendingKind ? `kind ${fl.pendingKind}, ${fl.pendingVetoed ? "vetoed" : "executable " + new Date(fl.pendingEta * 1000).toLocaleString()}` : "none"}</span></div>
+      </div>`;
+    }
+  }
+  out.innerHTML = `<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p><div class="grid">${html}</div>`;
+}
+
+async function loop() {
+  try {
+    await render();
+  } catch (e) {
+    out.innerHTML = `<div class="card err">${esc(e.message)}</div>`;
+  }
+}
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  history.replaceState(null, "", "?" + new URLSearchParams(new FormData(form)));
+  loop();
+});
+loop();
+setInterval(loop, 10_000);
+</script>
+</body>
+</html>

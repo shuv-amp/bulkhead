@@ -1,0 +1,19 @@
+[package]
+name = "bulkhead-harbor"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Harbor: a deliberately naive demo protocol whose custody is a Bulkhead Vault."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pinocchio = { version = "=0.11.2", default-features = false, features = ["cpi", "copy", "sha2"] }
+
+[target.'cfg(not(target_os = "solana"))'.dependencies]
+solana-address = { version = "2", features = ["curve25519"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

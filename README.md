@@ -1,0 +1,162 @@
+# Bulkhead
+
+**The circuit breaker your Solana protocol's own admin can't turn off.**
+
+On 1 April 2026, Drift lost $285M in about twelve minutes of withdrawals. Drift had withdrawal limits. The attacker, holding admin power, raised them. Drift had removed its own timelock five days earlier.
+
+Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once audited, nobody can change it.
+- **The protocol still decides who gets paid. Bulkhead decides how fast.**
+- **Taking back your own deposit is never throttled, frozen or priced.** No oracle, no limit, no freeze.
+- **Everything else leaves at most 2% of a vault per hour and 5% per day.** Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze.
+- **Tightening is instant. Loosening waits 72 hours**, a constant no admin can lower, and any guardian can veto it.
+- **Guardians can stop things. They can never move money.**
+
+## Two tiers, two threats
+
+| | **Vault** (Tier 1) | **Floor** (Tier 0) |
+|---|---|---|
+| What it holds | The protocol's token accounts | The program's upgrade key |
+| Stops | Money leaving too fast, whatever the cause: a stolen admin key (the Drift class), a buggy payout path, malicious new code in the protocol, even a one-transaction drain | Malicious *new code*: new binaries wait 72h in public, any guardian can stop the program at once, and a quorum restores the exact bytes that were stopped |
+| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of a vault in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
+| Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
+
+**Who the guardians are.** A protocol names 2–8 guardian keys when it registers: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
+
+**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian (the bot that froze the end-to-end attack within seconds), limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day."
+
+**Why not just an abort binary?** Dean Little's `sbpf-asm-abort` showed that a program can be stopped by upgrading it to a tiny binary that always fails. Floor builds on that pattern (credited in [DISCLOSURE.md](DISCLOSURE.md)). But a bare abort:
+- is pressed by whoever holds the upgrade key, the same key that can deploy anything;
+- waits for the timelock under a timelocked multisig;
+- is undone only by re-uploading the program.
+
+Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
+
+> **Status (27 Sep 2026):** built:
+> - the core math;
+> - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
+> - the Cloud guardian and the status page.
+>
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator. Devnet deployment is next ([plan](docs/10-BUILD-PLAN.md)). **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
+
+## Why the brake must sit in the path of the money
+
+| Fact | Source |
+|---|---|
+| Of 54 multisigs governing solgov-tracked Solana protocols, **37 have no timelock**; the longest is **24h**; **16 of 43** have changed theirs | [our census](evidence/solgov_census.py), snapshot 26 Sep 2026, spot-checked on-chain |
+| In 183 DeFi hacks, **1 of 87** protocols with a pause used it within the first hour; **44%** of attacks were a single transaction | Zhou et al., IEEE S&P 2023 |
+| Since 15 Sep 2026, one Solana transaction can be **4,096 bytes** (was 1,232) | SIMD-0296 |
+
+Timelocks are settings, not floors. Stop buttons act after the transaction that did the damage. Only a limit enforced inside every payout bounds an atomic attack.
+
+On Solana, the one control an admin or upgrade key can't bypass is ownership of the token account. Bulkhead becomes that owner.
+
+## What it does to an attack
+
+**Measured, end to end** (`E2E=1 scripts/check-programs.sh`). The setup: a local validator, the programs, a 10M USDC vault, the Cloud guardian, and an attacker holding the demo protocol's admin key.
+
+| | Result |
+|---|---|
+| The attacker orders | 12 payouts of 100,000 USDC, one every 800 ms |
+| The attacker receives | **200,000 USDC**, the 2% burst |
+| The guardian | Freezes the protocol on its own, seconds after the burst completes, then cancels all 10 queued payouts |
+| Afterwards | 9,800,000 USDC still in the vault; 0 payouts pending; the status page's figures equal the program's own `attest` |
+
+**Modeled, the Drift incident** (`reference/drift_model.py`). Inputs: Chainalysis per-asset amounts, and a $550M TVL **assumption** with vaults proportional to what was drained. It is a model, not a replay.
+
+| Nobody freezes for | Loss behind Bulkhead | Share of TVL |
+|---|---|---|
+| 2 minutes (guardian bot) | $11.4M | 2.1% |
+| 1 hour | $22.0M | 4.0% |
+| 24 hours | $55.0M | 10.0% |
+| Actual, without Bulkhead | **$285M in ~12 minutes** | 52% |
+
+With nobody responding at all, half a vault takes **9 days** to leave instead of 12 minutes.
+
+## Verify it yourself
+
+```bash
+scripts/check.sh                  # the core, the reference, the tools, Cloud: needs Rust (pinned), Python 3.9+, Node 20+
+scripts/check-programs.sh         # the programs on the real runtime: needs the Agave CLI v4.3.0
+E2E=1 scripts/check-programs.sh   # ...plus the attacker-vs-guardian run and a deploy rehearsal, on local validators
+scripts/prove.sh                  # Kani bounded proofs (~3.5 min)
+scripts/mutants.sh                # mutation testing (~40 min)
+python3 tools/floor_check.py <program-id>   # who can upgrade any mainnet program; is it ready for SIMD-0500?
+scripts/floor-demo.sh <program-id>          # Floor on that program's real bytes, locally: register, stop, restore byte-identical
+scripts/deploy-dryrun.sh                    # the devnet deploy, rehearsed on a fresh local validator
+scripts/verify-deployed.sh <url> <id>=<name> # a deployed program runs exactly the code built from this checkout
+```
+
+These scripts install nothing. The core has zero dependencies, and Cloud and the Python code use only their standard libraries.
+
+| Check | Result (27 Sep 2026) |
+|---|---|
+| Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 117/117 identical, Rust = Python |
+| Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 29 commands) |
+| Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 21/21, with coverage counters so a vacuous pass fails |
+| Bounded proofs (Kani) and exhaustive checks | **13/13 harnesses verified** (11 for every value of their types); 5 exhaustive tests over ~25.7M inputs |
+| Mutation testing (`cargo-mutants`, 647 injected bugs) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 46/46: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
+| Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
+| End to end | Above |
+| What this process found in our own code and docs | 13 findings: real bugs, one overclaimed guarantee, and test gaps. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+
+## Guarantees
+
+| | Guarantee |
+|---|---|
+| G1 | Unbacked outflow ≤ `min(C_s(W_s+T)/W_s, C_l(W_l+T)/W_l)` within any `T`, even with admin and upgrade keys stolen ([proof](docs/03-MECHANISM.md#25-proof-of-g1)) |
+| G2 | An owner who owes nothing is never throttled, frozen or priced taking back their own deposit. (Whether the tokens are in the pool is the pool's liquidity; [`03 §4.6`](docs/03-MECHANISM.md#46-guarantees-of-the-ledger).) |
+| G3 | Backed payouts never leave an owner's ledger unsound at conservative prices |
+| G4 | Tighten instantly; loosen only after ≥ 72h, public, vetoable |
+| G5 | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one. |
+| G6 | Emergency moves go only into a Bulkhead-held lifeboat. Exits wait 72h, and go only to a destination committed 72h earlier. |
+| G7 | Missing, stale or wide prices, unknown assets and overflow only ever reduce what is backed |
+| G8 | (Floor) A new binary deploys only after ≥ 72h without veto. While the program is stopped, a live quorum's approval of that exact frozen buffer can deploy it sooner. Any live guardian stops the program instantly; a live quorum restores the snapshot, verified byte-identical to the stopped code. |
+| G9 | Bulkhead's and Floor's own upgrade authorities are burned after audit (on devnet: a team key, disclosed) |
+
+## Repository
+
+```
+crates/bulkhead-core/   the math: dual-bucket GCRA, EMA, value, prices, ledger, classification, governance,
+                        Floor checks and abort binaries (zero dependencies, no_std)
+crates/bulkhead-diff/   line-protocol worker for the golden tests and the differential runner
+programs/floor/         Floor (Tier 0): holds a program's upgrade key; delay, veto, stop, snapshot restore
+programs/vault/         Vault (Tier 1): custody, backed ledger, limiter, tickets, governance, lifeboat
+programs/harbor/        a deliberately naive demo protocol whose custody is a Bulkhead vault
+programs/tests/         LiteSVM: scenarios, negative tests, compute, the program-vs-model differential
+cloud/                  zero-dependency JavaScript: client, guardian bot, status page, end-to-end attack
+tools/floor_check.py    read-only report on any upgradeable program
+reference/              independent Python reference, differential runner, golden vectors, fixtures, Drift model
+evidence/               governance census (script + committed snapshot), model output
+docs/                   the full design (below)
+scripts/                check.sh, check-programs.sh, build-programs.sh, prove.sh, mutants.sh
+```
+
+The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build for **sBPF v3**. `scripts/build-programs.sh` fails unless each binary is still deployable after SIMD-0500.
+
+## Documentation
+
+| Doc | What it answers |
+|---|---|
+| [FAQ](docs/FAQ.md) | Short answers: who pays, who the guardians are, stolen guardian keys, why not a bare abort, what the limits mean exactly |
+| [00 Decision](docs/00-DECISION.md) | What we build, what we refuse, and why. Kill criteria. |
+| [01 Evidence](docs/01-EVIDENCE.md) | Every number, labelled measured / reported / model / assumption |
+| [02 Product](docs/02-PRODUCT.md) | Users, Floor and Vault, guarantees, UX, non-goals, glossary |
+| [03 Mechanism](docs/03-MECHANISM.md) | The algorithms, proofs, worked examples, defaults |
+| [04 Threat model](docs/04-THREAT-MODEL.md) | Adversaries, bounds, residual risk, invariants → tests |
+| [05 Program spec](docs/05-PROGRAM-SPEC.md) | Accounts, instructions, errors, measured compute, Token-2022 policy |
+| [06 Floor](docs/06-FLOOR.md) | Tier 0: the upgrade-key floor, stop, snapshot restore, SIMD-0500, and why it beats a bare abort binary |
+| [07 Integration](docs/07-INTEGRATION.md) | How a protocol integrates; calibration; Harbor |
+| [08 Scenarios](docs/08-SCENARIOS.md) | S1 Drift, S4 bank run, S7 loosen, S8 one-transaction attack, S9 honest borrower, S10 Floor: where each runs and what it showed |
+| [09 Verification](docs/09-VERIFICATION.md) | The method, every result, every bug it found |
+| [10 Build plan](docs/10-BUILD-PLAN.md) | What remains to 12 Oct, cut rules, risks |
+| [11 Business](docs/11-BUSINESS.md) | Market, pricing, go-to-market, competition, moat |
+| [12 Submission](docs/12-SUBMISSION.md) | Colosseum checklist, video scripts, Q&A |
+| [13 Sources](docs/13-SOURCES.md) | Every URL and source path |
+| [14 State of the art](docs/14-STATE-OF-THE-ART.md) | Every mechanism compared with the best shipped systems (Wormhole NTT, CCIP, Kamino, Project 0, MetaMorpho, Lido, Aave, network calculus): what we took, what we rejected, why |
+
+## Credits and license
+
+The one-transaction abort pattern is Dean Little's (`sbpf-asm-abort`); our binaries are generated by our own code. The verification method comes from [SP-Differ](https://github.com/shuv-amp/sp-differ). See [DISCLOSURE.md](DISCLOSURE.md).
+
+Apache-2.0.

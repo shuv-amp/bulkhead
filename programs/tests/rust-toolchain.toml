@@ -1,0 +1,4 @@
+# LiteSVM 0.16's agave crates use std APIs newer than the core's pinned 1.92.
+# This toolchain is already installed by Kani's setup (scripts/prove.sh).
+[toolchain]
+channel = "nightly-2026-08-21"

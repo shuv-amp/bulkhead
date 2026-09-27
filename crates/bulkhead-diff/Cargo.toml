@@ -1,0 +1,16 @@
+[package]
+name = "bulkhead-diff"
+description = "Differential worker: speaks a line protocol so the Python reference and bulkhead-core can be compared case by case."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bulkhead-core = { path = "../bulkhead-core" }
+
+[[bin]]
+name = "bulkhead-diff-worker"
+path = "src/main.rs"

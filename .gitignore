@@ -1,0 +1,16 @@
+target/
+**/target/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+
+
+# The team's own pitch materials and local tooling: kept on disk, never committed
+pitch.md
+pitch_*.md
+pitch.pdf
+deck/
+generate_pitch_deck.py
+*.pptx
+.claude/
