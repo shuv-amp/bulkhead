@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, newState, decode, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, newState, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -8,9 +8,9 @@ const worst1h = 400_000n * USDC; // 10M vault, default limits (golden G-6)
 const owner = "5YMKnK8DcuUc5vSagDZTJB8VVGnQ1ZJP9Pxm9BAqUoPh";
 const mint = "DmrC7P3uPGQ7zCMhLVkJVAtnWwPn6yzSg6tL9xVEmzzM";
 
-function released({ backed = 0n, instant = 0n, queued = 0n, ticketId = 0n, who = owner }) {
+function released({ backed = 0n, instant = 0n, queued = 0n, ticketId = 0n, who = owner, mint: which = mint }) {
   const outcome = concat(u64le(backed), u64le(instant), u64le(queued), u64le(ticketId), i64le(0));
-  return decode({ name: "vault:released", fields: [key(mint), key(who), outcome] });
+  return decode({ name: "vault:released", fields: [key(which), key(who), outcome] });
 }
 
 test("the burst alone does not freeze; crossing half of worst_1h does", () => {
@@ -44,6 +44,39 @@ test("once freezing, tickets to non-allowlisted owners are cancelled, each once"
   assert.equal(a[1].ticketId, 7n);
   const b = assess(s, released({ queued: 5n, ticketId: 8n }), { worst1h, now: 20 });
   assert.deepEqual(b.map((x) => [x.type, x.ticketId]), [["cancel", 8n]]);
+});
+
+test("a cancel names its ticket's own mint, not the mint that triggered the freeze", () => {
+  const other = "11111111111111111111111111111111";
+  const s = newState();
+  assess(s, released({ queued: 10_000n * USDC, ticketId: 7n, mint: other }), { worst1h, now: 0 });
+  const a = assess(s, released({ instant: 200_000n * USDC }), { worst1h, now: 10 });
+  assert.deepEqual(a.map((x) => [x.type, x.ticketId, x.mint]), [["freeze", undefined, undefined], ["cancel", 7n, other]]);
+});
+
+test("thresholds scale in integers past 2^53", () => {
+  assert.equal(scaleBy(1n << 60n, 0.5), 1n << 59n);
+  assert.equal(scaleBy(1n, 0.5), 1n);
+  assert.equal(scaleBy(100n, 1.5), 150n);
+});
+
+test("one mint's outflow does not fill another mint's window", () => {
+  const other = "11111111111111111111111111111111";
+  const s = newState();
+  assert.deepEqual(assess(s, released({ instant: 250_000n * USDC, mint: other }), { worst1h, now: 1 }, DEFAULT_POLICY, false), []);
+  assert.equal(s.freezing, false);
+  assert.equal(breach(s, mint, { worst1h, now: 2 }), null);
+  assert.equal(breach(s, other, { worst1h, now: 2 }).type, "freeze");
+});
+
+test("replaying history records the window and does not veto or freeze by itself", () => {
+  const s = newState();
+  const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0)] });
+  assert.deepEqual(assess(s, ev, { worst1h, now: 0 }, DEFAULT_POLICY, false), []);
+  assert.equal(s.vetoed.size, 0);
+  assess(s, released({ instant: 250_000n * USDC }), { worst1h, worst24h: 2_000_000n * USDC, now: 10 }, DEFAULT_POLICY, false);
+  assert.equal(s.freezing, false);
+  assert.match(breach(s, mint, { worst1h, worst24h: 2_000_000n * USDC, now: 10 }).reason, /last hour/);
 });
 
 test("unapproved loosenings are vetoed once; approved ones are not", () => {
