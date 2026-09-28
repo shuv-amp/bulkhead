@@ -181,6 +181,7 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [12 Submission](docs/12-SUBMISSION.md) | Colosseum checklist, video scripts, Q&A |
 | [13 Sources](docs/13-SOURCES.md) | Every URL and source path |
 | [14 State of the art](docs/14-STATE-OF-THE-ART.md) | Every mechanism compared with the best shipped systems (Wormhole NTT, CCIP, Kamino, Project 0, MetaMorpho, Lido, Aave, network calculus): what we took, what we rejected, why |
+| [15 Adversarial review](docs/15-ADVERSARIAL-REVIEW.md) | An internal red-team pass on the code and the idea: what an attacker who knows every rule gets, what was fixed, what is still open |
 
 ## Credits and license
 
