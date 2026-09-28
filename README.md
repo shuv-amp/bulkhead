@@ -31,12 +31,12 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
 
-> **Status (27 Sep 2026):** built:
+> **Status (28 Sep 2026):** built:
 > - the core math;
 > - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
 > - the Cloud guardian and the status page.
 >
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator. Devnet deployment is next ([plan](docs/10-BUILD-PLAN.md)). **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet), byte-identical to this checkout's build. **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
 
 ## Why the brake must sit in the path of the money
 
@@ -84,6 +84,8 @@ python3 tools/floor_check.py <program-id>   # who can upgrade any mainnet progra
 scripts/floor-demo.sh <program-id>          # Floor on that program's real bytes, locally: register, stop, restore byte-identical
 scripts/deploy-dryrun.sh                    # the devnet deploy, rehearsed on a fresh local validator
 scripts/verify-deployed.sh <url> <id>=<name> # a deployed program runs exactly the code built from this checkout
+scripts/floor-devnet.sh <url> <team.json> <dir>  # Floor's full lifecycle on a live cluster, forbidden actions simulated
+node cloud/deploy/vault-check.mjs <url> <market> # a live market checked without sending anything (needs its keys)
 ```
 
 These scripts install nothing. The core has zero dependencies, and Cloud and the Python code use only their standard libraries.
@@ -98,7 +100,30 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 46/46: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
 | Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
 | End to end | Above |
-| What this process found in our own code and docs | 13 findings: real bugs, one overclaimed guarantee, and test gaps. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| On devnet (28 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured, the page's figures equal to `attest`, 9/9 forbidden actions refused, no payout possible ([below](#on-devnet)) |
+| What this process found in our own code and docs | 17 findings: real bugs, one overclaimed guarantee, test gaps, and deploy-tooling hazards. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+
+## On devnet
+
+Deployed 28 Sep 2026. Anyone can check that the deployed code is exactly this checkout's deterministic build:
+
+```bash
+scripts/verify-deployed.sh https://api.devnet.solana.com HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E=bulkhead_floor \
+  HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b=bulkhead_vault 6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh=bulkhead_harbor
+```
+
+| Program | Devnet id | sha256 of the build |
+|---|---|---|
+| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `ef2b349b…9c324dba` |
+| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `466cc17b…6eca22eb` |
+| Harbor (demo protocol) | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `d91a8ac2…4cb712f2` |
+
+All three share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
+
+- **The demo market:** Harbor over a Vault holding 10,000,000 test USDC (protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet)). Its seal was [proposed](https://explorer.solana.com/tx/3ZJH4YW47LZFbkb51yrDiMmSYaNyzJokYJ8ifRhqUWxcN5A2gbAzibk4BRk7u46kZPurDuJyffMv9oZaFnVoGbQJ?cluster=devnet) and executes from **30 Sep, 20:32 UTC**. Until then no payout of any kind is possible. After it, S1 runs there with `cloud/e2e/s1.sh`, the same script as the local end-to-end run.
+- **Floor S10:** a target program ([`CvZEMDwM…`](https://explorer.solana.com/address/CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs?cluster=devnet)) was registered, [stopped by one guardian](https://explorer.solana.com/tx/VzwPxcMzikf5YRxGvoBhH4qWc8hKteDRKYrHPTEkfZ6BeP3t1xmugaKWNiATmQQaAZp3obrLuSxrPP4CYAQ5jhY?cluster=devnet), [restored byte-identical by two](https://explorer.solana.com/tx/4j61VvmWHfdNSgZnvvuzHsVzBML9NXYcfZLT6SU2AEeRtkD5Wyf39bDq4XvwQy77FmS8C92fPzjAZ2WboDLQR9DY?cluster=devnet), and left armed (`scripts/floor-devnet.sh`).
+
+Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
 
 ## Guarantees
 
@@ -124,12 +149,14 @@ programs/floor/         Floor (Tier 0): holds a program's upgrade key; delay, ve
 programs/vault/         Vault (Tier 1): custody, backed ledger, limiter, tickets, governance, lifeboat
 programs/harbor/        a deliberately naive demo protocol whose custody is a Bulkhead vault
 programs/tests/         LiteSVM: scenarios, negative tests, compute, the program-vs-model differential
-cloud/                  zero-dependency JavaScript: client, guardian bot, status page, end-to-end attack
+cloud/                  zero-dependency JavaScript: client, guardian bot, status page, end-to-end attack,
+                        deployment and live-cluster checks
 tools/floor_check.py    read-only report on any upgradeable program
 reference/              independent Python reference, differential runner, golden vectors, fixtures, Drift model
 evidence/               governance census (script + committed snapshot), model output
 docs/                   the full design (below)
-scripts/                check.sh, check-programs.sh, build-programs.sh, prove.sh, mutants.sh
+scripts/                check.sh, check-programs.sh, build-programs.sh, prove.sh, mutants.sh,
+                        deploy.sh (+ its dry run), verify-deployed.sh, floor-demo.sh, floor-devnet.sh
 ```
 
 The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build for **sBPF v3**. `scripts/build-programs.sh` fails unless each binary is still deployable after SIMD-0500.

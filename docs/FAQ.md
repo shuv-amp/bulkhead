@@ -103,4 +103,4 @@ Measured on the real runtime, through a protocol's CPI:
 See `05 §10` and `06 §7`.
 
 **Is it live?**
-Not yet. The programs pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Devnet deployment is next. Nothing is audited; don't use it with real funds.
+On devnet, yes: since 28 Sep 2026, byte-identical to this repository's build, with test tokens only (ids in the README). Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.

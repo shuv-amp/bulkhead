@@ -139,12 +139,12 @@ The time for half a vault to leave with nobody responding at all is **9 days** (
 | Item | What it is | Why it is not Bulkhead |
 |---|---|---|
 | Drift's own limits | In-protocol, admin-set | The admin raised them |
-| Squads v4/v5 | Multisig timelocks, spending limits, v5 hooks | Treasury accounts; timelock is a setting |
+| Squads v4/v5 | Multisig timelocks, spending limits; v5 ("later this year", not yet on mainnet) adds hooks and key-tier adaptive timelocks | Treasury accounts; timelock is a setting. In v4's code a self-governing multisig lowers its timelock with a config transaction that waits the current timelock, to any value from 0 to 3 months; a controlled multisig's config authority changes it instantly. v5's announcement describes no guardian stop and no delay the multisig can't lower (checked 28 Sep). |
 | Wormhole Governor | Per-chain USD thresholds, 24h delay for large transfers | Bridge-only, guardian-enforced |
 | **Spark ALM Controller (Sky)** | Rate limits bound a fully compromised relayer; freezer can only remove the relayer | **Closest shipped analog.** EVM, one protocol protecting itself. We cite it as validation. |
 | EIP-7265, Phylax, Venn | EVM proposals / sequencer assertions / firewall | EVM |
 | Blockaid Cosigner | Signing-layer policy | Prevents only if the policy catches it |
-| Hypernative, Range | Detection, alerting, optional automated pause | Detectors; act after the fact |
+| Hypernative, Range | Detection, alerting, optional automated pause; offered free to Solana builders (Solana Foundation, 7 Apr 2026, with Neodyme's Riverguard for attack simulation) | Detectors; act after the fact. Free monitoring is why Bulkhead Cloud sells enforcement and operations, not alerts. |
 | hand1111/sentinel (Apr 2026) | CPI-called rate limits, permissionless trip | Authority can loosen instantly; protocol can stop calling it; no custody |
 | Yonkoo11/holdfast (Aug 2026) | 2-of-3 human pause via MagicBlock | Human quorum, after the fact |
 | deanmlittle/sbpf-asm-abort | 136-byte one-transaction stop | Human-pressed, after the fact; we build it into Floor (credited) |
@@ -153,6 +153,9 @@ The time for half a vault to leave with nobody responding at all is **9 days** (
 | svmscope, QEDGen | Upgrade replay, verification tooling | Developer tools; possible partners |
 | Colosseum arena search | — | Not possible without login (client-rendered); re-check logged in on 1 Oct |
 | **Project 0 (marginfi v2)** (checked 27 Sep) | Hourly and daily net-outflow limits per bank and per group, a price circuit breaker, a bounded panic pause (§9) | The strongest in-protocol design we found. Its limits are configured by the protocol's admin or limit admin with immediate effect, so they protect against bugs and outside attackers, not against the admin key. Bulkhead is complementary: a floor under limits like these. |
+| **Ellipsis Labs `timelock-program-authority`** (code from Jan 2023; checked 28 Sep) | Holds a program's upgrade authority; upgrades wait a delay counted in slots (about 1 hour to 2 weeks); the delay changes through a proposal that itself waits; only its authority can cancel | **Prior art for Floor's delay.** Not deployed at its declared id on mainnet or devnet. No guardian veto, no stop, no snapshot restore, and no constant floor (the delay can go down to about an hour). |
+| veto's "Hold" (Arlencho, Solana Mobile hackathon, merged 25 Sep 2026) | A single-owner vault for agent spending: withdrawals over a daily limit, to a new address or above 25% of the balance wait 1–3 days; tightening is instant, loosening waits; a guardian stops pending withdrawals and can recover funds to a preset safe address | The same instincts at wallet level. It protects one owner, so there is no per-depositor backed lane; the delay is configurable; instant recovery to a safe address is the exit Bulkhead's lifeboat deliberately delays (D7). |
+| Hexagate GateSigner (Chainalysis) | Simulates multisig proposals, including Squads, before signers approve; can auto-deny risky ones | Signing layer, like Blockaid Cosigner: prevents what its policy recognizes and trusts its operator. Complementary: it guards the signing, Bulkhead bounds what a signed action can take. |
 | alizeeshan1234/solana-circuit-breaker (Apr 2026, 0 stars) | CPI-called outflow windows, auto-trip, a configurable delay for loosening single-transaction limits | Advisory (the protocol must keep calling it); no custody; the delay is configurable |
 
 ## 9. Project 0 (marginfi v2): a strong in-protocol design, and what it can't do

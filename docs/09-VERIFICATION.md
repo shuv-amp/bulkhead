@@ -77,9 +77,12 @@ scripts/build-programs.sh              # Floor, Vault, Harbor for sBPF v3; check
 cloud/e2e/run.sh                       # validator + guardian + attacker
 node --test cloud/test/*.test.mjs      # client, policy, JS-vs-Python differential
 python3 tools/floor_check.py --self-test
-scripts/deploy-dryrun.sh               # the devnet deploy on a fresh validator; deployed bytes verified; early seal refused
+scripts/deploy-dryrun.sh               # the devnet deploy on a fresh validator: re-run and resume spend nothing, a takeover and an early seal are refused, deployed bytes verified, Floor's lifecycle and the market check pass
 scripts/floor-demo.sh <program-id>     # Floor on a real mainnet program's bytes: register, stop, restore byte-identical
 scripts/verify-deployed.sh <url> <id>=<name>   # deployed code == this checkout's deterministic build
+scripts/floor-devnet.sh <url> <team.json> <dir>   # Floor's full lifecycle on a live cluster; forbidden actions simulated
+node cloud/deploy/vault-check.mjs <url> <market>  # a live market, checked without sending anything
+cloud/e2e/s1.sh <url> <market>                    # S1 with the guardian on any sealed market (the E2E run uses it)
 ```
 
 ## 4. What this process found (every item fixed or stated)
@@ -100,6 +103,9 @@ scripts/verify-deployed.sh <url> <id>=<name>   # deployed code == this checkout'
 | 12 | 26 Sep | Kani (7 attempts ran 20 minutes without an answer) | SAT solvers can't finish multiplier/divider equivalence at useful widths. | Split: Kani for logic, exhaustive enumeration for arithmetic (§5). |
 | 13 | 27 Sep | Mutation testing, the full run after the Floor helpers | Two more test gaps. `program_programdata` was never given another account kind of sufficient length. The backed-amount search's upper bound was untested where the valid set excludes 0; **a 3M-case random search had wrongly suggested that mutant was equivalent**. | A wrong-kind assertion; golden E7 (both implementations, `03 §4.4`). The targeted rerun kills both (§6). |
 | 14 | 27 Sep | Review, while wiring CI | The regression outputs file sat inside `reference/regressions/`, so `scripts/check.sh` tried to replay it as a fixture and failed. | Moved to `reference/golden/regressions-expected.txt`; the fixture directory holds only fixtures. |
+| 15 | 28 Sep | Review, before the devnet deploy | Market setup could not be re-run safely. After a dropped confirmation, a re-run would either fail for good on the already-registered protocol, or **propose the seal again, silently restarting its 72h clock**. Harbor lets anyone register it, so a stranger could also take the protocol first. | Setup resumes: keys saved before use, every step checked on chain, the seal proposed at most once, a foreign registration refused. `scripts/deploy-dryrun.sh` proves each (a lost-progress resume that spends nothing; a takeover refused). |
+| 16 | 28 Sep | The live-market check, on devnet | The page-vs-`attest` cross-check took its clock from `getBlockTime` before simulating. While the reference catches up after a deposit (about 116 units per second here), the two sides saw different seconds and the check failed at random; it had passed once by luck. | Both sides now use the simulation's own Clock sysvar (`cloud/status/snapshot.mjs`, `cloud/deploy/vault-check.mjs`). |
+| 17 | 28 Sep | Review, before the devnet deploy | The JavaScript client wrote keypair files readable by every local user, and a 5xx page from a public RPC crashed it instead of being retried. | Key files owner-only (0600), key folders 0700; 5xx retried with backoff like 429. |
 
 A method that finds a real bug in its own authors' code within minutes, twice, is the best argument for keeping it in CI.
 
@@ -229,7 +235,8 @@ The overflow guards stay in the code as defense in depth; the tests document why
 | **Our own SIMD-0500 check** | `scripts/build-programs.sh` reads each built `.so` with the reference's `elf_info` and fails unless `e_flags == 3` | Floor, Vault, Harbor: v3 |
 | **Compute** | Measured through Harbor's CPI (`05 §10`) and for Floor (`06 §7`) | Within targets |
 | **End-to-end** | A real validator booted with a sealed market; the guardian freezes on its own and cancels; the page's figures equal `attest` | Pass |
-| **Reproducible builds** | A clean rebuild in a different directory reproduces all three binaries' sha256; `scripts/verify-deployed.sh` dumps deployed programs and requires the local build byte for byte (run inside `scripts/deploy-dryrun.sh`) | Deterministic; all three deployed programs verified |
+| **On devnet** | The demo market before its seal, checked without sending anything (`cloud/deploy/vault-check.mjs`); Floor's lifecycle with real transactions on a target program (`scripts/floor-devnet.sh`) | Market: as configured, page = `attest`, 9/9 forbidden actions refused. Floor: stopped, restored byte-identical, 17/17 refused (`08`) |
+| **Reproducible builds** | A clean rebuild in a different directory reproduces all three binaries' sha256; `scripts/verify-deployed.sh` dumps deployed programs and requires the local build byte for byte (run inside `scripts/deploy-dryrun.sh`, and on devnet) | Deterministic; the three devnet programs are byte-identical to it (hashes in `SECURITY.md`) |
 | **After the hackathon** | Certora (CVLR) rules for I8, I11, I12; Trident flows; registering the builds with `solana-verify` | Planned; cut from this submission (they add little a judge can check in the time) |
 
 ## 8. Road to mainnet (not claimed in the submission)

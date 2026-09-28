@@ -224,18 +224,48 @@ export function serializeTransaction(message, signatures) {
 
 // --- JSON-RPC ------------------------------------------------------------------
 export class Rpc {
-  constructor(url) {
+  /**
+   * `minGapMs` spaces requests out (public endpoints limit each IP to about
+   * 100 requests per 10 s); default 0, or BULKHEAD_RPC_GAP_MS. A rate-limited
+   * (429), failing (5xx) or dropped request is retried with backoff; a timeout
+   * is not, so a stuck method fails instead of looping.
+   */
+  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000 } = {}) {
     this.url = url;
+    this.minGapMs = minGapMs;
+    this.timeoutMs = timeoutMs;
+    this.nextAt = 0;
   }
   async call(method, params = []) {
-    const r = await fetch(this.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    });
-    const j = await r.json();
-    if (j.error) throw new Error(`${method}: ${JSON.stringify(j.error)}`);
-    return j.result;
+    for (let attempt = 0; ; attempt++) {
+      if (this.minGapMs) {
+        const at = Math.max(Date.now(), this.nextAt);
+        this.nextAt = at + this.minGapMs;
+        if (at > Date.now()) await new Promise((r) => setTimeout(r, at - Date.now()));
+      }
+      let r;
+      try {
+        r = await fetch(this.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+          signal: AbortSignal.timeout(this.timeoutMs), // never hang on a stuck endpoint
+        });
+      } catch (e) {
+        if (e.name === "TimeoutError" || attempt >= 6) throw new Error(`${method}: ${e.message}`);
+        await new Promise((res) => setTimeout(res, 500 * 2 ** attempt)); // dropped connection: back off
+        continue;
+      }
+      // 429 and 5xx (often an HTML page, not JSON) are transient: back off and retry.
+      const busy = r.status === 429 || r.status >= 500;
+      const j = busy ? { error: { code: r.status } } : await r.json();
+      if (busy && attempt < 6) {
+        await new Promise((res) => setTimeout(res, 1_000 * 2 ** Math.min(attempt, 3)));
+        continue;
+      }
+      if (j.error) throw new Error(`${method}: ${JSON.stringify(j.error)}`);
+      return j.result;
+    }
   }
   /** Reads at "confirmed" by default: guardians must act on what just happened. */
   async account(k, commitment = "confirmed") {
@@ -246,12 +276,18 @@ export class Rpc {
   async blockhash() {
     return (await this.call("getLatestBlockhash", [{ commitment: "confirmed" }])).value.blockhash;
   }
-  /** Runs a transaction without signatures (sigVerify off) and returns its result. */
-  async simulate(feePayer, instructions) {
+  /**
+   * Runs a transaction without signatures (sigVerify off) and returns its
+   * result. `accounts` (addresses) come back as they are after the run, e.g.
+   * the Clock sysvar, to know the exact time the simulation saw.
+   */
+  async simulate(feePayer, instructions, accounts = []) {
     const { message, signers } = compileMessage(feePayer, instructions, await this.blockhash());
     const tx = serializeTransaction(message, signers.map(() => new Uint8Array(64)));
     const b64 = btoa(String.fromCharCode(...tx));
-    return (await this.call("simulateTransaction", [b64, { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" }])).value;
+    const opts = { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" };
+    if (accounts.length) opts.accounts = { encoding: "base64", addresses: accounts.map((a) => b58encode(key(a))) };
+    return (await this.call("simulateTransaction", [b64, opts])).value;
   }
 }
 
@@ -281,6 +317,10 @@ export function decodeProtocol(d) {
     nextTicketId: r.u64(),
     nextChangeId: r.u64(),
     lifeboatDestination: b58encode(r.key()),
+    destinationSetS: Number(r.i64()),
+    sealExecutableS: Number(r.i64()), // 0 until the seal is proposed
+    sealExpiresS: Number(r.i64()),
+    sealVetoed: r.u8() === 1,
   });
   return p;
 }

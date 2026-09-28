@@ -27,7 +27,7 @@ export class Keypair {
     return kp;
   }
   save(path) {
-    writeFileSync(path, JSON.stringify([...this.seed, ...this.publicKey]));
+    writeFileSync(path, JSON.stringify([...this.seed, ...this.publicKey]), { mode: 0o600 }); // owner-only, like solana-keygen
   }
   get address() {
     return b58encode(this.publicKey);
@@ -48,11 +48,11 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
   });
   const tx = Buffer.from(serializeTransaction(message, sigs)).toString("base64");
   const signature = await rpc.call("sendTransaction", [tx, { encoding: "base64", skipPreflight, preflightCommitment: "confirmed" }]);
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 120; i++) {
     const st = (await rpc.call("getSignatureStatuses", [[signature]])).value[0];
     if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);
     if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return signature;
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(`transaction ${signature} not confirmed`);
 }

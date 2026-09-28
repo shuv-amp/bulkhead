@@ -10,7 +10,7 @@ Floor is a small program (`programs/floor`, Pinocchio, one dependency: `bulkhead
 
 It is a separate program from the Vault so each has a small audit surface and its own blast radius.
 
-Status: built, 21 tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`), 56 KB. Devnet deployment pending. Unaudited.
+Status: built, 21 tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`), 56 KB. Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`), byte-identical to this checkout's build, and the full lifecycle has run there (§7). Unaudited.
 
 ## 1. Why it exists
 
@@ -111,7 +111,7 @@ Real agave loader, LiteSVM with the mainnet feature set (`programs/tests/tests/f
 | Stop a ~200 KB program, including byte-for-byte snapshot verification | 10,261 |
 | Restore the ~200 KB snapshot (guardian quorum) | 8,110 |
 
-A snapshot buffer costs rent for a copy of the program (about 6,960 lamports per byte at current rent; about 1.4 SOL for 200 KB). That is the price of a one-instruction, trustless undo.
+A snapshot buffer costs rent for a copy of the program (about 5,080 lamports per byte at current rent, the same on mainnet and devnet on 28 Sep 2026; about 1.04 SOL for 200 KB). The rent is returned when a restore consumes the buffer. That is the price of a one-instruction, trustless undo.
 
 **On a real program** (`scripts/floor-demo.sh <program-id>`, 27 Sep 2026): the script runs a mainnet program's actual bytes on a local validator, with mainnet's feature set and a local team key as the upgrade authority. Run on SPL Stake Pool (`SPoo1Ku8…`, 1,080,464 bytes of sBPF v0 code), it went like this:
 1. `register` moved the upgrade key to Floor in one transaction, and the code was unchanged.
@@ -120,6 +120,14 @@ A snapshot buffer costs rent for a copy of the program (about 6,960 lamports per
 4. **Two** guardians restored it. The code's sha256 was identical to before, and so was the program's behaviour.
 
 The run took 17 s, with zero code changes. The program is v0, so once SIMD-0500 is active, this restore would need a v3 build (§8).
+
+**On devnet** (`scripts/floor-devnet.sh`, 28 Sep 2026), against the deployed Floor with real transactions, on a target program (a copy of Harbor's binary under its own id):
+1. `register`, then the stop staged and a snapshot pinned.
+2. The owner proposed an upgrade. It could not execute before 72h, one guardian vetoed it, and the owner withdrew it.
+3. **One** guardian stopped the program (confirmed in 4.9 s); every call then failed with `FLOR`.
+4. **Two** guardians restored it: byte-identical code, identical behaviour. Then it was re-armed with a new abort and a new snapshot.
+
+Between the steps, 17 forbidden actions were simulated, and each failed with its exact error. The signatures are in `08`, under "Devnet signatures".
 
 ## 8. SIMD-0500: the one-way door
 

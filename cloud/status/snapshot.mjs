@@ -29,10 +29,11 @@ for (const mint of mints.split(",")) {
   console.log(`          pending tickets ${a.pendingTickets} (${fmt(a.queued, d)}); paid out backed ${fmt(v.backedOut, d)} / unbacked ${fmt(v.unbackedOut, d)}; cancelled ${fmt(v.cancelled, d)}`);
   if (payerPath) {
     const onchain = await vc.attest(rpc, Keypair.load(payerPath).publicKey, mint);
+    const at = attestLocal(v, p, balance, onchain.clockS); // the page's figures at the simulation's own clock
     for (const k of ["worst1h", "worst24h", "balance", "queued"]) {
-      if (onchain[k] !== a[k]) {
+      if (onchain[k] !== at[k]) {
         mismatches++;
-        console.log(`MISMATCH ${k}: page ${a[k]} vs program ${onchain[k]}`);
+        console.log(`MISMATCH ${k}: page ${at[k]} vs program ${onchain[k]}`);
       }
     }
     console.log(`          cross-check with the program's attest: ${mismatches ? "MISMATCH" : "identical"}`);

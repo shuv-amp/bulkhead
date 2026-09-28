@@ -47,11 +47,11 @@ Commit at least daily. The repository's first commit date is our prior-code disc
 |---|---|---|---|---|
 | 1 | First commit and push; CI green on a fresh clone | P | Team go-ahead | All three CI jobs green |
 | 2 | Report the runtime-level item privately (`SECURITY.md`) **before** the repository is public | P | — | **Done (27 Sep):** reported and acknowledged. The repository contains no details. Remaining: agree with the maintainer what may be said publicly, and when |
-| 3 | Devnet: `scripts/deploy.sh <devnet-url> <deployer.json>` deploys Floor, Vault and Harbor, registers Harbor, creates the test-USDC vault, deposits 10M and **proposes the seal** (it waits 72h). Rehearsed end to end by `scripts/deploy-dryrun.sh` (passes, ~25 s) | P | Team go-ahead; ~5 devnet SOL | Program ids and signatures in the README |
-| 4 | Devnet, after the seal: S1 and S8 against Harbor; S9 with real Pyth updates posted from Hermes; Floor S10 on a devnet program | P | #3, then 72h | Every signature opens in the explorer |
+| 3 | Devnet: `scripts/deploy.sh <devnet-url> <deployer.json>` deploys Floor, Vault and Harbor, registers Harbor, creates the test-USDC vault, deposits 10M and **proposes the seal** (it waits 72h). Rehearsed end to end by `scripts/deploy-dryrun.sh` | P | Team go-ahead; ~5 devnet SOL | **Done (28 Sep):** deployed, byte-identical to the build; seal proposed, executable from Thu 1 Oct, 02:17 NPT. Ids and signatures in the README and `08` |
+| 4 | Devnet, after the seal: S1 and S8 against Harbor; S9 with real Pyth updates posted from Hermes; Floor S10 on a devnet program | P | #3, then 72h | Every signature opens in the explorer. **Floor S10 done (28 Sep; it needs no seal).** S1: `cloud/e2e/s1.sh` on the devnet market, rehearsed by the local run |
 | 5 | Status page hosted, reading devnet | F | #3 | Works on phone and desktop |
 | 6 | ~~Prover rules (Certora CVLR) and Trident flows~~ **Cut (27 Sep, LLM council):** judges won't check them in the time. After the hackathon. | — | — | — |
-| 7 | Verifiable builds | P | #3 | **Done locally (27 Sep):** the build is deterministic, and `scripts/verify-deployed.sh` proves the deployed code equals the local build (rehearsed). On devnet: run it and publish the three hashes. Optional: register with `solana-verify` (needs its CLI installed; team decision) |
+| 7 | Verifiable builds | P | #3 | **Done locally (27 Sep):** the build is deterministic, and `scripts/verify-deployed.sh` proves the deployed code equals the local build (rehearsed). **On devnet (28 Sep): run; the three hashes are published in `SECURITY.md`.** Optional: register with `solana-verify` (needs its CLI installed; team decision) |
 | 8 | "Break it" hour: three outside builders attack the rules; each finding becomes an issue | B + P | — | Findings list; each fixed or stated |
 | 9 | Demo video (≤ 3:00) and pitch video (2–3 min); three outsiders watch the drafts | F + B | #4 | Exported, captioned, confusion list resolved |
 | 10 | Outreach, calls, LOIs (§6) | B | — | ≥ 3 written statements by Thu 8 Oct |
@@ -62,11 +62,11 @@ Commit at least daily. The repository's first commit date is our prior-code disc
 | Day | Build (P / F) | Business and content (B) | Exit criterion (all true) |
 |---|---|---|---|
 | **Sun 27 Sep** | Docs and CI final pass | Weekly update #1. **Chitwan pitch: date to confirm** (it is not 27 Sep) | `scripts/check.sh` and `E2E=1 scripts/check-programs.sh` pass |
-| **Mon 28** | #1 push, CI; #3 devnet deploy and **seal proposed** (#2 is done) | 15 DMs (§6) | CI green; seal proposal signature recorded (it executes Thu 1 Oct) |
+| **Mon 28** | #1 push, CI; #3 devnet deploy and **seal proposed** (#2 is done) | 15 DMs (§6) | CI green (**open**: the repository has no remote yet); seal proposal signature recorded (**done**, in `08`; it executes Thu 1 Oct) |
 | **Tue 29** | Record the fallback demo (the local end-to-end run and `scripts/floor-demo.sh`); have an outsider read the README top and FAQ (drafted 27 Sep) | Village "break it" hour (#8) | Recording saved; the outsider's confusion list written |
 | **Wed 30** | Fix break-it findings; Chitwan pitch variant | In-room asks: Subal (Unwind); Prince (Hylo, Project 0) | Every finding fixed or stated |
 | **Thu 1 Oct** | #4: the seal executes; S1 and S8 on devnet | **Kill check #1** (sweep: Colosseum arena, GitHub, Squads, Drift) | S1/S8 signatures open in the explorer |
-| **Fri 2** | #4: S9 with Hermes-posted Pyth prices; Floor S10 on a devnet program | 2 calls with protocol teams | S9 and S10 signatures |
+| **Fri 2** | #4: S9 with Hermes-posted Pyth prices; ~~Floor S10 on a devnet program~~ (done 28 Sep) | 2 calls with protocol teams | S9 and S10 signatures |
 | **Sat 3** | #5 status page on devnet; #7 verifiable builds | X thread draft | Page works on a phone |
 | **Sun 4** | Buffer | **Weekly update #2** (S8 GIF); publish the thread | — |
 | **Mon 5** | Deeper program differential (100k steps); compute snapshot | **Kill check #2** (demand) | Differential clean |
@@ -112,8 +112,8 @@ Kill criteria: `00 §Kill criteria`. Checks on Thu 1 Oct, Mon 5 Oct and Sun 11 O
 | LiteSVM lacks loader-v3 `Upgrade` | — | — | S10 runs on LiteSVM through real loader-v3 instructions | Retired |
 | Compute above target | — | — | Measured (`05 §10`, `06 §7`) | Retired |
 | Pyth on devnet (Hermes posting) | M | M | LiteSVM uses Pyth-format accounts; S9 on devnet is the only dependency | Open |
-| Seal's 72h wait on devnet | M | H | Propose on Mon 28 | Open |
-| Devnet faucet limits or outages | M | L | A pre-funded devnet key; the validator run as the fallback | Open |
+| Seal's 72h wait on devnet | M | H | Propose on Mon 28 | Mitigated: proposed 28 Sep; executable from Thu 1 Oct, 02:17 NPT, until Thu 8 Oct |
+| Devnet faucet limits or outages | M | L | A pre-funded devnet key; the validator run as the fallback; a loader that needs no account reads (`cloud/deploy/loader.mjs`, after public devnet's reads failed on 27 Sep) | Retired: deployed 28 Sep with the pre-funded key |
 | "Unaudited" read as "unsafe" | H | M | Say it first; show the verification; TVL-capped mainnet only after audits | Open |
 | Saying too much about the disclosed item | L | H | Say only what `SECURITY.md` says until the maintainer agrees or a fix ships | Open (reported and acknowledged 27 Sep) |
 | Village days reduce build hours | H | M | The build is ahead; cut rules | Open |

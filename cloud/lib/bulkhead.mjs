@@ -53,13 +53,19 @@ export class VaultClient {
     const [c] = await findPda(["change", this.protocol, u64le(id)], this.program);
     return c;
   }
-  /** The live worst case, straight from the program (`attest`, simulated). */
+  /**
+   * The live worst case, straight from the program (`attest`, simulated), and
+   * `clockS`: the unix time the simulation ran at (its Clock sysvar), which a
+   * local computation must use to agree exactly.
+   */
   async attest(rpc, feePayer, mint) {
     const { vault, vaultTokens } = await this.vault(mint);
-    const sim = await rpc.simulate(feePayer, [this.attestIx(vault, vaultTokens)]);
+    const sim = await rpc.simulate(feePayer, [this.attestIx(vault, vaultTokens)], [IDS.clock]);
     if (sim.err) throw new Error(`attest failed: ${JSON.stringify(sim.err)} ${sim.logs?.join(" | ")}`);
     const b = Uint8Array.from(atob(sim.returnData.data[0]), (c) => c.charCodeAt(0));
-    return decodeAttestation(b);
+    const clock = Uint8Array.from(atob(sim.accounts[0].data[0]), (c) => c.charCodeAt(0));
+    const clockS = Number(new DataView(clock.buffer).getBigInt64(32, true)); // Clock.unix_timestamp
+    return { ...decodeAttestation(b), clockS };
   }
 }
 
@@ -115,6 +121,22 @@ export class FloorClient {
       r(IDS.rent), r(IDS.clock), r(this.authority), r(IDS.loaderV3),
       ...guardians.map((g) => s(g)),
     ]);
+  }
+  /** The owner proposes a change (kind: 1 upgrade, 2 restore, ...); an upgrade or restore targets a frozen buffer. */
+  propose(owner, kind, target, payload = new Uint8Array(0)) {
+    const a = [w(this.config), s(owner)];
+    if (kind === 1 || kind === 2) a.push(r(target));
+    return this.ix(4, concat(Uint8Array.of(kind), key(target), payload), a);
+  }
+  /** Anyone executes a pending upgrade or restore once it is allowed. */
+  executeUpgrade(buffer, spill) {
+    return this.ix(7, new Uint8Array(0), [
+      w(this.config), w(this.programdata), w(this.protected), w(buffer), w(spill),
+      r(IDS.rent), r(IDS.clock), r(this.authority), r(IDS.loaderV3),
+    ]);
+  }
+  cancel(owner) {
+    return this.ix(11, new Uint8Array(0), [w(this.config), s(owner)]);
   }
   veto(guardian) {
     return this.ix(5, new Uint8Array(0), [w(this.config), s(guardian)]);

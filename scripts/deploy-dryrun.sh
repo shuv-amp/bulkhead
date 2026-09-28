@@ -2,6 +2,9 @@
 # Rehearse scripts/deploy.sh on a fresh local validator: real loader-v3
 # deploys of all three programs, the full market setup, and a check that the
 # seal is refused before its 72h delay (SealNotExecutable, 8018 = 0x1f52).
+# Also rehearses scripts/floor-devnet.sh (the Floor lifecycle on a deployed
+# target program). LOADER=js SKIP_PREFLIGHT=1 rehearses the path that needs no
+# account reads.
 # Nothing leaves this machine. Requires the Agave CLI v4.3.0 and Node 20+.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,11 +27,57 @@ done
 solana-keygen new --no-bip39-passphrase --silent --force --outfile "$D/deployer.json"
 solana airdrop 50 "$(solana-keygen pubkey "$D/deployer.json")" --url "$RPC" > /dev/null
 
-scripts/deploy.sh "$RPC" "$D/deployer.json" "$D/market"
+scripts/deploy.sh "$RPC" "$D/deployer.json" "$D/market" | tee "$D/deploy.log"
+
+echo "== a second run must change nothing (safe re-run after a network failure)"
+before=$(solana balance "$(solana-keygen pubkey "$D/deployer.json")" --url "$RPC" --lamports)
+rerun=$(scripts/deploy.sh "$RPC" "$D/deployer.json" "$D/market" 2>&1)
+after=$(solana balance "$(solana-keygen pubkey "$D/deployer.json")" --url "$RPC" --lamports)
+skipped=$(echo "$rerun" | grep -c -e "already deployed" -e "market already set up" || true)
+if [ "$skipped" != 4 ] || [ "$before" != "$after" ]; then
+  echo "$rerun" | tail -5
+  echo "DRY RUN FAILED: the re-run was not a no-op ($skipped of 4 steps skipped; balance $before -> $after)"
+  exit 1
+fi
+echo "re-run skipped all 4 steps and spent nothing"
+
+echo "== a market setup cut short resumes from the chain (world.json and progress.json lost)"
+mv "$D/market/world.json" "$D/world.json.first"
+rm "$D/market/progress.json"
+before=$(solana balance "$(solana-keygen pubkey "$D/deployer.json")" --url "$RPC" --lamports)
+scripts/deploy.sh "$RPC" "$D/deployer.json" "$D/market" > "$D/resume.log" 2>&1
+after=$(solana balance "$(solana-keygen pubkey "$D/deployer.json")" --url "$RPC" --lamports)
+found=$(grep -c "already on chain" "$D/resume.log" || true)
+seal_first=$(grep -o 'seal executable from .*' "$D/deploy.log")
+seal_resumed=$(grep -o 'seal executable from .*' "$D/resume.log" || true)
+same_world=$(node -e 'const [a, b] = process.argv.slice(1).map((f) => ({ ...JSON.parse(require("fs").readFileSync(f)), sealProposal: 0 })); console.log(JSON.stringify(a) === JSON.stringify(b))' "$D/world.json.first" "$D/market/world.json")
+if [ "$found" != 13 ] || [ "$before" != "$after" ] || [ "$seal_first" != "$seal_resumed" ] || [ "$same_world" != true ]; then
+  tail -20 "$D/resume.log"
+  echo "DRY RUN FAILED: the resumed setup was not a no-op ($found of 13 steps on chain; balance $before -> $after; $seal_first -> $seal_resumed; same world: $same_world)"
+  exit 1
+fi
+echo "resumed setup found all 13 steps on chain, spent nothing, left the seal time alone ($seal_first) and rebuilt the same world.json"
+
+echo "== a second market must not take over the same Harbor (Harbor lets anyone register it)"
+if out=$(node cloud/deploy/market.mjs setup "$RPC" "$D/other" "$D/deployer.json" "$(solana-keygen pubkey target/deploy/bulkhead_vault-keypair.json)" "$(solana-keygen pubkey target/deploy/bulkhead_harbor-keypair.json)" 2>&1); then
+  echo "DRY RUN FAILED: a second market was set up on the same Harbor"
+  exit 1
+fi
+echo "$out" | grep -q "registered with another admin" || { echo "$out" | tail -5; echo "DRY RUN FAILED: unexpected error"; exit 1; }
+echo "refused: the protocol is registered with another admin"
+
+echo "== the market, checked without sending anything (cloud/deploy/vault-check.mjs, as on devnet)"
+node cloud/deploy/vault-check.mjs "$RPC" "$D/market"
 
 echo "== the deployed programs must run exactly the local build"
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
 SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=bulkhead_harbor"
+echo "== the same check without account reads (cloud/deploy/loader.mjs, getProgramAccounts only)"
+node cloud/deploy/loader.mjs verify "$RPC" "$(solana-keygen pubkey "$D/deployer.json")" \
+  "$(id bulkhead_floor)=target/deploy/bulkhead_floor.so" "$(id bulkhead_vault)=target/deploy/bulkhead_vault.so" "$(id bulkhead_harbor)=target/deploy/bulkhead_harbor.so"
+
+echo "== Floor on a deployed target program (scripts/floor-devnet.sh, as on devnet)"
+scripts/floor-devnet.sh "$RPC" "$D/deployer.json" "$D/floor"
 
 echo "== the seal must be refused before 72h"
 if out=$(node cloud/deploy/market.mjs seal "$RPC" "$D/market" "$D/deployer.json" 2>&1); then

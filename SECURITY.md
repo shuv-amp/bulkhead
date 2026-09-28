@@ -9,7 +9,7 @@
 | `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 13 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, a JavaScript-vs-Python differential, the end-to-end run |
-| Devnet deployment | Not yet | Devnet programs will use a team-held upgrade authority, disclosed here with the program ids |
+| Devnet deployment | Deployed 28 Sep 2026 (below) | `scripts/verify-deployed.sh`: the deployed code equals this checkout's deterministic build, byte for byte |
 
 None of this is an audit. The mainnet path:
 1. two independent audits (a Solana specialist, and a formal-methods review of the core);
@@ -18,6 +18,19 @@ None of this is an audit. The mainnet path:
 4. a public bug bounty;
 5. a TVL-capped first partner;
 6. then burning the upgrade authorities (`docs/09-VERIFICATION.md §8`).
+
+## Devnet deployment
+
+Devnet only; test tokens only. The upgrade authority of all three programs is a **team-held key**:
+`71tqq65ovwE4akm8T5UhfkGE1fJ7qBx5wid11Z5GbHBP`. It can replace the code of any of them. On mainnet it would be burned after audit (G9).
+
+| Program | Devnet id | sha256 of the deployed code (Agave v4.3.0, platform-tools v1.57, sBPF v3) |
+|---|---|---|
+| Floor | `HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E` | `ef2b349b77473643e942afe23e190e7a3ae0e9eda2636d78c58c3b719c324dba` |
+| Vault | `HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b` | `466cc17beb71ebb1f342cec5bc6ac10c333b58e7d537d675fd57bc3a6eca22eb` |
+| Harbor (demo) | `6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh` | `d91a8ac28a3d2bffe07de80f20028a09a1f15c8e7639e5551250c9b54cb712f2` |
+
+The demo market's admin and guardian keys are also team-held. On devnet that is the point: S1 plays the attacker with the admin key.
 
 ## Reporting a vulnerability
 

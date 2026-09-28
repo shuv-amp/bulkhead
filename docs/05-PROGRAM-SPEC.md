@@ -6,7 +6,7 @@ This is the contract between the program, its integrators, the tests and auditor
 - moves tokens;
 - emits events.
 
-Status: built (Pinocchio 0.11, one dependency: `bulkhead-core`), sBPF v3. Tested with 24 scenario and negative tests plus a 12,000-step program-vs-model differential on the real runtime (`09 §7`), and exercised end-to-end on `solana-test-validator` (`cloud/e2e`). Devnet deployment pending. Unaudited.
+Status: built (Pinocchio 0.11, one dependency: `bulkhead-core`), sBPF v3. Tested with 24 scenario and negative tests plus a 12,000-step program-vs-model differential on the real runtime (`09 §7`), and exercised end-to-end on `solana-test-validator` (`cloud/e2e`). Deployed on devnet on 28 Sep 2026 (`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`), byte-identical to this checkout's build (`08`, `SECURITY.md`). Unaudited.
 
 Conventions:
 - `now` = `Clock::unix_timestamp` (seconds); limiter math uses `now_ms = now × 1000`.
