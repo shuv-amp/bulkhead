@@ -11,6 +11,13 @@ export const DEFAULT_POLICY = {
   /** Freeze when unbacked outflow to non-allowlisted owners within the last
    * hour reaches this fraction of the program's own `worst_1h` figure. */
   freezeFractionOfWorst1h: 0.5,
+  /** Freeze when unbacked outflow to non-allowlisted owners within the last
+   * 24 hours reaches this fraction of the program's own `worst_24h` figure.
+   * Without it, an attacker who keeps every rolling hour just under the
+   * 1-hour rule drips out the daily bucket (5%/day by default) forever
+   * (cloud/test/adversarial.test.mjs). 0 disables the rule. Keep it above the
+   * calibrated honest daily unbacked flow (docs/07 §5). */
+  freezeFractionOfWorst24h: 0.5,
   freezeSecs: 86_400,
   /** Owners whose unbacked payouts are expected (fee collectors, market makers). */
   allowlistedOwners: [],
@@ -52,9 +59,10 @@ export function decode(ev) {
 }
 
 /**
- * One event in, zero or more actions out. `ctx.worst1h` is the vault's
- * current 1-hour worst case from `attest` (base units, BigInt); `ctx.now`
- * is unix seconds.
+ * One event in, zero or more actions out. `ctx.worst1h` and `ctx.worst24h`
+ * are the vault's current 1-hour and 24-hour worst cases from `attest` (base
+ * units, BigInt; the 24-hour rule is skipped when `worst24h` is absent);
+ * `ctx.now` is unix seconds.
  */
 export function assess(state, e, ctx, policy = DEFAULT_POLICY) {
   const actions = [];
@@ -64,12 +72,19 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY) {
       const unbacked = e.instant + e.queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, ticketId: e.queued > 0n ? e.ticketId : null });
-      state.outflows = state.outflows.filter((o) => ctx.now - o.t <= 3_600);
-      const lastHour = state.outflows.reduce((s, o) => s + o.amount, 0n);
+      state.outflows = state.outflows.filter((o) => ctx.now - o.t <= 86_400);
+      const sumSince = (secs) => state.outflows.filter((o) => ctx.now - o.t <= secs).reduce((s, o) => s + o.amount, 0n);
+      const lastHour = sumSince(3_600);
       const limit = BigInt(Math.round(Number(ctx.worst1h) * policy.freezeFractionOfWorst1h));
+      const fraction24h = policy.freezeFractionOfWorst24h ?? 0;
+      const lastDay = sumSince(86_400);
+      const limit24h = ctx.worst24h !== undefined && fraction24h > 0 ? BigInt(Math.round(Number(ctx.worst24h) * fraction24h)) : null;
       if (!frozen && lastHour >= limit) {
         state.freezing = true;
         actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last hour: ${lastHour} ≥ ${limit} (${policy.freezeFractionOfWorst1h} × worst_1h)` });
+      } else if (!frozen && limit24h !== null && lastDay >= limit24h) {
+        state.freezing = true;
+        actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)` });
       }
       if ((frozen || state.freezing) && policy.cancelTicketsWhenFrozen) {
         for (const o of state.outflows) {

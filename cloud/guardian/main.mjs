@@ -28,11 +28,13 @@ const state = newState();
 const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
 
 const worst1h = new Map();
+const worst24h = new Map();
 async function refreshWorstCase() {
   for (const mint of cfg.mints) {
     try {
       const a = await vc.attest(rpc, guardian.publicKey, mint);
       worst1h.set(mint, a.worst1h);
+      worst24h.set(mint, a.worst24h);
     } catch (e) {
       log({ level: "warn", msg: `attest failed for ${mint}: ${e.message}` });
     }
@@ -110,7 +112,11 @@ async function main() {
         for (const raw of parseEvents(tx?.meta?.logMessages)) {
           const e = decode(raw);
           if (e.kind === "other") continue;
-          const ctx = { worst1h: worst1h.get(e.mint) ?? worst1h.values().next().value ?? 0n, now };
+          const ctx = {
+            worst1h: worst1h.get(e.mint) ?? worst1h.values().next().value ?? 0n,
+            worst24h: worst24h.get(e.mint) ?? worst24h.values().next().value,
+            now,
+          };
           log({ event: e.kind, signature: s.signature, ...e });
           for (const action of assess(state, e, ctx, policy)) await execute(action, e, s.blockTime);
         }
