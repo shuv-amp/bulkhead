@@ -46,6 +46,14 @@ test("once freezing, tickets to non-allowlisted owners are cancelled, each once"
   assert.deepEqual(b.map((x) => [x.type, x.ticketId]), [["cancel", 8n]]);
 });
 
+test("a cancel names its ticket's own mint, not the mint that triggered the freeze", () => {
+  const other = "11111111111111111111111111111111";
+  const s = newState();
+  assess(s, released({ queued: 10_000n * USDC, ticketId: 7n, mint: other }), { worst1h, now: 0 });
+  const a = assess(s, released({ instant: 200_000n * USDC }), { worst1h, now: 10 });
+  assert.deepEqual(a.map((x) => [x.type, x.ticketId, x.mint]), [["freeze", undefined, undefined], ["cancel", 7n, other]]);
+});
+
 test("thresholds scale in integers past 2^53", () => {
   assert.equal(scaleBy(1n << 60n, 0.5), 1n << 59n);
   assert.equal(scaleBy(1n, 0.5), 1n);

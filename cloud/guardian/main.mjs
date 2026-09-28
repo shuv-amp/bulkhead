@@ -80,7 +80,7 @@ async function execute(action, event, eventTime) {
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       case "cancel": {
-        const { vault } = await vc.vault(event.mint);
+        const { vault } = await vc.vault(action.mint ?? event.mint);
         const ticket = await vc.ticketAddress(action.ticketId);
         const acc = await rpc.account(ticket);
         if (!acc) {

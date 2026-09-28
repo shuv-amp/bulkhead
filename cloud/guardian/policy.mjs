@@ -137,7 +137,9 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
         for (const o of state.outflows) {
           if (o.ticketId !== null && !state.cancelled.has(o.ticketId)) {
             state.cancelled.add(o.ticketId);
-            actions.push({ type: "cancel", ticketId: o.ticketId, reason: `incident: ticket to ${o.owner}` });
+            // The ticket's own mint: the freeze is protocol-wide, so this loop
+            // also cancels other vaults' tickets, and cancel_ticket needs that vault.
+            actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
           }
         }
       }
