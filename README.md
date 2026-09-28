@@ -7,7 +7,7 @@ On 1 April 2026, Drift lost $285M in about twelve minutes of withdrawals. Drift 
 Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once audited, nobody can change it.
 - **The protocol still decides who gets paid. Bulkhead decides how fast.**
 - **Taking back your own deposit is never throttled, frozen or priced.** No oracle, no limit, no freeze.
-- **Everything else leaves at most 2% of a vault per hour and 5% per day.** Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze.
+- **Everything else leaves at most 2% of the reference balance per hour and 5% per day.** The reference lags the live balance by up to 24 hours, so those are not percents of the tokens left after a large backed exit ([15](docs/15-ADVERSARIAL-REVIEW.md)). Each rate refills a bucket of the same size, so the most that can leave is 4% of that reference in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze.
 - **Tightening is instant. Loosening waits 72 hours**, a constant no admin can lower, and any guardian can veto it.
 - **Guardians can stop things. They can never move money.**
 
@@ -17,7 +17,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 |---|---|---|
 | What it holds | The protocol's token accounts | The program's upgrade key |
 | Stops | Money leaving too fast, whatever the cause: a stolen admin key (the Drift class), a buggy payout path, malicious new code in the protocol, even a one-transaction drain | Malicious *new code*: new binaries wait 72h in public, any guardian can stop the program at once, and a quorum restores the exact bytes that were stopped |
-| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of a vault in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
+| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of the reference balance in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
 | Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
 
 **Who the guardians are.** A protocol names 2–8 guardian keys when it registers: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.

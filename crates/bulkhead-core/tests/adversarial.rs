@@ -142,10 +142,8 @@ fn finding_a1_reference_inflation_multiplies_the_unbacked_drain() {
         bound / USDC as u128,
         taken as f64 / bound as f64
     );
-    assert!(
-        taken as u128 >= 4 * bound,
-        "expected a multiple of the bound, got {taken}"
-    );
+    assert_eq!(taken / USDC, 7_799_995, "the figure cited in docs/15");
+    assert!(taken as u128 >= 4 * bound);
 }
 
 /// The same attack when capacities come from `min(reference, live balance)`:
@@ -166,6 +164,7 @@ fn mitigation_a1_min_of_reference_and_balance_restores_the_bound() {
         taken / USDC,
         bound / USDC as u128
     );
+    assert_eq!(taken / USDC, 953_517, "the figure cited in docs/15");
     assert!(taken as u128 <= bound);
 
     // And a deposit one minute before the attack still buys almost nothing
@@ -198,6 +197,8 @@ fn finding_a1_after_a_bank_run_the_burst_is_sized_for_the_old_vault() {
         burst / USDC,
         burst as f64 / advertised as f64
     );
+    assert_eq!(left / USDC, 1_000_000);
+    assert_eq!(burst / USDC, 195_054, "the figure cited in docs/15");
     assert!(burst >= 5 * advertised);
 
     let mut m = Vault::new(vault, true);
@@ -259,4 +260,34 @@ fn clock_stepping_backwards_never_beats_g1() {
         }
     }
     eprintln!("clock steps back: worst paid/G1 = {worst:.4} over {cases} sessions");
+    if cases >= 2_000 {
+        assert!(worst > 0.99 && worst <= 1.0, "worst paid/G1 = {worst}");
+    }
+}
+
+/// A raw token transfer is not a deposit: the reference is not touched and no
+/// backing is credited. Once the vault has been quiet for a day, the next
+/// touch moves the reference the whole way (`dt >= TAU`). `min(reference,
+/// balance)` is then the donated balance, so A1's mitigation does not close
+/// this. The donated tokens have no backing, so they leave through the
+/// limiter they just inflated.
+#[test]
+fn donation_after_a_quiet_day_inflates_even_with_min_balance() {
+    let vault = 10_000_000 * USDC;
+    let mut v = Vault::new(vault, true);
+    v.balance += 90_000_000 * USDC;
+    let taken = drain_for(&mut v, DAY, DAY, 60);
+    let bound = bound_24h_on(vault);
+    eprintln!(
+        "donation: 24h unbacked drain {} USDC vs {} USDC advertised on the pre-donation vault ({:.1}x)",
+        taken / USDC,
+        bound / USDC as u128,
+        taken as f64 / bound as f64
+    );
+    assert_eq!(
+        taken / USDC,
+        9_535_175,
+        "9.5× the pre-donation bound; cited in docs/15"
+    );
+    assert!(taken as u128 >= 4 * bound);
 }

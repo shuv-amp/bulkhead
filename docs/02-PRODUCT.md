@@ -34,7 +34,7 @@ The protocol moves its vault token accounts (and optionally mint authority) unde
 Two lanes:
 - **Backed lane (never throttled, never frozen by Bulkhead):** paying an owner back what their own ledger supports. That means their own deposit, plus borrowing against allowlisted collateral at conservative prices.
 - **Unbacked lane (rate-limited):** everything else. Borrows against unlisted collateral, profits, bonuses, admin withdrawals, unbacked mints.
-  - Instant up to 2% of the vault per hour and 5% per day.
+  - Instant up to 2% of the reference balance per hour and 5% per day. The reference lags the live balance by up to 24 hours ([15](15-ADVERSARIAL-REVIEW.md)).
   - Beyond that, the request becomes a public **ticket** that waits at least 6 hours.
   - Guardians can freeze the lane or cancel tickets.
 
@@ -46,7 +46,7 @@ These are the product. Each has a proof or a test (`03`, `09`).
 
 | ID | Plain words | Precise statement |
 |---|---|---|
-| **G1** | Unbacked money leaves at most 2% per hour and 5% per day of a vault | For any `t0, T ≥ 0`: the unbacked amount requested in `[t0, t0+T]` and paid by `t0+T` is ≤ `C_s·(W_s+T)/W_s` and ≤ `C_l·(W_l+T)/W_l`. It holds with the protocol's admin and upgrade keys compromised. |
+| **G1** | Unbacked money leaves at most 2% per hour and 5% per day of the reference balance | For any `t0, T ≥ 0`: the unbacked amount requested in `[t0, t0+T]` and paid by `t0+T` is ≤ `C_s·(W_s+T)/W_s` and ≤ `C_l·(W_l+T)/W_l`. It holds with the protocol's admin and upgrade keys compromised. `C` is a fraction of the reference, which lags the live balance ([15](15-ADVERSARIAL-REVIEW.md)). |
 | **G2** | Your own deposit is never throttled, frozen or priced | An owner with no liabilities is paid at least `min(amount, own net deposit)` of that mint through the backed lane: no prices are needed, and no freeze or limit applies. (Whether the tokens are in the vault is the pool's liquidity: lending moves deposits out, and a bounded unbacked loss reduces the pool; `03 §4.6`.) |
 | **G3** | The backed lane never pays more than the owner's ledger supports | After any backed payment, either nobody in that ledger owes anything, or health ≥ 0 at conservative prices, or the payment was the owner's own deposit of a mint that is not allowlisted (worth 0 as collateral anyway) |
 | **G4** | Tighten now, loosen later | A change that tightens every field applies instantly. Any other change waits ≥ 72 hours (a constant), is public, any guardian can veto it, and it expires 7 days after becoming executable. A protocol may **abdicate** a change kind forever. |
