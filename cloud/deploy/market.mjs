@@ -19,7 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Rpc, key, findPda, concat, u64le, i64le, IDS, b58encode, decodeProtocol } from "../lib/solana.mjs";
+import { Rpc, key, findPda, concat, u64le, i64le, IDS, b58encode, decodeProtocol, decodeVault } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 
 const DAY = 86_400;
@@ -89,8 +89,18 @@ export const vaultIx = (m, tag, args, accounts) => ({ programId: key(m.vaultProg
 
 export function defaultLimits() {
   // docs/03 §1: 2%/hour, 5%/day, 6h minimum queue delay, no floors or caps.
-  return concat(u16le(200), u32le(3_600), u16le(500), u32le(86_400), u32le(21_600), u64le(0), u64le(0), u64le(0), u64le(0));
+  return limitsWithCaps(0n, 0n);
 }
+
+/** The default limits plus absolute caps in base units (0 = none). */
+export function limitsWithCaps(shortCap, longCap) {
+  return concat(u16le(200), u32le(3_600), u16le(500), u32le(86_400), u32le(21_600), u64le(0), u64le(0), u64le(shortCap), u64le(longCap));
+}
+
+/** The calibration rule (docs/07 §4): caps at the same percentages of the
+ * vault's honest size, here the whale's 10M. They bound capital an attacker
+ * parks in the vault first (docs/15, A1b); at 10M they equal 2% and 5%. */
+export const CAPS = { short: (TVL * 200n) / 10_000n, long: (TVL * 500n) / 10_000n };
 
 export function registerArgs(admin, guardians, destination) {
   return concat(
@@ -257,14 +267,41 @@ async function seal(url, dir, payerPath) {
   console.log(`sealed: ${sig}`);
 }
 
+// Sets the calibrated absolute caps (CAPS) on the market's vault. Tightening, so
+// it applies at once, before or after the seal; a re-run with the caps already
+// set sends nothing.
+async function caps(url, dir, payerPath) {
+  const rpc = new Rpc(url);
+  const payer = Keypair.load(payerPath);
+  const k = keysIn(dir);
+  const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
+  const fmt = (x) => (Number(x) / 1e6).toLocaleString("en-US");
+  const limits = async () => decodeVault((await rpc.account(world.vault)).bytes).limits;
+  const before = await limits();
+  if (before.shortCap === CAPS.short && before.longCap === CAPS.long) {
+    return console.log(`caps already set: ${fmt(CAPS.short)} per 1h, ${fmt(CAPS.long)} per 24h`);
+  }
+  const p = decodeProtocol((await rpc.account(world.protocol)).bytes);
+  const vaultProgram = key(world.vaultProgram);
+  const [change] = await findPda(["change", key(world.protocol), u64le(p.nextChangeId)], vaultProgram);
+  const args = concat(Uint8Array.of(0), key(world.vault), limitsWithCaps(CAPS.short, CAPS.long)); // kind 0: limits
+  const sig = await sendTx(rpc, payer, [vaultIx({ vaultProgram }, 18, args, [
+    s(payer.publicKey, true), s(k.admin.publicKey), w(world.protocol), w(change), r(IDS.system), w(world.vault),
+  ])], [k.admin]);
+  const after = await limits();
+  if (after.shortCap !== CAPS.short || after.longCap !== CAPS.long) throw new Error(`caps not applied: ${after.shortCap} / ${after.longCap}`);
+  console.log(`caps set: ${fmt(CAPS.short)} per 1h, ${fmt(CAPS.long)} per 24h (a tightening, applied at once): ${sig}`);
+}
+
 // The builders above are shared with cloud/deploy/vault-check.mjs; the commands
 // run only when this file is invoked directly.
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd === "setup" && args.length === 5) await setup(...args);
   else if (cmd === "seal" && args.length === 3) await seal(...args);
+  else if (cmd === "caps" && args.length === 3) await caps(...args);
   else {
-    console.error("usage: market.mjs setup <rpc> <dir> <payer.json> <vaultProgram> <harborProgram> | seal <rpc> <dir> <payer.json>");
+    console.error("usage: market.mjs setup <rpc> <dir> <payer.json> <vaultProgram> <harborProgram> | seal <rpc> <dir> <payer.json> | caps <rpc> <dir> <payer.json>");
     process.exit(2);
   }
 }

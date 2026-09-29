@@ -69,7 +69,7 @@ Tests: `after_a_large_backed_withdrawal_the_burst_shrinks_at_once` (program: a 9
 
 Caps alone do not fix the bank-run half of A1 (after a 90% exit they still pay about 20% of what is left); `min` and caps together hold both. Evidence: `finding_a1b_parked_capital_needs_absolute_caps`, `caps_alone_do_not_fix_the_bank_run_but_with_capacity_base_they_do`.
 
-**Status.** Caps (`short_cap`, `long_cap`) already exist: setting or lowering one is a tightening (instant), raising one waits 72h. The calibration rule now sets them at the same percentages of the vault's honest size (`07 §4`). A cap that tracks the vault automatically would need a trusted notion of "honest size", which is what the reference was; that is the open design question.
+**Status.** Caps (`short_cap`, `long_cap`) already exist: setting or lowering one is a tightening (instant), raising one waits 72h. The calibration rule now sets them at the same percentages of the vault's honest size (`07 §4`), and the devnet demo market runs with them since 29 Sep (200,000 / 500,000; `08`, devnet). A cap that tracks the vault automatically would need a trusted notion of "honest size", which is what the reference was; that is the open design question.
 
 ### A2 — The guardian bot can be paced (Medium, fixed here)
 

@@ -17,7 +17,7 @@ import { VaultClient } from "../lib/bulkhead.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 import { Keypair } from "../lib/signer.mjs";
 import { errorName } from "./errors.mjs";
-import { harborIx, vaultIx, registerArgs, defaultLimits } from "./market.mjs";
+import { harborIx, vaultIx, registerArgs, defaultLimits, CAPS } from "./market.mjs";
 
 const [url, dir] = process.argv.slice(2);
 if (!dir) {
@@ -89,9 +89,14 @@ check("loosening waits 72h", p.loosenDelayS === 3 * DAY);
 check("lifeboat destination is keys/lifeboat-destination", p.lifeboatDestination === destination.address);
 check("one vault: the test USDC mint, 6 decimals, its token account", p.vaultCount === 1 && v.mint === wld.mint && v.decimals === 6 && v.tokenAccount === wld.vaultTokens);
 const L = v.limits;
-check("limits: 2% per 1h, 5% per 24h, 6h queue delay, no floors or caps",
+check("limits: 2% per 1h, 5% per 24h, 6h queue delay, no floors",
   L.shortBps === 200 && L.shortWindowS === 3_600 && L.longBps === 500 && L.longWindowS === DAY && L.minQueueDelayS === 6 * 3_600 &&
-  L.shortFloor === 0n && L.longFloor === 0n && L.shortCap === 0n && L.longCap === 0n);
+  L.shortFloor === 0n && L.longFloor === 0n);
+// Either none (as set up) or the calibrated caps (market.mjs caps): anything else is wrong.
+const noCaps = L.shortCap === 0n && L.longCap === 0n;
+const calibrated = L.shortCap === CAPS.short && L.longCap === CAPS.long;
+check(noCaps ? "absolute caps: none" : "absolute caps: 2% and 5% of the 10M (docs/07 §4)", noCaps || calibrated,
+  noCaps ? "" : `${(Number(L.shortCap) / 1e6).toLocaleString("en-US")} per 1h, ${(Number(L.longCap) / 1e6).toLocaleString("en-US")} per 24h`);
 if (p.sealed) {
   console.log(`   (sealed: balance ${(Number(balance) / 1e6).toLocaleString("en-US")} test USDC, pending tickets ${v.pendingTickets})`);
 } else {

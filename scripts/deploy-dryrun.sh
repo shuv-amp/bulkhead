@@ -69,6 +69,12 @@ echo "refused: the protocol is registered with another admin"
 echo "== the market, checked without sending anything (cloud/deploy/vault-check.mjs, as on devnet)"
 node cloud/deploy/vault-check.mjs "$RPC" "$D/market"
 
+echo "== absolute caps (market.mjs caps: a tightening, applied at once; a re-run sends nothing)"
+node cloud/deploy/market.mjs caps "$RPC" "$D/market" "$D/deployer.json"
+node cloud/deploy/market.mjs caps "$RPC" "$D/market" "$D/deployer.json" | tee "$D/caps-again.log"
+grep -q "caps already set" "$D/caps-again.log" || { echo "DRY RUN FAILED: setting the caps again sent a transaction"; exit 1; }
+node cloud/deploy/vault-check.mjs "$RPC" "$D/market" | grep -E "absolute caps|attest|VAULT CHECK"
+
 echo "== the deployed programs must run exactly the local build"
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
 SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=bulkhead_harbor"
