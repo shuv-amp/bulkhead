@@ -1,7 +1,7 @@
 //! Views: the worst case, readable on-chain.
 
 use crate::*;
-use bulkhead_core::limiter::{available_now, max_unbacked_over, params_from_config};
+use bulkhead_core::limiter::{available_now, capacity_base, max_unbacked_over, params_from_config};
 
 // ---------------------------------------------------------------------------
 // 22. attest
@@ -30,7 +30,7 @@ pub fn attest(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResu
     let balance = token::balance(acc(accounts, 2)?)?;
     let mut v2 = v.clone();
     touch_reference(&mut v2, balance, t);
-    let params = params_from_config(&v2.limits, v2.ref_balance);
+    let params = params_from_config(&v2.limits, capacity_base(v2.ref_balance, balance));
     let frozen = p.frozen_until.max(v.frozen_until);
     let now_ms = t.saturating_mul(1_000);
     let instant = if t < frozen {

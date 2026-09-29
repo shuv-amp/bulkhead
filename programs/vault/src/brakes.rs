@@ -202,6 +202,8 @@ pub fn reset_backlog(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     let t = now()?;
     guardian_or_admin(&p, acc(accounts, 2)?, t)?;
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
+    // A reset only clamps each bucket to "just emptied" (now + window); it
+    // never reads a capacity, so the reference alone is enough here.
     let params = params_from_config(&v.limits, v.ref_balance);
     let mut state = v.limiter_state();
     core_reset(
@@ -218,9 +220,14 @@ pub fn reset_backlog(program_id: &Address, accounts: &mut [AccountView]) -> Prog
 }
 
 // ---------------------------------------------------------------------------
-// 17. abdicate: the admin permanently gives up a change kind (Morpho V2).
+// 17. abdicate: the admin, with a live guardian quorum, permanently gives up
+//     loosening a change kind (Morpho V2). Tightening that kind stays possible.
 // ---------------------------------------------------------------------------
-// Accounts: 0 protocol [w], 1 admin [s]. Data: kind u8.
+// Accounts: 0 protocol [w], 1 admin [s], 2.. guardians [s] forming a live quorum.
+// Data: kind u8.
+// The quorum is required because abdication can't be undone: an admin key
+// alone (possibly stolen) must not be able to give up SetAdmin or
+// SetGuardians and keep the protocol locked to it forever (docs/15, A3).
 pub fn abdicate(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> ProgramResult {
     let kind = state::R::args(args).u8()?;
     if kind >= state::change::COUNT {
@@ -228,6 +235,11 @@ pub fn abdicate(program_id: &Address, accounts: &mut [AccountView], args: &[u8])
     }
     let mut p = load_protocol(program_id, acc(accounts, 0)?)?;
     require_admin(&p, acc(accounts, 1)?)?;
+    let alive = p.alive_mask(now()?);
+    let signers = guardian_signers(&p, accounts.get(2..).unwrap_or(&[]))?;
+    if !quorum(signers & alive, alive, p.threshold) {
+        return Err(VaultError::NoQuorum.into());
+    }
     p.abdications = Abdications(p.abdications).abdicate(kind).0;
     save(&mut accounts[0], |d| p.store(d))?;
     sys::event(&[b"vault:abdicated", &[kind]]);

@@ -60,7 +60,9 @@ export function maxUnbackedOver(params, tMs) {
 /** What `attest` returns, computed from a decoded vault and protocol. */
 export function attestLocal(vault, protocol, balance, nowS) {
   const reference = emaUpdate(vault.refBalance, vault.refUpdatedS, balance, nowS, vault.refInitialized);
-  const params = paramsFromConfig(vault.limits, reference);
+  // Same base as the program: min(reference, live balance) (docs/15, A1).
+  const live = BigInt(balance);
+  const params = paramsFromConfig(vault.limits, reference < live ? reference : live);
   const frozenUntil = Math.max(protocol.frozenUntil, vault.frozenUntil);
   const nowMs = BigInt(nowS) * 1000n;
   const cap = (x) => (x > U64_MAX ? U64_MAX : x);

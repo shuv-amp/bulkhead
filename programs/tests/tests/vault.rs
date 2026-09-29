@@ -10,7 +10,7 @@ mod common;
 
 use bulkhead_core::ema::ema_update;
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
-use bulkhead_core::limiter::{params_from_config, request, Decision, LimiterState};
+use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterState};
 use common::vault::*;
 use common::*;
 use solana_address::Address;
@@ -306,7 +306,8 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
         long_cap: 0,
     };
     // The model tracks the reference balance exactly as the program must: an
-    // EMA of the vault balance, updated before every release.
+    // EMA of the vault balance, updated before every release. Capacities come
+    // from the lower of the reference and the balance before the release.
     let mut model = LimiterState::default();
     let (mut reference, mut ref_at, mut ref_init) = (0u64, 0i64, false);
     let mut balance = 10_000_000 * USDC;
@@ -327,7 +328,7 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
         assert_eq!(o.backed, 0, "the attacker has no deposits: nothing is backed");
         reference = ema_update(reference, ref_at, balance, w.env.time, ref_init);
         ref_at = w.env.time;
-        let params = params_from_config(&cfg, reference);
+        let params = params_from_config(&cfg, capacity_base(reference, balance));
         match request(&mut model, &params, w.env.time * 1_000, amount, 0).unwrap() {
             Decision::Instant => {
                 assert_eq!((o.instant, o.queued), (amount, 0), "minute {minute}");
@@ -685,6 +686,28 @@ fn an_unvetoed_loosening_executes_after_the_delay() {
     assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 300_000 * USDC);
 }
 
+/// A1 on the real runtime: after a large backed withdrawal, the burst is sized
+/// from what is left (min of the 24h reference and the live balance), not from
+/// the reference that still remembers the money that left.
+#[test]
+fn after_a_large_backed_withdrawal_the_burst_shrinks_at_once() {
+    let mut w = World::new();
+    let small = w.user();
+    let whale = w.user();
+    w.deposit("usdc", &small, 1_000_000 * USDC);
+    let whale_acc = w.deposit("usdc", &whale, 9_000_000 * USDC);
+    w.seal();
+    w.env.advance(2 * DAY); // the reference catches up with 10M
+    assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 200_000 * USDC);
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_000_000 * USDC, &w.usdc_prices(false));
+    let m = w.env.ok(&[ix], &[&whale]);
+    assert_eq!(outcome(&m).backed, 9_000_000 * USDC, "own deposit: backed and instant");
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!(a.balance, 1_000_000 * USDC);
+    // Before the fix this stayed at ~200,000 (sized for the 10M that left).
+    assert_eq!(a.available_now, 20_000 * USDC, "2% of the 1M that is left");
+}
+
 #[test]
 fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     let mut w = World::new();
@@ -692,15 +715,54 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     let zero = Address::default();
     let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(DAY).to_le_bytes(), None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_BELOW_MINIMUM);
-    // Abdicate "set admin" (kind 3): it can never be proposed again.
-    let abdicate = w.m.vault_ix(
-        17,
-        &[3],
-        vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.admin.pubkey(), true)],
-    );
-    w.env.ok(&[abdicate], &[&w.m.admin]);
+    let abdicate = |w: &World, kind: u8, guardians: &[Address]| {
+        let mut a = vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.admin.pubkey(), true)];
+        a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        w.m.vault_ix(17, &[kind], a)
+    };
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    // A3: the admin key alone (possibly stolen) can't abdicate, nor with one guardian.
+    let ix = abdicate(&w, 3, &[]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NO_QUORUM);
+    let ix = abdicate(&w, 3, &[g0]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin, &w.m.g[0]]), verr::NO_QUORUM);
+    // With a live guardian quorum, "set admin" (kind 3) is gone forever.
+    let ix = abdicate(&w, 3, &[g0, g1]);
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
     let new_admin = Keypair::new().pubkey();
     let ix = w.m.propose_change_ix(&w.env, 3, &new_admin, &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+}
+
+#[test]
+fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let abdicate = w.m.vault_ix(
+        17,
+        &[0], // SetLimits
+        vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+            AccountMeta::new_readonly(g0, true),
+            AccountMeta::new_readonly(g1, true),
+        ],
+    );
+    w.env.ok(&[abdicate], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    // Tightening still applies at once: making things safer never waits.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 100_000 * USDC);
+    // Loosening is refused forever.
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 300;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
 }
 
@@ -922,13 +984,16 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     w.env.ok(&[drain], &[&legacy_admin]);
     assert_eq!(w.env.balance(&thief_acc), 10_000_000 * USDC, "legacy: 100% in one transaction");
 
-    // Bulkhead: the same attacker packs ten 100,000 USDC payouts into ONE transaction.
+    // Bulkhead: the same attacker packs ten payouts into ONE transaction. The
+    // burst is 2% of what is in the vault at each payout: 100,000 of the 10M,
+    // then 99,000 of the 9.9M left fill it exactly; the rest queue.
     let attacker = Keypair::new();
     let loot = w.account("usdc", &attacker.pubkey());
     let (base, _) = w.m.next_ticket(&w.env);
     let mut ixs = Vec::new();
     for k in 0..10u64 {
-        let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &loot, &attacker.pubkey(), 100_000 * USDC, &w.usdc_prices(true));
+        let amount = if k == 1 { 99_000 } else { 100_000 } * USDC;
+        let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &loot, &attacker.pubkey(), amount, &w.usdc_prices(true));
         // The first two fit the burst; each later one becomes ticket base + (k - 2).
         let id = base + k.saturating_sub(2);
         let ticket = pda(&[b"ticket", w.m.protocol.as_ref(), &id.to_le_bytes()], &w.m.vault_program);
@@ -936,7 +1001,7 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
         ixs.push(ix);
     }
     let m = w.env.ok(&ixs, &[&w.m.admin]);
-    assert_eq!(w.env.balance(&loot), 200_000 * USDC, "Bulkhead: exactly the 2% burst inside the transaction");
+    assert_eq!(w.env.balance(&loot), 199_000 * USDC, "Bulkhead: only the 2% burst inside the transaction");
     assert!(m.compute_units_consumed < 1_400_000);
     let a = w.m.attest(&mut w.env, &w.usdc);
     assert_eq!((a.pending, a.queued), (8, 800_000 * USDC), "the rest waits in public");
@@ -951,6 +1016,6 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
         let ix = w.m.cancel_ix(&w.usdc, &t, &g0, &w.env.payer.pubkey());
         w.env.ok(&[ix], &[&w.m.g[0]]);
     }
-    assert_eq!(w.env.balance(&loot), 200_000 * USDC);
-    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 9_800_000 * USDC, "98% stays");
+    assert_eq!(w.env.balance(&loot), 199_000 * USDC);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 9_801_000 * USDC, "98% stays");
 }
