@@ -30,7 +30,7 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Bounded proofs (Kani)** | 13 harnesses: logic at full width, 2 at small width (§5) | **13/13 verified**, 209 s |
 | **Mutation testing** | `cargo-mutants` on the core: 647 mutants (§6) | Every non-equivalent mutant killed; 22 equivalents, each explained |
 | **Program tests** | Floor (21) and Vault (27) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 48/48 |
-| **Program ↔ model differential** | Random operation sequences on-chain vs a host model built only from the core; invariants after every step (§7) | 12,000 steps across 24 seeds, identical |
+| **Program ↔ model differential** | Random operation sequences on-chain vs a host model built only from the core; invariants after every step (§7) | 12,000 steps across 24 seeds, identical; 24,000 steps across 24 seeds after the A1 fix (29 Sep), identical |
 | **End-to-end** | `solana-test-validator` + the programs + the Cloud guardian + an attacker (`cloud/e2e/run.sh`) | Attacker ordered 1.2M and got 100k: the burst is 2% of what is in the vault at each payout, so the second 100k no longer fit (200k before the 29 Sep fix); guardian froze 2–6 s after the triggering block (across runs); every queued payout cancelled; page numbers equal to `attest`; the run fails unless all of this holds |
 | **Client tests** | 25 JavaScript tests: base58, legacy messages, PDA derivation against an on-chain address, 256 curve25519 vectors from `curve25519-dalek`, RFC 8032 test vector 1, the guardian's policy and its follower, a paced attacker against the policy, the 40,000-case JS-vs-Python differential | 25/25 |
 | **`floor check` self-test** | The Python on-curve test against the same 256 dalek vectors | Agrees on all 256 |
@@ -184,6 +184,7 @@ Each of these ran for the full 20-minute cap without an answer:
 | 5 | 27 Sep | The four changed files, after new unit and Floor tests | 520 | 442 | 3 | 23 | 52 |
 | 6 | 27 Sep | The whole core (38 min) | 650 | 565 | 3 | 26 | 56 |
 | 7 | 27 Sep | `floor.rs` and `ledger.rs` after the fixes below | 318 | 256 | 3 | 10, all equivalent | 49 |
+| 8 | 29 Sep | `limiter.rs` after `capacity_base` (`15`, A1) | 123 | 113 | 0 | 8, all equivalent | 2 |
 
 **Run 6's 26 survivors.** 18 are run 3's equivalents (some at new line numbers). The other 8:
 - **`program_programdata` (`||` → `&&`): a real test gap.** The parser was never given another kind of loader account long enough to parse. Now asserted in `loader_v3_headers_parse_exactly`.
@@ -192,6 +193,8 @@ Each of these ran for the full 20-minute cap without an answer:
 - **4 new equivalents**, listed below.
 
 Every timeout since run 3 is in the backed-amount search: the mutated `hi - lo` or `mid - 1` makes the loop never end.
+
+**Run 8 and hand-planted mutants (29 Sep).** Run 8's 8 survivors are the limiter's equivalents listed below, nothing new. cargo-mutants only replaces `capacity_base`'s result with 0 or 1, so the mutants that matter were planted by hand and each one fails a test: `max` instead of `min`, the reference alone, the balance alone, and `min(balance, reference - 1)` (unit and adversarial tests). The fixes in the Vault program were mutated the same way, since cargo-mutants doesn't reach the programs: abdication without the quorum, abdication blocking tightening again, and `release` sized from the reference alone. Each fails a LiteSVM test. The last one first failed only S1's ETA check, which exposed a gap: the A1 program test checked `attest` but not the payout path. It now also asserts that a 25,000 unbacked payout queues after the whale's exit (instant under the old rule).
 
 **Result:** every non-equivalent mutant is killed. Each real gap the tool found became a named test or golden vector:
 - a lowered nonzero cap classifying as `Tighten`;
