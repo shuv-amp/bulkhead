@@ -74,8 +74,8 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 | 14 | `heartbeat` | live guardian | a dead guardian can't revive itself | — |
 | 15 | `eject(target)` | live quorum of the *other* guardians | stays ≥ threshold | Removes the guardian at once |
 | 16 | `reset_backlog` | admin or live guardian | zero pending tickets | Each bucket clamped to "just emptied" |
-| 17 | `abdicate(kind)` | admin | — | That change kind is gone forever (Morpho V2) |
-| 18 | `propose_change(kind, target, payload)` | admin | not abdicated; valid; core classification | Tighten (or genesis) → applied now. Loosen → `Change` executable after ≥ 72h, expiring 7 days later. |
+| 17 | `abdicate(kind)` | admin + live guardian quorum | — | Loosening that change kind is gone forever (Morpho V2); tightening it stays instant |
+| 18 | `propose_change(kind, target, payload)` | admin | valid; core classification; a loosening of an abdicated kind is refused | Tighten (or genesis) → applied now. Loosen → `Change` executable after ≥ 72h, expiring 7 days later. |
 | 19 / 21 / 20 | `veto_change` / `cancel_change` / `execute_change` | live guardian / admin / anyone | execute: executable, not vetoed, not expired, not abdicated; payload re-validated | Applies the change |
 | 22 | `attest` | none | — | Returns the live worst case (§6) |
 | 24 / 25 | `lifeboat_move` / `lifeboat_return` | admin / admin or live quorum | — | Vault ↔ lifeboat (a Bulkhead-held account) |

@@ -62,10 +62,11 @@ invoke_signed_with_bounds::<MAX, &AccountView>(&release_ix, &accounts, &[Signer:
 Inputs: the last 90 days of the protocol's outflows per vault (from its events or an indexer), vault balances, and historical Pyth prices.
 
 1. Replay each historical outflow through `bulkhead-core` (the backed amount at the prices of that moment); the rest is the unbacked part.
-2. For each vault, compute the maximum unbacked sum over any 1-hour window and any 24-hour window, as a fraction of the reference balance at that time.
+2. For each vault, compute the maximum unbacked sum over any 1-hour window and any 24-hour window, as a fraction of the capacity base at that time (the lower of the reference and the live balance, `03 §3`).
 3. Set `short_bps ≥ 1.5 × max hourly` and `long_bps ≥ 1.5 × max daily`, never below the defaults (2%, 5%) unless the history is flat.
-4. Report how many historical requests *would have queued* under the chosen values. The target is zero.
-5. Publish the report. It is the evidence that honest users never notice.
+4. Set absolute caps (`short_cap`, `long_cap`, in tokens) at the same percentages of the vault's honest size, for example its 30-day median balance. Without caps, an attacker who parks their own capital in the vault raises the base while it is there (`15`, A1b). Lowering a cap is instant; raising one waits 72h, so review caps as the vault grows.
+5. Report how many historical requests *would have queued* under the chosen values. The target is zero.
+6. Publish the report. It is the evidence that honest users never notice.
 
 Harbor is calibrated synthetically. Real calibration happens with the first design partner.
 

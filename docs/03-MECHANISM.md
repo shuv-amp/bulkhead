@@ -131,7 +131,7 @@ The property test `g1_dual_bucket_bound_holds_with_freezes_cancels_and_resets` c
 
 - It bounds the **unbacked** lane only. The backed lane is bounded by G3 instead.
 - It is per vault. A protocol with vaults `v` loses at most `Σ_v bound_v`. With every vault at the same percentages, that is the same percentage of TVL.
-- It assumes capacity is constant over the window. Capacity comes from the reference balance (§3), which moves at most `dt/24h` toward the live balance. Using the maximum capacity over the window keeps the bound valid.
+- It assumes capacity is constant over the window. Capacity comes from `min(reference, live balance)` (§3): the reference moves at most `dt/24h` toward the live balance, and the live balance changes with every payment. Using the maximum capacity over the window keeps the bound valid.
 
 ## 3. The reference balance (EMA)
 
@@ -140,10 +140,15 @@ ema_update(ref, last_s, balance, now_s, initialized):
     if !initialized: return balance
     f = min(max(0, now_s − last_s), 86 400)
     return ref + ⌊(balance − ref) · f / 86 400⌋        (toward balance, truncated toward ref)
-capacity_k = clamp(⌊ref · bps_k / 10 000⌋, floor_k, cap_k if cap_k > 0)   (saturating at u64::MAX)
+base       = min(ref, balance)                     (capacity_base; balance before the operation)
+capacity_k = clamp(⌊base · bps_k / 10 000⌋, floor_k, cap_k if cap_k > 0)   (saturating at u64::MAX)
 ```
 
 It is updated on every touch, **before** the operation.
+
+**Why the lower of the two** (`15`, A1). The reference alone rises slowly, which is the point (G-8), but it also falls slowly: after a large backed exit or a bank run, capacity stayed sized for money that had left (7.8× the daily bound on what was left, in the adversarial test). With `min`, money that arrives still counts slowly and money that leaves stops counting at once. It only ever lowers a capacity, so it is a tightening at every instant. Every unbacked payout also shrinks the base, so a burst is 2% of what is in the vault at each payout: 100,000 of a 10,000,000 vault, then 99,000 of the 9,900,000 left (S8).
+
+**Absolute caps** (`cap_k`, in tokens; 0 means none). `min` does not help against capital the attacker parks in the vault itself: deposit, wait for the reference, drain while the deposit is still there, then take it back through the backed lane (`15`, A1b: 19.8% of the honest depositors' money in a 2-minute attack on a 10M vault next to 90M parked). Caps near the vault's honest size bring that back to the G1 bound (2.1%). Setting or lowering a cap is a tightening (instant); raising it is a loosening (72h). Calibration sets both (`07 §4`).
 
 **G-8:** an attacker deposits 100,000,000 USDC into a 10,000,000 USDC vault one minute before attacking. The reference moves from 10,000,000 to 10,069,444 (1/1440 of the way), so capacity rises 0.7%, not 11×.
 
@@ -339,6 +344,8 @@ quorum(approvals, alive, k)   = k > 0 and |approvals ∧ alive| ≥ k          (
 can_eject(appr, alive, k, g, n) = g < n ≤ 8, k ≥ 2, n > k, and quorum(appr ∧ members(n) ∧ ¬bit(g), alive, k)
 abdicate(mask, kind)          = mask | bit(kind)                         (never clears a bit)
 ```
+
+In the program, `abdicate` needs the admin **and** a live guardian quorum, and an abdicated kind refuses only loosening: tightening it still applies at once. An admin key alone, possibly stolen, could otherwise give up `SetAdmin` and keep the protocol locked to it forever (`15`, A3).
 
 **Why ejection exists: the Security Council model.**
 - Any single live guardian may *stop* things (freeze, veto, cancel, abort).

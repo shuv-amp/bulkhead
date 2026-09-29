@@ -42,8 +42,8 @@ Re-read the official rules on Sun 11 Oct.
 ## 4. Demo video (≤ 3:00, screen only)
 
 1. **0:00–0:30** Terminal: `scripts/check.sh` and the `scripts/prove.sh` summary. Every rule stated independently in Rust and Python and checked on millions of cases; 13 bounded proofs; the bugs these checks found in our own code (`09 §4`).
-2. **0:30–1:20** S8: the one-transaction attack. Legacy drained despite a next-slot stop; protected: ten payouts in one transaction, exactly the 200k burst paid, 800k waiting in public.
-3. **1:20–1:50** S1 live (`E2E=1 scripts/check-programs.sh`, or devnet once deployed): the attacker orders 1.2M and gets 200k; the Cloud guardian freezes on its own within seconds and cancels every queued payout; the status page shows the worst case.
+2. **0:30–1:20** S8: the one-transaction attack. Legacy drained despite a next-slot stop; protected: ten payouts in one transaction, 199k paid (the 2% burst, sized to what is in the vault at each payout), 800k waiting in public.
+3. **1:20–1:50** S1 live (`E2E=1 scripts/check-programs.sh`, or devnet once deployed): the attacker orders 1.2M and gets 100k; the Cloud guardian freezes on its own within seconds and cancels every queued payout; the status page shows the worst case.
 4. **1:50–2:15** S4 and S9: bank run 100% instant with zero tickets; honest borrower 100% backed. "Nobody noticed Bulkhead."
 5. **2:15–2:40** S7 and S10: a loosening waits 72h and gets vetoed. Then `scripts/floor-demo.sh` on a real mainnet program's bytes: Floor takes its key with zero code changes, one guardian stops it, and two restore it byte-identical (the Dean Little question, answered on screen).
 6. **2:40–3:00** Status page line: "Worst case right now: $X, then $Y/hour, at most $Z/day."

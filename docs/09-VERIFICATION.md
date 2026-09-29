@@ -25,13 +25,14 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Property tests** | 21 tests, seeded SplitMix64; `BULKHEAD_CASES` scales depth; coverage floors (proportional to depth) make vacuous passes fail | Pass at 1.5k, 3k, 20k and 100k cases each |
 | **Exhaustive checks** | 5 tests: every input of a small domain for the arithmetic properties (§5.2) | ~25.7M inputs |
 | **Floor core tests** | 10 tests: the sBPF v3 strict ELF rules restated, murmur3 published vectors, loader-v3 headers, snapshot identity | Pass |
-| **Targeted unit tests** | 16 tests, each written to kill a surviving mutant (§6) | Pass |
+| **Targeted unit tests** | 17 tests: 16 each written to kill a surviving mutant (§6), and `capacity_base` | Pass |
+| **Adversarial tests** | 7 tests (`crates/bulkhead-core/tests/adversarial.rs`): the attacks of `15` run through the real core, before and after each fix | Pass |
 | **Bounded proofs (Kani)** | 13 harnesses: logic at full width, 2 at small width (§5) | **13/13 verified**, 209 s |
 | **Mutation testing** | `cargo-mutants` on the core: 647 mutants (§6) | Every non-equivalent mutant killed; 22 equivalents, each explained |
-| **Program tests** | Floor (21) and Vault (25) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 46/46 |
+| **Program tests** | Floor (21) and Vault (27) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 48/48 |
 | **Program ↔ model differential** | Random operation sequences on-chain vs a host model built only from the core; invariants after every step (§7) | 12,000 steps across 24 seeds, identical |
-| **End-to-end** | `solana-test-validator` + the programs + the Cloud guardian + an attacker (`cloud/e2e/run.sh`) | Attacker ordered 1.2M, got the 200k burst; guardian froze 2–6 s after the triggering block (across runs); every queued payout cancelled; page numbers equal to `attest`; the run fails unless all of this holds |
-| **Client tests** | 11 JavaScript tests: base58, legacy messages, PDA derivation against an on-chain address, 256 curve25519 vectors from `curve25519-dalek`, RFC 8032 test vector 1, the guardian's policy, the 40,000-case JS-vs-Python differential | 11/11 |
+| **End-to-end** | `solana-test-validator` + the programs + the Cloud guardian + an attacker (`cloud/e2e/run.sh`) | Attacker ordered 1.2M and got 100k: the burst is 2% of what is in the vault at each payout, so the second 100k no longer fit (200k before the 29 Sep fix); guardian froze 2–6 s after the triggering block (across runs); every queued payout cancelled; page numbers equal to `attest`; the run fails unless all of this holds |
+| **Client tests** | 25 JavaScript tests: base58, legacy messages, PDA derivation against an on-chain address, 256 curve25519 vectors from `curve25519-dalek`, RFC 8032 test vector 1, the guardian's policy and its follower, a paced attacker against the policy, the 40,000-case JS-vs-Python differential | 25/25 |
 | **`floor check` self-test** | The Python on-curve test against the same 256 dalek vectors | Agrees on all 256 |
 | **Lint** | `cargo fmt --check`, `cargo clippy -D warnings` on every crate and program | Clean |
 
@@ -72,7 +73,7 @@ python3 reference/diff_runner.py --cases 200000 --seed 7
 scripts/prove.sh                       # Kani, 13 harnesses (~3.5 min)
 scripts/mutants.sh                     # mutation testing (~40 min)
 scripts/build-programs.sh              # Floor, Vault, Harbor for sBPF v3; checks e_flags == 3
-(cd programs/tests && cargo test --release)            # 46 program tests + the program-vs-model differential
+(cd programs/tests && cargo test --release)            # 48 program tests + the program-vs-model differential
 (cd programs/tests && BULKHEAD_PROGRAM_SEEDS=24 BULKHEAD_PROGRAM_STEPS=500 cargo test --release --test differential)
 cloud/e2e/run.sh                       # validator + guardian + attacker
 node --test cloud/test/*.test.mjs      # client, policy, JS-vs-Python differential
@@ -106,6 +107,11 @@ cloud/e2e/s1.sh <url> <market>                    # S1 with the guardian on any 
 | 15 | 28 Sep | Review, before the devnet deploy | Market setup could not be re-run safely. After a dropped confirmation, a re-run would either fail for good on the already-registered protocol, or **propose the seal again, silently restarting its 72h clock**. Harbor lets anyone register it, so a stranger could also take the protocol first. | Setup resumes: keys saved before use, every step checked on chain, the seal proposed at most once, a foreign registration refused. `scripts/deploy-dryrun.sh` proves each (a lost-progress resume that spends nothing; a takeover refused). |
 | 16 | 28 Sep | The live-market check, on devnet | The page-vs-`attest` cross-check took its clock from `getBlockTime` before simulating. While the reference catches up after a deposit (about 116 units per second here), the two sides saw different seconds and the check failed at random; it had passed once by luck. | Both sides now use the simulation's own Clock sysvar (`cloud/status/snapshot.mjs`, `cloud/deploy/vault-check.mjs`). |
 | 17 | 28 Sep | Review, before the devnet deploy | The JavaScript client wrote keypair files readable by every local user, and a 5xx page from a public RPC crashed it instead of being retried. | Key files owner-only (0600), key folders 0700; 5xx retried with backoff like 429. |
+| 18 | 28 Sep | Adversarial review (`15`, A1) | Capacities came from the reference, a 24-hour average that also *falls* slowly. After a large backed exit or a bank run, the unbacked lane stayed sized for money that had left: 7.8× the daily bound on what was left. **"2% of a vault" overclaimed.** | Fixed 29 Sep: capacities from `min(reference, live balance)` (`capacity_base`) in the program, the JavaScript port and the program-vs-model differential; `after_a_large_backed_withdrawal_the_burst_shrinks_at_once`. The devnet Vault was upgraded in place. |
+| 19 | 29 Sep | Review of that fix (`15`, A1b) | `min` alone does not stop an attacker who parks their own capital in the vault, drains while it is there, then takes it back through the backed lane: 19.8% of the honest deposits in a 2-minute attack. | Stated. Absolute caps (the existing `short_cap`, `long_cap`) bring it back to the G1 bound (2.1%); calibration now sets them (`07 §4`). `finding_a1b_parked_capital_needs_absolute_caps`. |
+| 20 | 28 Sep | Adversarial review (`15`, A2) | The guardian bot watched only a 1-hour window: a paced attacker dripped the daily bucket out forever without a freeze. The first fix forgot the drip on restart and could skip events. | Fixed: a 24-hour rule, a 24-hour replay from block times at startup, paging to the cursor, retried freezes, integer thresholds. |
+| 21 | 28 Sep | Adversarial review (`15`, A3) | An admin key alone could abdicate `SetAdmin` or `SetGuardians`, instantly and forever: a thief locks the protocol to the stolen key. Abdicating `SetLimits` also blocked later tightening. | Fixed 29 Sep: abdication needs a live guardian quorum, and an abdicated kind refuses only loosening. Two program tests. |
+| 22 | 29 Sep | Review of the guardian fixes | Tickets were cancelled only when a new payout arrived, so a freeze sent late (after a restart, or a retry) left queued tickets to pay out when it expired. A single-vault freeze was read as protocol-wide, and the bot then stopped freezing. The S1 script attacked before the guardian had finished its replay. | Fixed: every successful freeze sweeps the recorded tickets once, each against its own vault; freeze events are read with their scope; S1 waits for "caught up". Two policy tests. |
 
 A method that finds a real bug in its own authors' code within minutes, twice, is the best argument for keeping it in CI.
 
@@ -235,7 +241,7 @@ The overflow guards stay in the code as defense in depth; the tests document why
 | **Our own SIMD-0500 check** | `scripts/build-programs.sh` reads each built `.so` with the reference's `elf_info` and fails unless `e_flags == 3` | Floor, Vault, Harbor: v3 |
 | **Compute** | Measured through Harbor's CPI (`05 §10`) and for Floor (`06 §7`) | Within targets |
 | **End-to-end** | A real validator booted with a sealed market; the guardian freezes on its own and cancels; the page's figures equal `attest` | Pass |
-| **On devnet** | The demo market before its seal, checked without sending anything (`cloud/deploy/vault-check.mjs`); Floor's lifecycle with real transactions on a target program (`scripts/floor-devnet.sh`) | Market: as configured, page = `attest`, 9/9 forbidden actions refused. Floor: stopped, restored byte-identical, 17/17 refused (`08`) |
+| **On devnet** | The demo market before its seal, checked without sending anything (`cloud/deploy/vault-check.mjs`); Floor's lifecycle with real transactions on a target program (`scripts/floor-devnet.sh`) | Market: as configured, page = `attest`, 11/11 forbidden actions refused (with the Vault upgraded in place on 29 Sep: an admin abdicating without a guardian quorum is refused). Floor: stopped, restored byte-identical, 17/17 refused (`08`) |
 | **Reproducible builds** | A clean rebuild in a different directory reproduces all three binaries' sha256; `scripts/verify-deployed.sh` dumps deployed programs and requires the local build byte for byte (run inside `scripts/deploy-dryrun.sh`, and on devnet) | Deterministic; the three devnet programs are byte-identical to it (hashes in `SECURITY.md`) |
 | **After the hackathon** | Certora (CVLR) rules for I8, I11, I12; Trident flows; registering the builds with `solana-verify` | Planned; cut from this submission (they add little a judge can check in the time) |
 

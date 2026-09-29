@@ -7,7 +7,7 @@ On 1 April 2026, Drift lost $285M in about twelve minutes of withdrawals. Drift 
 Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once audited, nobody can change it.
 - **The protocol still decides who gets paid. Bulkhead decides how fast.**
 - **Taking back your own deposit is never throttled, frozen or priced.** No oracle, no limit, no freeze.
-- **Everything else leaves at most 2% of the reference balance per hour and 5% per day.** The reference lags the live balance by up to 24 hours, so those are not percents of the tokens left after a large backed exit ([15](docs/15-ADVERSARIAL-REVIEW.md)). Each rate refills a bucket of the same size, so the most that can leave is 4% of that reference in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze.
+- **Everything else leaves at most 2% of the vault per hour and 5% per day.** The percentages apply to the lower of the live balance and its 24-hour average: a deposit made just before an attack buys almost nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze. Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
 - **Tightening is instant. Loosening waits 72 hours**, a constant no admin can lower, and any guardian can veto it.
 - **Guardians can stop things. They can never move money.**
 
@@ -17,7 +17,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 |---|---|---|
 | What it holds | The protocol's token accounts | The program's upgrade key |
 | Stops | Money leaving too fast, whatever the cause: a stolen admin key (the Drift class), a buggy payout path, malicious new code in the protocol, even a one-transaction drain | Malicious *new code*: new binaries wait 72h in public, any guardian can stop the program at once, and a quorum restores the exact bytes that were stopped |
-| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of the reference balance in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
+| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of the vault in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
 | Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
 
 **Who the guardians are.** A protocol names 2–8 guardian keys when it registers: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
@@ -57,9 +57,9 @@ On Solana, the one control an admin or upgrade key can't bypass is ownership of 
 | | Result |
 |---|---|
 | The attacker orders | 12 payouts of 100,000 USDC, one every 800 ms |
-| The attacker receives | **200,000 USDC**, the 2% burst |
-| The guardian | Freezes the protocol on its own, seconds after the burst completes, then cancels all 10 queued payouts |
-| Afterwards | 9,800,000 USDC still in the vault; 0 payouts pending; the status page's figures equal the program's own `attest` |
+| The attacker receives | **100,000 USDC**. The burst is 2% of what is in the vault at each payout, so after the first 100,000 the second no longer fits. An attacker who sizes each payout exactly gets 199,000 (S8), never more than 2%. |
+| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts |
+| Afterwards | 9,900,000 USDC still in the vault; 0 payouts pending; the status page's figures equal the program's own `attest` |
 
 **Modeled, the Drift incident** (`reference/drift_model.py`). Inputs: Chainalysis per-asset amounts, and a $550M TVL **assumption** with vaults proportional to what was drained. It is a model, not a replay.
 
@@ -97,15 +97,15 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 21/21, with coverage counters so a vacuous pass fails |
 | Bounded proofs (Kani) and exhaustive checks | **13/13 harnesses verified** (11 for every value of their types); 5 exhaustive tests over ~25.7M inputs |
 | Mutation testing (`cargo-mutants`, 647 injected bugs) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 46/46: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 48/48: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
 | Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
 | End to end | Above |
-| On devnet (28 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured, the page's figures equal to `attest`, 9/9 forbidden actions refused, no payout possible ([below](#on-devnet)) |
-| What this process found in our own code and docs | 17 findings: real bugs, one overclaimed guarantee, test gaps, and deploy-tooling hazards. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| On devnet (28 Sep; Vault upgraded in place 29 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured, the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |
+| What this process found in our own code and docs | 22 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and an adversarial review's attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
-Deployed 28 Sep 2026. Anyone can check that the deployed code is exactly this checkout's deterministic build:
+Deployed 28 Sep 2026; the Vault was upgraded in place on 29 Sep with the adversarial review's fixes (same id, market and seal time). Anyone can check that the deployed code is exactly this checkout's deterministic build:
 
 ```bash
 scripts/verify-deployed.sh https://api.devnet.solana.com HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E=bulkhead_floor \
@@ -115,7 +115,7 @@ scripts/verify-deployed.sh https://api.devnet.solana.com HARLZqMwqocBnbhbSTWkd5i
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
 | Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `ef2b349b…9c324dba` |
-| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `466cc17b…6eca22eb` |
+| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `79b0a47f…a62d9c93` |
 | Harbor (demo protocol) | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `d91a8ac2…4cb712f2` |
 
 All three share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
