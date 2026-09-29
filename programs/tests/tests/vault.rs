@@ -706,6 +706,15 @@ fn after_a_large_backed_withdrawal_the_burst_shrinks_at_once() {
     assert_eq!(a.balance, 1_000_000 * USDC);
     // Before the fix this stayed at ~200,000 (sized for the 10M that left).
     assert_eq!(a.available_now, 20_000 * USDC, "2% of the 1M that is left");
+    // The payout path, not only the view: 25,000 unbacked is above the 20,000
+    // burst, so it queues. Sized from the reference alone it would be instant.
+    let attacker = Keypair::new();
+    let loot = w.account("usdc", &attacker.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &loot, &attacker.pubkey(), 25_000 * USDC, &w.usdc_prices(true));
+    let m = w.env.ok(&[ix], &[&w.m.admin]);
+    let o = outcome(&m);
+    assert_eq!((o.backed, o.instant, o.queued), (0, 0, 25_000 * USDC), "above the 20,000 burst: queued");
+    assert_eq!(w.env.balance(&loot), 0);
 }
 
 #[test]
