@@ -123,11 +123,17 @@ await expect("a stranger registering Harbor again with its own admin", [harborIx
 await expect("a second vault for the same mint", [vaultIx(m, 1, defaultLimits(), [
   s(admin.publicKey, true), s(admin.publicKey), w(m.protocol), w(wld.vault), w(wld.vaultTokens), r(wld.mint), r(IDS.token), r(IDS.system),
 ])], "AlreadyInitialized");
+// Abdication is permanent, so a stolen admin key alone must not be able to give
+// up "set admin" and lock the protocol to itself (docs/15, A3).
+const abdicate = (...signers) => vaultIx(m, 17, Uint8Array.of(3), [w(m.protocol), ...signers.map((k) => s(k))]);
+await expect("the admin alone abdicating \"set admin\"", [abdicate(admin.publicKey)], "NoQuorum");
+await expect("the admin and one guardian abdicating \"set admin\"", [abdicate(admin.publicKey, guardians[0].publicKey)], "NoQuorum");
 
 console.log("\n4. guardians can act (simulated; nothing is sent)");
 await expect("guardian 0 sends a heartbeat", [vc.heartbeat(guardians[0].publicKey)], "ok");
 await expect("guardian 1 freezes the protocol for 1h", [vc.freeze(guardians[1].publicKey, 3_600)], "ok");
 if (!p.sealed) await expect("guardian 2 vetoes the seal", [vaultIx(m, 6, new Uint8Array(0), [w(m.protocol), s(guardians[2].publicKey)])], "ok");
+await expect("the admin with a live guardian quorum abdicating \"set admin\"", [abdicate(admin.publicKey, guardians[0].publicKey, guardians[1].publicKey)], "ok");
 
 console.log(failures ? `\nVAULT CHECK FAILED (${failures})` : "\nVAULT CHECK PASSED");
 process.exit(failures ? 1 : 0);
