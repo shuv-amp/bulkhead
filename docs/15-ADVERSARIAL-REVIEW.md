@@ -18,7 +18,7 @@ Unaudited, like everything else here. This is not a substitute for the external 
 
 **What did not run here:** `scripts/check-programs.sh` (LiteSVM; needs the Agave CLI), `scripts/prove.sh` (Kani), `scripts/mutants.sh`. None of the on-chain code was changed, so their earlier results still apply to it.
 
-**Update, 29 Sep.** The fixes for A1 and A3 change the Vault program. `scripts/check.sh`, `scripts/check-programs.sh`, the end-to-end run and the deploy rehearsal all pass on them, and the devnet Vault was upgraded in place (same program id, market and seal time; `08`, devnet). Kani and mutation testing were not re-run: neither covers the changed program code, and the only new core function (`capacity_base`) is a `min`.
+**Update, 29 Sep.** The fixes for A1 and A3 change the Vault program. `scripts/check.sh`, `scripts/check-programs.sh`, the end-to-end run and the deploy rehearsal all pass on them, and the devnet Vault was upgraded in place (same program id, market and seal time; `08`, devnet). The Kani harnesses pass in CI on the same change; mutation testing was not re-run (it covers the core, where the only new function, `capacity_base`, is a `min` with its own exact unit test).
 
 ## 2. Findings
 
