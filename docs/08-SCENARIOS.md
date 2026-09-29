@@ -26,7 +26,7 @@ Status (28 Sep 2026):
 **LiteSVM, golden G-1 on-chain** (`s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue`):
 - Setup: 10,000,000 USDC vault, default limits, sealed.
 - The attacker orders 150k, 50k, 10k, 400k and 1M USDC, one per minute (the Drift cadence).
-- Every outcome and every ticket ETA equals the core model's to the second, including the EMA reference moving with the draining balance.
+- Every outcome and every ticket ETA equals the core model's to the second, including the capacity following the draining balance (the lower of the EMA reference and the live balance): the last ticket is due in 54h 37m, not the golden vector's 53h 12m at a fixed capacity.
 - The attacker receives **exactly 200,000 USDC** (the 2% burst); three requests wait in public.
 - A guardian freezes; a due ticket then can't settle (`Frozen`); guardians cancel all tickets; the attacker keeps the burst only.
 
@@ -132,10 +132,11 @@ Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep. Every transaction b
 | Vault created with the default limits | [`4aKAYC96…`](https://explorer.solana.com/tx/4aKAYC96oBp8kyomNytkniARUGVxV5vswztFXor13rti3aR1Cbeu3gMptcgq6stccLLAPakkpbz31TJjNSdJh1eW?cluster=devnet) |
 | 10,000,000 test USDC deposited through Harbor | [`eJWkSy6f…`](https://explorer.solana.com/tx/eJWkSy6finkhisTUAjxGrNHYCgfMNv1NgkvvysCSGfF7zWGi76KoPuU6GnK1zKwmzfreFSbXMmXsX2if1dbicPP?cluster=devnet) |
 | Seal proposed: executable from 30 Sep, 20:32:27 UTC until 7 Oct, 20:32:27 UTC | [`3ZJH4YW4…`](https://explorer.solana.com/tx/3ZJH4YW47LZFbkb51yrDiMmSYaNyzJokYJ8ifRhqUWxcN5A2gbAzibk4BRk7u46kZPurDuJyffMv9oZaFnVoGbQJ?cluster=devnet) |
+| Absolute caps set, 29 Sep: 200,000 per 1h and 500,000 per 24h, 2% and 5% of the 10M (the calibration rule, `07 §4`; `15` A1b). A tightening, applied at once; the worst case is unchanged at 10M | [`63WTyNAF…`](https://explorer.solana.com/tx/63WTyNAFuwodQwKHjmz5feTCGB43z2ErJ9ekDf3sYGeXfhAgA3khdeKiGfqMJqHXJYEtVUBsdUXysuKtsodLAAYa?cluster=devnet) |
 | Guardian 0's heartbeat: the Cloud guardian's first live run | [`2bsgiHmt…`](https://explorer.solana.com/tx/2bsgiHmtjSYkXBgCzwKFmMrkVoGJkgvY5N5Y9vrzXcXg7dGRUT2JKWvWycCP1AxdR38hqgDPLBU7u7sCZCqrbwwR?cluster=devnet) |
 
 Before the seal, `cloud/deploy/vault-check.mjs` (simulations; nothing sent) found:
-- every setting as configured;
+- every setting as configured, and since 29 Sep the calibrated absolute caps (200,000 per 1h, 500,000 per 24h);
 - the status page's figures equal to the program's own `attest`, at the same clock;
 - S1's payout and the whale's withdrawal of its own deposit refused (`NotSealed`), and so is an early seal (`SealNotExecutable`);
 - strangers refused (`NotAdmin`, `NotGuardian`), a 25h freeze refused (`FreezeTooLong`), and so are registering Harbor again and a second vault for the mint (`AlreadyInitialized`);

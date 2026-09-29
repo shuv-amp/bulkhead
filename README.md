@@ -100,7 +100,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 48/48: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
 | Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
 | End to end | Above |
-| On devnet (28 Sep; Vault upgraded in place 29 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured, the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |
+| On devnet (28 Sep; Vault upgraded in place 29 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured (with the calibrated absolute caps), the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |
 | What this process found in our own code and docs | 22 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and an adversarial review's attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
