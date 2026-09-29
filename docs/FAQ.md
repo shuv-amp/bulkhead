@@ -16,7 +16,7 @@ See `03 §2–§5`.
 The people who want the admin constrained are the ones whose money sits under it: depositors, curators, allocators, insurers. Bulkhead gives them a worst case enforced on-chain (`attest`: "at most $X now, $Y in the next hour, $Z in a day"). Protocols pay for Bulkhead Cloud: a hosted guardian, calibration on their own flows, and the attestation feed. The core stays free and open source. See `11`.
 
 **What exactly does "2% per hour and 5% per day" mean?**
-Each rate refills a bucket of the same size. So the most unbacked money that can leave in any window of length `T` is `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault's reference balance:
+Each rate refills a bucket of the same size. So the most unbacked money that can leave in any window of length `T` is `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault (of the lower of its live balance and its 24-hour average, `03 §3`):
 - up to 4% in any hour;
 - up to 10% in any day;
 - half a vault takes 9 days with nobody responding.

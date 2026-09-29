@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, newState, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -86,4 +86,39 @@ test("unapproved loosenings are vetoed once; approved ones are not", () => {
   assert.deepEqual(assess(s, ev, { worst1h, now: 1 }), []);
   const s2 = newState();
   assert.deepEqual(assess(s2, ev, { worst1h, now: 0 }, { ...DEFAULT_POLICY, approvedChangeIds: [3] }), []);
+});
+
+const frozenEvent = (scope, until) =>
+  decode({ name: "vault:frozen", fields: [Uint8Array.of(scope), key(owner), i64le(until)] });
+const unfrozenEvent = (scope) => decode({ name: "vault:unfrozen", fields: [Uint8Array.of(scope), Uint8Array.of(3)] });
+
+test("a vault-scoped freeze is not read as a protocol-wide freeze", () => {
+  const s = newState();
+  assess(s, frozenEvent(1, 90_000), { now: 1_000 });
+  assert.equal(s.frozenUntil, 0, "one vault frozen: the protocol is not");
+  // So a breach elsewhere still freezes the protocol.
+  assess(s, released({ instant: 150_000n * USDC }), { worst1h, now: 1_010 });
+  const a = assess(s, released({ instant: 50_000n * USDC }), { worst1h, now: 1_020 });
+  assert.deepEqual(a.map((x) => x.type), ["freeze"]);
+  // A protocol-wide freeze and unfreeze still count; a vault-scoped unfreeze doesn't undo it.
+  const t = newState();
+  assess(t, frozenEvent(0, 90_000), { now: 1_000 });
+  assert.equal(t.frozenUntil, 90_000);
+  assess(t, unfrozenEvent(1), { now: 1_001 });
+  assert.equal(t.frozenUntil, 90_000);
+  assess(t, unfrozenEvent(0), { now: 1_002 });
+  assert.equal(t.frozenUntil, 0);
+});
+
+test("after a late freeze, every recorded ticket is swept up once, with its own mint", () => {
+  const s = newState();
+  const other = "11111111111111111111111111111112";
+  // Replayed history (act = false): tickets recorded, nothing sent.
+  assess(s, released({ queued: 10n, ticketId: 3n }), { worst1h, now: 0 }, DEFAULT_POLICY, false);
+  assess(s, released({ queued: 20n, ticketId: 4n, mint: other }), { worst1h, now: 5 }, DEFAULT_POLICY, false);
+  assess(s, released({ instant: 30n }), { worst1h, now: 6 }, DEFAULT_POLICY, false);
+  const sweep = pendingCancels(s);
+  assert.deepEqual(sweep.map((x) => [x.ticketId, x.mint]), [[3n, mint], [4n, other]]);
+  assert.deepEqual(pendingCancels(s), [], "each ticket once");
+  assert.deepEqual(pendingCancels(newState(), { ...DEFAULT_POLICY, cancelTicketsWhenFrozen: false }), []);
 });

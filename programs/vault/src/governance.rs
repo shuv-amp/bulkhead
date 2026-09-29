@@ -139,9 +139,7 @@ pub fn propose_change(
     let protocol = acc(accounts, 2)?;
     let mut p = load_protocol(program_id, protocol)?;
     require_admin(&p, acc(accounts, 1)?)?;
-    if Abdications(p.abdications).is_abdicated(kind) {
-        return Err(VaultError::Abdicated.into());
-    }
+    let abdicated = Abdications(p.abdications).is_abdicated(kind);
     let parsed = parse(&p, kind, &target, payload)?;
     let class = match &parsed {
         Parsed::Limits(l) => {
@@ -166,6 +164,11 @@ pub fn propose_change(
         }
         Parsed::Guardians(_) | Parsed::Key(_) => Class::Loosen,
     };
+    // Abdication gives up loosening a kind forever; tightening it must stay
+    // possible (making things safer never waits, docs/15, A3).
+    if abdicated && class == Class::Loosen {
+        return Err(VaultError::Abdicated.into());
+    }
     let t = now()?;
 
     if class == Class::Tighten || !p.sealed {

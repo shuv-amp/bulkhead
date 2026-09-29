@@ -18,15 +18,18 @@ Unaudited, like everything else here. This is not a substitute for the external 
 
 **What did not run here:** `scripts/check-programs.sh` (LiteSVM; needs the Agave CLI), `scripts/prove.sh` (Kani), `scripts/mutants.sh`. None of the on-chain code was changed, so their earlier results still apply to it.
 
+**Update, 29 Sep.** The fixes for A1 and A3 change the Vault program. `scripts/check.sh`, `scripts/check-programs.sh`, the end-to-end run and the deploy rehearsal all pass on them, and the devnet Vault was upgraded in place (same program id, market and seal time; `08`, devnet). The Kani harnesses pass in CI on the same change; mutation testing was not re-run (it covers the core, where the only new function, `capacity_base`, is a `min` with its own exact unit test).
+
 ## 2. Findings
 
 Severity is for a mainnet deployment: **High** = more value can leave than the product promises; **Medium** = a stolen key does more than the threat model says, or a promised response does not happen; **Low** = operational gap.
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
-| A1 | **High** | Capacity follows a lagging reference, not the live balance: a parked-then-withdrawn deposit, or an honest bank run, multiplies the unbacked drain | Demonstrated; fix recommended (on-chain) |
-| A2 | **Medium** | The guardian bot only watches a 1-hour window: a paced attacker drips the daily bucket out forever without a freeze | **Fixed in this PR** (24-hour rule), residual stated |
-| A3 | **Medium** | A stolen admin key can abdicate `SetAdmin` / `SetGuardians` instantly and forever | Fix recommended (on-chain) |
+| A1 | **High** | Capacity follows a lagging reference, not the live balance: a parked-then-withdrawn deposit, or an honest bank run, multiplies the unbacked drain | **Fixed on-chain, 29 Sep** (`min(reference, live balance)`) |
+| A1b | **High** | An attacker who parks their own capital drains while it is still in the vault: the live balance is inflated too, so `min` alone does not help | Absolute caps bound it (existing feature); calibration now sets them |
+| A2 | **Medium** | The guardian bot only watches a 1-hour window: a paced attacker drips the daily bucket out forever without a freeze | **Fixed** (24-hour rule), residual stated; late-freeze gaps fixed 29 Sep |
+| A3 | **Medium** | A stolen admin key can abdicate `SetAdmin` / `SetGuardians` instantly and forever | **Fixed on-chain, 29 Sep** (guardian quorum; loosening only) |
 | A4 | **Medium** | No recovery path from a compromised Vault admin or Floor owner key | Design decision needed |
 | A5 | Low | Floor's stop button is unarmed after every abort until someone stages a new abort buffer; the fast-restore snapshot must be re-pinned after every upgrade | Operational; recommend the status page shows both |
 | A6 | Low | A borrower can pick the most favourable fully-verified Pyth update within `max_age_s` | Residual; calibrate haircuts against it |
@@ -39,8 +42,8 @@ Severity is for a mainnet deployment: **High** = more value can leave than the p
 
 | | 24h unbacked drain | vs the advertised 10%-a-day bound on the vault that is left |
 |---|---|---|
-| Today (capacity from the reference) | **7,799,995 USDC** of 10,000,000 | **7.8×** |
-| With `min(reference, live balance)` | 953,517 USDC | within the bound |
+| Before the fix (capacity from the reference) | **7,799,995 USDC** of 10,000,000 | **7.8×** |
+| Since the fix: `min(reference, live balance)` | 953,517 USDC | within the bound |
 
 The same happens with no whale at all: after an honest bank run (S4) takes 90% of a vault out through the backed lane, the first attacker gets an instant burst of 195,054 USDC out of the 1,000,000 left, **9.8×** the 2% burst.
 
@@ -48,7 +51,25 @@ Evidence: `finding_a1_*` and `mitigation_a1_*` in `crates/bulkhead-core/tests/ad
 
 **Why G1 still "holds".** G1 (`02 §3`) is stated in `C_k`, which is a function of the reference, so it is not violated. The README and `02` used to say "2% of a vault", which reads as a share of the tokens that are actually there. That sentence was false after a large exit. They now say "of the reference balance".
 
-**Recommendation.** Compute capacities from `min(reference, live balance)`. Up moves stay slow (G-8 keeps holding, see the mitigation test); down moves are instant, which only ever lowers capacity, so it is a tightening at every instant. That reverses the other half of `ema.rs`: a drain currently does not shrink the limit at once, so honest unbacked users keep the old capacity. `min` takes that availability away. It also does nothing for a non-zero floor (`capacity_from_ref` can still clamp up to the floor) and it does not close a quiet-day donation (section 3). Call sites: `programs/vault/src/custody.rs:311` (`release`/`quote`), `views.rs:33` (`attest`), `brakes.rs:205` (`reset_backlog`), and the ports that must stay equal to `attest` (`cloud/lib/limits.mjs::attestLocal`, the program-vs-model differential in `programs/tests/tests/differential.rs`, and the Python model). This changes the deployed programs, so it needs `scripts/check-programs.sh`, a redeploy and fresh `verify-deployed.sh` hashes.
+**Fix (29 Sep).** Capacities come from `capacity_base(reference, balance) = min(reference, live balance)` (`bulkhead-core::limiter`), with the balance read before the operation. Up moves stay slow (G-8 keeps holding); down moves count at once, which only ever lowers capacity, so it is a tightening at every instant. Where it is used: `release` and `quote_release` (`custody.rs`), `attest` (`views.rs`), and the ports that must stay equal to `attest`: `cloud/lib/limits.mjs::attestLocal` and the program-vs-model differential. `reset_backlog` never reads a capacity (it clamps each bucket to "now + window"), so it is unchanged. The Python reference ports only the core functions, which did not change.
+
+What it costs, deliberately: after a drain, honest unbacked users lose the old capacity at once. And every unbacked payout shrinks the base, so a burst is 2% of what is in the vault at each payout: in `s8_one_transaction_drain_gets_only_the_burst`, 100,000 of the 10M, then 99,000 of the 9.9M left (199,000 in all, not 200,000); in the end-to-end run, twelve 100,000 payouts now get 100,000 instantly, because the second no longer fits. It still does nothing for a non-zero floor (`capacity_from_ref` can clamp up to the floor), and it does not help against capital the attacker parks in the vault itself (A1b).
+
+Tests: `after_a_large_backed_withdrawal_the_burst_shrinks_at_once` (program: a 9M backed exit from a 10M vault takes `available_now` from 200,000 to 20,000 at once), `mitigation_a1_*` and `caps_alone_do_not_fix_the_bank_run_but_with_capacity_base_they_do` (core), `capacity_base_is_the_lower_of_reference_and_live_balance` (unit).
+
+### A1b — Parked capital (High; absolute caps)
+
+**What happens.** The attacker (who also holds the admin key) deposits their own 90M into a 10M vault and waits three days: the reference and the live balance are both near 100M. They drain the unbacked lane while the 90M is still there, then take the 90M back through the backed lane, which is instant and cannot be frozen. The honest depositors' 10M paid for the drain.
+
+| Honest depositors lose (10M vault, 90M parked) | 2-minute attack | 24-hour attack |
+|---|---|---|
+| Before the A1 fix | 19.8% | 95.4% |
+| `min(reference, live balance)` only | 19.8% | 94.3% |
+| `min` + absolute caps at 2% / 5% of the honest vault (200,000 / 500,000) | **2.1%** | **10.0%** |
+
+Caps alone do not fix the bank-run half of A1 (after a 90% exit they still pay about 20% of what is left); `min` and caps together hold both. Evidence: `finding_a1b_parked_capital_needs_absolute_caps`, `caps_alone_do_not_fix_the_bank_run_but_with_capacity_base_they_do`.
+
+**Status.** Caps (`short_cap`, `long_cap`) already exist: setting or lowering one is a tightening (instant), raising one waits 72h. The calibration rule now sets them at the same percentages of the vault's honest size (`07 §4`). A cap that tracks the vault automatically would need a trusted notion of "honest size", which is what the reference was; that is the open design question.
 
 ### A2 — The guardian bot can be paced (Medium, fixed here)
 
@@ -69,6 +90,8 @@ The first cut of that fix did not actually hold. The sum lived only in process m
 **Attack.** A thief with the admin key abdicates `SetAdmin`: the team can never rotate the stolen key out. The thief keeps, forever, every admin power: repeated 24h freezes, cancelling honest tickets, moving the whole vault into the lifeboat. None of these is theft, but together they are a permanent denial of service that the threat model (`04`, "DoS only") does not describe. Abdicating `SetGuardians` as well means dead or ejected guardians can never be replaced; once too few are alive for a quorum, nothing can unfreeze or return the lifeboat. Abdicating `SetLimits` also blocks later *tightening* of limits (the check happens before classification).
 
 **Recommendation.** Either (a) make `SetAdmin` and `SetGuardians` non-abdicable, or (b) require a live guardian quorum to co-sign any abdication. (b) keeps the Morpho V2 feature for honest teams and costs one extra signer set. Both are small changes to `brakes.rs::abdicate`, plus a negative test in `programs/tests/tests/vault.rs`.
+
+**Fix (29 Sep): (b), plus loosening only.** `abdicate` now needs the admin and a live guardian quorum (`NoQuorum` otherwise), and an abdicated kind refuses only loosening: tightening it still applies at once, so abdicating `SetLimits` no longer blocks a later tightening. A pending loosening of that kind can no longer execute. Tests: `a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever` (admin alone and admin plus one guardian are refused; with a quorum, `SetAdmin` is gone) and `an_abdicated_kind_can_still_be_tightened_but_never_loosened`. A4 is unchanged.
 
 ### A4 — No recovery from a compromised admin or owner key (Medium, design decision)
 
@@ -92,7 +115,7 @@ Each was tried and found closed; listed so nobody re-spends the time.
 |---|---|
 | Clock stepping backwards between requests to reuse capacity | The limiter uses `max(TAT, now)`; 2,000 random sessions with backward steps stayed within G1 over the real elapsed span (worst 0.9987 of the bound). `clock_stepping_backwards_never_beats_g1` |
 | Flash-loan deposit to raise the reference inside one transaction | `touch_reference` uses the balance *before* the operation and sets `ref_updated_s = now`, so a second touch in the same second moves nothing |
-| Donating tokens to the vault account before the first touch after a quiet day | After a quiet day (`dt ≥ 24h`) the next touch moves the reference the whole way to the donated balance. The donation has no backing, so it leaves through the limiter it just sized. `min(reference, balance)` does not close this: after the jump the two are equal. Measured: 9,535,175 USDC in the next day against a 1,000,000 USDC bound on the pre-donation vault (9.5×). `donation_after_a_quiet_day_inflates_even_with_min_balance` |
+| Donating tokens to the vault account before the first touch after a quiet day | After a quiet day (`dt ≥ 24h`) the next touch moves the reference the whole way to the donated balance, and `min` does not change that (the two are equal). Measured: 9,535,175 USDC in the next day against a 1,000,000 USDC bound on the pre-donation vault (9.5×). **But it is not an attack on depositors:** the 90M donated belong to nobody, the drain comes out of them first, and the depositors' 10M are still there (asserted). The donor gets back part of their own gift. Absolute caps bound the figure anyway. `donation_after_a_quiet_day_inflates_even_with_min_balance` |
 | Crediting backing to someone else | Backing goes to the signer of the source token account; nobody can sign for another owner's account |
 | Fake recipient account to borrow another owner's backing | `release` reads the owner from the recipient token account (owner-checked against both token programs, initialized state checked) and loads that owner's backing PDA by re-derivation |
 | Omitting an asset account so an allowlisted mint looks unlisted | `price_table` requires the asset PDA at the derived address; an empty account there is accepted only as "not listed" |
@@ -106,18 +129,18 @@ Each was tried and found closed; listed so nobody re-spends the time.
 
 Weaknesses in the product argument rather than the code. None of these kills it; each is a question a judge or a protocol's risk team will ask.
 
-1. **"2% of a vault" is 2% of the reference.** See A1. The README and `02` now say "of the reference balance", which lags the live balance by up to 24 hours. The pitch should use the same words until the A1 fix ships.
+1. **"2% of a vault" was 2% of the reference.** See A1, fixed on 29 Sep: it is now 2% of the lower of the live balance and the reference. A parked-capital attacker still needs absolute caps (A1b), so the pitch claim is "2% of the vault, with calibrated caps".
 2. **Transferable receipt tokens break the backed lane.** Backing belongs to whoever deposited. When a protocol's position is transferable (LP tokens, cTokens, kTokens, LSTs), a buyer on the secondary market withdraws with no backing, so honest withdrawals go through the unbacked lane and can queue. Calibration then pushes the limits up and the bound weakens. The integration guide (`07`) should name which protocol designs fit well (non-transferable positions) and which need a backing-transfer hook.
 3. **A circuit breaker can turn a crash into insolvency.** Liquidation bonuses and cross-mint seizures are partly unbacked. In a cascade, liquidations that exceed the daily bucket queue for at least 6 hours while prices keep falling, which leaves bad debt. `07 §3` says "size the daily bucket for cascades"; that is the whole question for lending protocols, and it deserves a scenario with a historical crash (a Pyth replay of a −30% day).
-4. **"Guardians can only grief" understates a stolen key.** See A3 and A4: without the fixes, griefing can be permanent.
+4. **"Guardians can only grief" understates a stolen key.** A3 is fixed; A4 is not: a compromised admin or owner key can still block its own rotation.
 5. **The freeze response is a bot plus people.** See A2: thresholds can be paced, and the bot needs uptime, RPC access and a funded key. The claim that should appear in the pitch is the on-chain bound, not the response time.
 6. **Bulkhead's own key is the biggest key.** Until the upgrade authorities are burned after audit (G9), whoever holds the Bulkhead team key can replace the code that holds every protected vault. It is disclosed in `SECURITY.md`; protocols will ask how and when it is burned, so the burn plan (and whether Bulkhead itself sits under Floor meanwhile) should be one slide.
 7. **Immutable means unpatchable.** After the burn, a bug in Bulkhead can't be fixed in place; the only way out for funds is each protocol's lifeboat exit (72h plus the destination rule). The docs should say that migration to a new version is the upgrade path, and how long it takes.
 
 ## 5. Recommended order
 
-1. A1 on-chain fix, then redeploy and re-verify (it changes the headline number).
-2. A3 (small), then decide A4.
+1. ~~A1 on-chain fix, then redeploy and re-verify.~~ Done 29 Sep (devnet upgraded in place); absolute caps in calibration (A1b).
+2. ~~A3.~~ Done 29 Sep. Decide A4.
 3. README and pitch wording for items 1, 4 and 5 of section 4.
 4. A liquidation-cascade scenario (section 4, item 3).
 5. A5 alerts in the status page and the bot.

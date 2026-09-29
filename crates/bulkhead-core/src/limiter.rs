@@ -27,9 +27,9 @@ pub struct Bucket {
 /// Limiter parameters for one vault or mint gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimiterParams {
-    /// Burst bucket (default: 2% of the reference balance per hour).
+    /// Burst bucket (default: 2% of the capacity base per hour).
     pub short: Bucket,
-    /// Daily cap bucket (default: 5% of the reference balance per 24 hours).
+    /// Daily cap bucket (default: 5% of the capacity base per 24 hours).
     pub long: Bucket,
     /// No ticket settles earlier than `created + min_queue_delay_ms` (default 6 hours).
     pub min_queue_delay_ms: i64,
@@ -75,9 +75,9 @@ impl LimiterError {
     }
 }
 
-/// The limiter parameters a vault runs with right now: capacities from the
-/// reference balance, windows and delays converted from seconds to ms, and the
-/// constant queue horizon. A capacity of 0 closes the unbacked lane.
+/// The limiter parameters a vault runs with right now: capacities from `reference`
+/// (the programs pass `capacity_base`), windows and delays in ms, and the constant
+/// queue horizon. A capacity of 0 closes the unbacked lane.
 pub fn params_from_config(cfg: &LimitConfig, reference: u64) -> LimiterParams {
     LimiterParams {
         short: Bucket {
@@ -100,6 +100,17 @@ pub fn config_is_valid(cfg: &LimitConfig) -> bool {
         && cfg.long_bps as u128 <= BPS
         && cfg.short_window_s > 0
         && cfg.long_window_s > 0
+}
+
+/// The base that capacities are computed from: the lower of the reference (a
+/// 24h average that rises slowly, so a deposit just before an attack buys
+/// almost nothing) and the live balance (so money that has left, for example
+/// a large backed withdrawal or a bank run, stops counting at once). It only
+/// ever lowers a capacity: a tightening at every instant (docs/15, finding
+/// A1). Absolute caps (`LimitConfig::*_cap`) bound the remaining case, capital
+/// parked in the vault itself (A1b).
+pub fn capacity_base(reference: u64, balance: u64) -> u64 {
+    reference.min(balance)
 }
 
 /// `C = clamp(floor(reference * bps / 10_000), floor, cap)`; `cap == 0` means no cap.

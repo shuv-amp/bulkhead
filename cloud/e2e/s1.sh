@@ -29,12 +29,16 @@ echo "== guardian watching"
 node cloud/guardian/main.mjs "$W/guardian.json" > "$W/guardian.log" 2>&1 &
 GPID=$!
 trap 'kill $GPID 2>/dev/null || true' EXIT
-# Ready once its startup heartbeat has landed (or failed), at most 60 s.
-for _ in $(seq 1 120); do
-  grep -q -e '"action":"heartbeat"' -e 'heartbeat failed' "$W/guardian.log" 2>/dev/null && break
+# Ready once it has replayed the last 24 hours ("caught up"), at most 120 s.
+# The heartbeat comes before that replay; an attack that starts during it would
+# be read as history, and history alone never cancels a ticket.
+ready=0
+for _ in $(seq 1 240); do
+  grep -q '"msg":"caught up"' "$W/guardian.log" 2>/dev/null && { ready=1; break; }
   kill -0 $GPID 2>/dev/null || { cat "$W/guardian.log"; echo "S1 FAILED: the guardian exited"; exit 1; }
   sleep 0.5
 done
+[ "$ready" = 1 ] || { tail -5 "$W/guardian.log"; echo "S1 FAILED: the guardian did not catch up within 120 s"; exit 1; }
 
 echo "== attack: $COUNT payouts of $((AMOUNT / 1000000)) USDC, every ${INTERVAL}ms"
 node cloud/e2e/attack.mjs "$W/world.json" "$W/keys" "$RPC" "$COUNT" "$AMOUNT" "$INTERVAL" | tee "$W/attack.log"

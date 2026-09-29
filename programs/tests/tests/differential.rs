@@ -17,7 +17,7 @@ mod common;
 use bulkhead_core::classify::LimitConfig;
 use bulkhead_core::ema::ema_update;
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
-use bulkhead_core::limiter::{params_from_config, request, Decision, LimiterState};
+use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterState};
 use common::vault::*;
 use common::*;
 use solana_address::Address;
@@ -248,7 +248,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 let backed = ledger.backed_amount(&um, amount, &lookup);
                 let unbacked = amount - backed;
                 let reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
-                let params = params_from_config(&cfg(), reference);
+                let params = params_from_config(&cfg(), capacity_base(reference, md.balance));
                 let mut lim = md.limiter;
                 let decision = if unbacked > 0 {
                     request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until * 1_000).map(Some)

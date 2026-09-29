@@ -62,10 +62,12 @@ export function decode(ev) {
       const r = new Reader(f[2]);
       return { kind: "released", mint: b58encode(f[0]), owner: b58encode(f[1]), backed: r.u64(), instant: r.u64(), queued: r.u64(), ticketId: r.u64(), etaS: Number(r.i64()) };
     }
+    // Scope 0 is the whole protocol, 1 a single vault. The event does not say
+    // which vault, so a vault-scoped freeze must not be read as protocol-wide.
     case "vault:frozen":
-      return { kind: "frozen", until: Number(new Reader(f[2]).i64()) };
+      return { kind: "frozen", scope: f[0]?.[0] ?? 0, until: Number(new Reader(f[2]).i64()) };
     case "vault:unfrozen":
-      return { kind: "unfrozen" };
+      return { kind: "unfrozen", scope: f[0]?.[0] ?? 0 };
     case "vault:change_proposed":
       return { kind: "change_proposed", id: u64(f[0]), changeKind: f[1][0], target: b58encode(f[2]) };
     case "floor:proposed":
@@ -109,6 +111,25 @@ export function breach(state, mint, ctx, policy = DEFAULT_POLICY) {
 }
 
 /**
+ * Cancels for every recorded queued ticket not yet cancelled. Run after any
+ * freeze that succeeds: a late freeze (after a restart, or a retry after a
+ * failed freeze) is not followed by the release event that would otherwise
+ * trigger the cancels, and a ticket left alone pays out when the freeze
+ * expires. Marks them cancelled so they are sent once.
+ */
+export function pendingCancels(state, policy = DEFAULT_POLICY) {
+  if (!policy.cancelTicketsWhenFrozen) return [];
+  const actions = [];
+  for (const o of state.outflows) {
+    if (o.ticketId !== null && !state.cancelled.has(o.ticketId)) {
+      state.cancelled.add(o.ticketId);
+      actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
+    }
+  }
+  return actions;
+}
+
+/**
  * One event in, zero or more actions out. `ctx.worst1h` and `ctx.worst24h`
  * are that mint's current worst cases from `attest` (base units, BigInt; the
  * 24-hour rule is skipped when `worst24h` is absent); `ctx.now` is unix
@@ -146,10 +167,12 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       break;
     }
     case "frozen":
+      if ((e.scope ?? 0) !== 0) break; // one vault frozen: the protocol is not
       state.frozenUntil = Math.max(state.frozenUntil, e.until);
       state.freezing = false;
       break;
     case "unfrozen":
+      if ((e.scope ?? 0) !== 0) break;
       state.frozenUntil = 0;
       state.freezing = false;
       break;

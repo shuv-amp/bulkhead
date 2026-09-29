@@ -7,6 +7,7 @@ use bulkhead_core::classify::{classify_asset, classify_limits, AssetConfig, Clas
 use bulkhead_core::floor::{deployable_after_simd0500, elf_info};
 use bulkhead_core::governance::Abdications;
 use bulkhead_core::ledger::{Ledger, Mint, PricedAsset, Pricing};
+use bulkhead_core::limiter::capacity_base;
 
 fn mint(i: u8) -> Mint {
     [i; 32]
@@ -641,4 +642,16 @@ fn limit_configs_are_valid_exactly_within_bounds() {
         with(|c| c.short_bps = 0),
         "a closed short lane is a valid configuration"
     );
+}
+
+/// A1: capacities come from the lower of the 24h reference and the live
+/// balance, exactly, in both directions.
+#[test]
+fn capacity_base_is_the_lower_of_reference_and_live_balance() {
+    assert_eq!(capacity_base(100, 40), 40); // money left: counts at once
+    assert_eq!(capacity_base(40, 100), 40); // money arrived: the reference lags
+    assert_eq!(capacity_base(7, 7), 7);
+    assert_eq!(capacity_base(0, u64::MAX), 0);
+    assert_eq!(capacity_base(u64::MAX, 0), 0);
+    assert_eq!(capacity_base(u64::MAX, u64::MAX), u64::MAX);
 }

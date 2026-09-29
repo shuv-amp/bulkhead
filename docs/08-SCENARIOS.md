@@ -35,10 +35,10 @@ Status (28 Sep 2026):
 | Measure | Result |
 |---|---|
 | Ordered by the attacker (12 × 100,000 USDC, every 800 ms) | 1,200,000 USDC |
-| Received | **200,000 USDC** |
-| Guardian freeze | Automatic, 2–6 s after the block that completed the burst, across runs (2 s in the latest, 27 Sep). Policy: freeze once unbacked payouts to non-allowlisted owners reach ½ of `worst_1h` within an hour. |
-| Queued payouts | 10 tickets, all cancelled by the guardian within 2–9 s of their blocks (across runs) |
-| After | 0 pending, protocol frozen 24h, 9,800,000 USDC in the vault |
+| Received | **100,000 USDC**: after the first payout the vault holds 9.9M, and the second 100,000 no longer fits the burst (2% of what is in the vault at each payout; 200,000 before the 29 Sep fix, `15` A1) |
+| Guardian freeze | Automatic, 2–6 s after the block that reached the threshold, across runs (6 s in the latest, 29 Sep). Policy: freeze once unbacked payouts to non-allowlisted owners reach ½ of `worst_1h` within an hour. |
+| Queued payouts | 11 tickets, all cancelled by the guardian within 2–10 s of their blocks (29 Sep) |
+| After | 0 pending, protocol frozen 24h, 9,900,000 USDC in the vault |
 | Status page figures | Equal to the program's own `attest` |
 
 **Model, the full Drift book** (`reference/drift_model.py`, the $550M TVL **assumption**): a 2-minute freeze bounds the loss at $11.4M instead of $285M (`01 §7`).
@@ -52,6 +52,8 @@ Status (28 Sep 2026):
 
 Headline: **"Nobody noticed Bulkhead."**
 
+After the run, the unbacked burst is sized from what is left, not from the 24-hour average that still remembers the money that left: `after_a_large_backed_withdrawal_the_burst_shrinks_at_once` (a 9M backed exit from a 10M vault takes the burst from 200,000 to 20,000 at once; `15` A1).
+
 ## S7: a loosening attempt
 
 `s7_tightening_is_instant_loosening_waits_72h_and_a_guardian_can_veto`:
@@ -61,14 +63,14 @@ Headline: **"Nobody noticed Bulkhead."**
   - a guardian vetoes it;
   - after 72h it still fails (`ChangeVetoed`), and the tighter limit stands.
 
-`an_unvetoed_loosening_executes_after_the_delay` shows the other branch. `a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever` covers the constant and abdication.
+`an_unvetoed_loosening_executes_after_the_delay` shows the other branch. `a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever` covers the constant and abdication, which needs a live guardian quorum besides the admin; `an_abdicated_kind_can_still_be_tightened_but_never_loosened` shows what abdication gives up.
 
 ## S8: one transaction beats any stop button
 
 `s8_one_transaction_drain_gets_only_the_burst`:
 - **Legacy:** a pool whose token account the admin key controls. One transaction drains 100%.
-- **Bulkhead:** the same attacker packs **ten 100,000 USDC payouts into one transaction**.
-  - Exactly 200,000 (the burst) pays inside the transaction.
+- **Bulkhead:** the same attacker packs **ten payouts into one transaction**, sized to fill the burst exactly.
+  - 199,000 pays inside the transaction: 100,000 of the 10M, then 99,000 of the 9.9M left (the burst is 2% of what is in the vault at each payout, `03 §3`).
   - 8 tickets (800,000) wait in public.
 - The stop button fires in the next slot: too late for legacy, in time here. Guardians freeze and cancel; **98% stays**.
 
@@ -111,7 +113,7 @@ The other Floor tests cover:
 
 ## Devnet signatures
 
-Deployed 28 Sep 2026. Every transaction below is finalized and succeeded. Program ids, hashes and the upgrade authority are in `SECURITY.md`.
+Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep. Every transaction below is finalized and succeeded. Program ids, hashes and the upgrade authority are in `SECURITY.md`.
 
 **Programs**
 
@@ -120,6 +122,7 @@ Deployed 28 Sep 2026. Every transaction below is finalized and succeeded. Progra
 | Floor deployed ([`HARLZqMw…`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet)) | [`2C7ZdVsN…`](https://explorer.solana.com/tx/2C7ZdVsNAnbPGhvkbdz4AzJ1JCaEPYv3du8P8Tq6GcnYMy5S5iqmEBZ8YEfG7t5WjKMg7ZhM1yCRHLh66GB71h7e?cluster=devnet) |
 | Vault deployed ([`HK5FbaLt…`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet)) | [`GvwetgZP…`](https://explorer.solana.com/tx/GvwetgZPFJiXbPTLB63CaRAc96T5cxKt8QwMUwdcmXPi6VCAKjJNZHvwDUwvEh8Dfr3FnkdW6a6L4U9KzHjgoez?cluster=devnet) |
 | Harbor deployed ([`6w9t76W2…`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet)) | [`3mB9Uy9i…`](https://explorer.solana.com/tx/3mB9Uy9iwEdfCmDKFXNkLU1U9dvnYKwM7mRUE2mSLesaQeuWakYxzjjAgwYUen4tJjZYxAUcq44v5Y4fwEXNhGwY?cluster=devnet) |
+| Vault upgraded in place, 29 Sep: capacities from `min(reference, live balance)`, abdication needs a guardian quorum (`15`, A1 and A3). Same id, market and seal time; `79b0a47f…a62d9c93`, verified byte-identical | [`5vRRUkGd…`](https://explorer.solana.com/tx/5vRRUkGdJJoX5jBxiERWBDSJDy5L7tugqKZJcauTqZNSLAPWEiLqNWbMx5NRzwC7fk3EUhkvvXuc9Gaywzc7Gmgj?cluster=devnet) |
 
 **The demo market**: protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet), vault [`7qrrXwX5…`](https://explorer.solana.com/address/7qrrXwX5uYeCDTfdQbbRNJC7tdLYRFCLfq6sswKuZqZw?cluster=devnet), test USDC mint [`CBK36QrH…`](https://explorer.solana.com/address/CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB?cluster=devnet); 3 guardians, quorum 2; 2% per hour, 5% per day.
 
@@ -136,6 +139,7 @@ Before the seal, `cloud/deploy/vault-check.mjs` (simulations; nothing sent) foun
 - the status page's figures equal to the program's own `attest`, at the same clock;
 - S1's payout and the whale's withdrawal of its own deposit refused (`NotSealed`), and so is an early seal (`SealNotExecutable`);
 - strangers refused (`NotAdmin`, `NotGuardian`), a 25h freeze refused (`FreezeTooLong`), and so are registering Harbor again and a second vault for the mint (`AlreadyInitialized`);
+- after the Vault upgrade (29 Sep): the admin abdicating "set admin" alone, or with one guardian, refused (`NoQuorum`); with a live guardian quorum, allowed;
 - the guardians' heartbeat, freeze and seal veto allowed.
 
 **Floor S10** on the target program [`CvZEMDwM…`](https://explorer.solana.com/address/CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs?cluster=devnet): an owner and 3 guardians, quorum 2, a 72h upgrade delay.

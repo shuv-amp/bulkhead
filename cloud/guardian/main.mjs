@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseEvents } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, newState, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, newState, pendingCancels, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { pageQuery, morePages, MAX_PAGES } from "./follow.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
@@ -119,8 +119,17 @@ async function execute(action, event, eventTime) {
   }
 }
 
+/** After a freeze lands: cancel every queued ticket still outstanding. */
+async function sweepCancels(event, eventTime) {
+  for (const action of pendingCancels(state, policy)) {
+    const ok = await execute(action, event, eventTime);
+    if (!ok) state.cancelled.delete(action.ticketId);
+  }
+}
+
 async function applyActions(actions, event, eventTime) {
   let freezeOk = true;
+  let froze = false;
   for (const action of actions) {
     // Cancels in this batch are "while frozen". If the freeze transaction
     // failed and the protocol is not already frozen, don't cancel yet.
@@ -132,12 +141,15 @@ async function applyActions(actions, event, eventTime) {
     if (action.type === "cancel" && !ok) state.cancelled.delete(action.ticketId);
     if (action.type !== "freeze") continue;
     freezeOk = ok;
-    if (ok) pendingFreeze = null;
-    else {
+    if (ok) {
+      pendingFreeze = null;
+      froze = true;
+    } else {
       state.freezing = false;
       pendingFreeze = { action, event, eventTime };
     }
   }
+  if (froze) await sweepCancels(event, eventTime);
 }
 
 /** Newest-first. `oldestWanted` null walks until `until` (live); a number walks the startup window. */
@@ -164,7 +176,8 @@ async function ingest(sigs, act) {
     for (const raw of parseEvents(tx?.meta?.logMessages)) {
       const e = decode(raw);
       if (e.kind === "other") continue;
-      const ctx = { ...worstFor(e.mint), now };
+      // Only a release needs the worst case; other events carry no mint.
+      const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
       const actions = assess(state, e, ctx, policy, act);
       if (!act) continue;
       log({ event: e.kind, signature: s.signature, ...e });
@@ -204,10 +217,12 @@ async function main() {
   for (;;) {
     try {
       if (pendingFreeze && wallNow() >= state.frozenUntil) {
-        const ok = await execute(pendingFreeze.action, pendingFreeze.event, pendingFreeze.eventTime);
+        const { event, eventTime } = pendingFreeze;
+        const ok = await execute(pendingFreeze.action, event, eventTime);
         if (ok) {
           state.freezing = true;
           pendingFreeze = null;
+          await sweepCancels(event, eventTime);
         }
       }
       const sigs = await signatures(cursor, null);

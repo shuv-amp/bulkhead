@@ -7,7 +7,8 @@
 use bulkhead_core::classify::LimitConfig;
 use bulkhead_core::ema::ema_update;
 use bulkhead_core::limiter::{
-    available_now, max_unbacked_over, params_from_config, request, Decision, LimiterState,
+    available_now, capacity_base, max_unbacked_over, params_from_config, request, Decision,
+    LimiterState,
 };
 
 const USDC: u64 = 1_000_000;
@@ -15,6 +16,11 @@ const HOUR: i64 = 3_600;
 const DAY: i64 = 86_400;
 
 fn defaults() -> LimitConfig {
+    defaults_with_caps(0, 0)
+}
+
+/// Default limits plus absolute caps (0 = no cap).
+fn defaults_with_caps(short_cap: u64, long_cap: u64) -> LimitConfig {
     LimitConfig {
         short_bps: 200,
         short_window_s: 3_600,
@@ -23,8 +29,8 @@ fn defaults() -> LimitConfig {
         min_queue_delay_s: 21_600,
         short_floor: 0,
         long_floor: 0,
-        short_cap: 0,
-        long_cap: 0,
+        short_cap,
+        long_cap,
     }
 }
 
@@ -34,9 +40,11 @@ struct Vault {
     reference: u64,
     ref_at: i64,
     lim: LimiterState,
-    /// If true, capacities come from `min(reference, balance)` (the proposed
-    /// mitigation); otherwise from the reference alone (current programs).
+    /// If true, capacities come from `capacity_base(reference, balance)`,
+    /// what the programs do since the A1 fix; false replays the programs
+    /// before it (capacities from the reference alone).
     min_with_balance: bool,
+    cfg: LimitConfig,
 }
 
 impl Vault {
@@ -47,6 +55,7 @@ impl Vault {
             ref_at: 0,
             lim: LimiterState::default(),
             min_with_balance,
+            cfg: defaults(),
         }
     }
 
@@ -59,7 +68,7 @@ impl Vault {
 
     fn capacity_base(&self) -> u64 {
         if self.min_with_balance {
-            self.reference.min(self.balance)
+            capacity_base(self.reference, self.balance)
         } else {
             self.reference
         }
@@ -79,7 +88,7 @@ impl Vault {
     /// An unbacked payout the attacker sizes to exactly what is instant now.
     fn drain_instant(&mut self, now: i64) -> u64 {
         self.touch(now);
-        let p = params_from_config(&defaults(), self.capacity_base());
+        let p = params_from_config(&self.cfg, self.capacity_base());
         let want = available_now(&self.lim, &p, now * 1_000).min(self.balance);
         if want == 0 {
             return 0;
@@ -265,6 +274,11 @@ fn clock_stepping_backwards_never_beats_g1() {
     }
 }
 
+/// Not an attack on depositors: the donated tokens belong to nobody, so every
+/// unbacked unit drained afterwards comes out of the donation first, and
+/// depositors lose nothing until the drain exceeds it (asserted below). Kept
+/// because absolute caps are what bound the number.
+///
 /// A raw token transfer is not a deposit: the reference is not touched and no
 /// backing is credited. Once the vault has been quiet for a day, the next
 /// touch moves the reference the whole way (`dt >= TAU`). `min(reference,
@@ -290,4 +304,75 @@ fn donation_after_a_quiet_day_inflates_even_with_min_balance() {
         "9.5× the pre-donation bound; cited in docs/15"
     );
     assert!(taken as u128 >= 4 * bound);
+    // Depositors are whole: what is left still covers every original deposit.
+    assert!(v.balance >= vault, "depositors lost {}", vault - v.balance);
+}
+
+/// Finding A1b. The attacker parks its OWN capital, drains while that capital
+/// is still in the vault, then withdraws it (backed, never limited). The live
+/// balance is inflated during the drain, so `capacity_base` alone does not
+/// help; absolute caps do. Honest depositors' loss is what the vault can no
+/// longer cover of their 10M after the attacker's exit.
+fn a1b_honest_loss(min_with_balance: bool, cfg: LimitConfig, attack_s: i64) -> u64 {
+    let (honest, parked) = (10_000_000 * USDC, 90_000_000 * USDC);
+    let mut v = Vault::new(honest, min_with_balance);
+    v.cfg = cfg;
+    v.backed_in(0, parked);
+    hourly_touches(&mut v, HOUR, 3 * DAY);
+    drain_for(&mut v, 3 * DAY, attack_s, 60);
+    v.backed_out(3 * DAY + attack_s + 60, parked);
+    honest - v.balance.min(honest)
+}
+
+#[test]
+fn finding_a1b_parked_capital_needs_absolute_caps() {
+    let honest = 10_000_000 * USDC;
+    let caps = defaults_with_caps(200_000 * USDC, 500_000 * USDC); // 2% and 5% of the honest vault
+    let rows = [
+        ("before the A1 fix", false, defaults()),
+        ("capacity_base only", true, defaults()),
+        ("capacity_base + caps", true, caps),
+    ];
+    let mut loss = [[0u64; 2]; 3];
+    for (i, (label, minb, cfg)) in rows.iter().enumerate() {
+        for (j, secs) in [120i64, DAY].into_iter().enumerate() {
+            loss[i][j] = a1b_honest_loss(*minb, *cfg, secs);
+            eprintln!(
+                "A1b | {label:22} | attack for {:>5} s | honest depositors lose {:>9} USDC ({:.1}%)",
+                secs,
+                loss[i][j] / USDC,
+                loss[i][j] as f64 / honest as f64 * 100.0
+            );
+        }
+    }
+    // capacity_base alone leaves a two-minute attack at ~20% of the honest vault...
+    assert!(loss[1][0] >= honest / 6, "{}", loss[1][0]);
+    // ...absolute caps bring it back to the G1 bound on the honest vault.
+    let p = params_from_config(&defaults(), honest);
+    assert!(loss[2][0] as u128 <= max_unbacked_over(&p, 180 * 1_000));
+    assert!(loss[2][1] as u128 <= max_unbacked_over(&p, (DAY + 60) * 1_000));
+}
+
+/// Caps alone do not fix the other direction: after a bank run, capacity
+/// sized from the old reference still pays ~20% of what is left. Both halves
+/// together (capacity_base + caps) hold 2%.
+#[test]
+fn caps_alone_do_not_fix_the_bank_run_but_with_capacity_base_they_do() {
+    let vault = 10_000_000 * USDC;
+    let mut burst = [0u64; 2];
+    for (i, minb) in [false, true].into_iter().enumerate() {
+        let mut v = Vault::new(vault, minb);
+        v.cfg = defaults_with_caps(200_000 * USDC, 500_000 * USDC);
+        hourly_touches(&mut v, 0, DAY);
+        for k in 0..9 {
+            v.backed_out(DAY + k * 300, vault / 10);
+        }
+        burst[i] = v.drain_instant(DAY + HOUR);
+    }
+    assert!(burst[0] >= 150_000 * USDC, "caps only: {}", burst[0]);
+    assert!(
+        burst[1] <= 20_000 * USDC,
+        "caps + capacity_base: {}",
+        burst[1]
+    );
 }
