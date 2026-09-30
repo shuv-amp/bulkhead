@@ -64,7 +64,7 @@ That budget is 2.07% of the vault if the freeze lands in 2 minutes, 4% in 1 hour
 
 ## 4. UX principles
 
-1. **Invisible when things are fine.** Deposits, withdrawals of own funds and ordinary borrows never touch the limiter. Calibration (`07 §5`) checks this on the protocol's own history.
+1. **Invisible when things are fine.** Deposits, withdrawals of own funds and ordinary borrows never touch the limiter. Calibration (`07 §4`) checks this on the protocol's own history.
 2. **One line of worst case.** Every status page leads with: "Worst case right now: **$X** instantly, then **$Y per hour** until a guardian freezes (**$Z** per day at most)."
 3. **Queued is visible, not lost.** A ticket shows its amount, reason (unbacked, over the limit), ETA and status. The protocol shows "arriving at ETA" in its own UI.
 4. **Every loosening has a countdown.** Pending changes show time left and who can veto.

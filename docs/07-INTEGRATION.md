@@ -55,7 +55,7 @@ invoke_signed_with_bounds::<MAX, &AccountView>(&release_ix, &accounts, &[Signer:
 
 - **Your own checks come first.** Harbor's `WITHDRAW` requires the user to own the recipient token account. A real protocol also checks the user's claim, LTV and so on. Bulkhead is not your risk engine; it bounds what happens when that engine is wrong or compromised.
 - **Price pairs.** For a `release`, pass `(Asset PDA, Pyth price account)` pairs for the released mint and then for every other mint in the recipient's ledger, in ledger order. For an owner who owes nothing and takes back their own deposit (G2), pass the asset PDA and any non-Pyth account as the price: no prices are needed.
-- **Liquidations:** take the liquidator's repayment first (a `deposit`, which creates backing), then `release` the seized collateral. The bonus uses the limiter, so size the daily bucket for cascades.
+- **Liquidations:** take the liquidator's repayment first (a `deposit`, which creates backing), then `release` the seized collateral. More than the bonus is unbacked: the repayment backs collateral only at the conservative *high* price times the liability weight, and in a falling market Pyth's EMA sits above spot. In the crash scenario (`08` S11) 14–17% of every liquidation is unbacked with a 5% bonus. Size the buckets for cascades (§4, step 5).
 
 ## 4. Calibration (how to set the limits for a real protocol)
 
@@ -65,10 +65,13 @@ Inputs: the last 90 days of the protocol's outflows per vault (from its events o
 2. For each vault, compute the maximum unbacked sum over any 1-hour window and any 24-hour window, as a fraction of the capacity base at that time (the lower of the reference and the live balance, `03 §3`).
 3. Set `short_bps ≥ 1.5 × max hourly` and `long_bps ≥ 1.5 × max daily`, never below the defaults (2%, 5%) unless the history is flat.
 4. Set absolute caps (`short_cap`, `long_cap`, in tokens) at the same percentages of the vault's honest size, for example its 30-day median balance. Without caps, an attacker who parks their own capital in the vault raises the base while it is there (`15`, A1b). Lowering a cap is instant; raising one waits 72h, so review caps as the vault grows. The devnet demo market runs with them (`cloud/deploy/market.mjs caps`).
-5. Report how many historical requests *would have queued* under the chosen values. The target is zero.
-6. Publish the report. It is the evidence that honest users never notice.
+5. **Lending markets: size for a crash, not only for history.** A quiet 90 days says nothing about a cascade. Run `crates/bulkhead-core/tests/cascade.rs` with the market's own weights, bonus and collateral share. With the defaults, a 10-minute −20% crash that liquidates 17% of a vault already queues some liquidations for 6 hours; 4%/h and 10%/day absorb a 30% cascade (`08` S11). Looser limits also double what a thief can take, so this is a trade-off to publish, not hide.
+6. Report how many historical requests *would have queued* under the chosen values. The target is zero.
+7. Publish the report. It is the evidence that honest users never notice.
 
 Harbor is calibrated synthetically. Real calibration happens with the first design partner.
+
+**Which protocols fit.** Backing belongs to whoever deposited. Protocols whose positions are **not transferable** (lending accounts, perps margin, vaults without a share token) fit well: withdrawals are backed and never queue. Protocols whose positions **are** transferable (LP tokens, cTokens, liquid-staking tokens) do not fit as they are: a buyer on the secondary market redeems with no backing, so ordinary redemptions go through the limited lane, calibration pushes the limits up, and the bound weakens. They need a backing-transfer hook, which is not in this build (§6).
 
 ## 5. Harbor, the reference integration
 
@@ -87,3 +90,4 @@ A protocol whose admin can pay anyone anything is the worst case. Harbor shows t
 
 - **Mint gates** (a Bulkhead-held mint authority with the same limiter on supply) and **flash loans** (`flash_release` with an introspected top-level `flash_repay`) are specified in `03 §4.8`.
 - They are not implemented in this build. A protocol that needs them waits, rather than routing around custody.
+- **A backing-transfer hook** (moving backing with a transferable position, §4) is not designed yet.
