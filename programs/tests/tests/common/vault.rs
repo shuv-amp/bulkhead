@@ -228,9 +228,15 @@ pub fn asset_bytes(allowlisted: bool, haircut: u32, liability: u32, conf_mult: u
     d
 }
 
+/// The Vault program id Harbor is built for (`programs/harbor/build.rs`
+/// default): the Vault must live there for Harbor to forward to it.
+pub fn harbor_vault_id() -> Address {
+    Address::from_str_const("HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b")
+}
+
 impl Market {
     pub fn new(env: &mut Env) -> Market {
-        Market::with_ids(env, Address::new_unique(), Address::new_unique())
+        Market::with_ids(env, harbor_vault_id(), Address::new_unique())
     }
 
     /// Like `new`, with fixed program ids (the E2E world uses the ids of the

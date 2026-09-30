@@ -27,6 +27,11 @@ done
 solana-keygen new --no-bip39-passphrase --silent --force --outfile "$D/deployer.json"
 solana airdrop 50 "$(solana-keygen pubkey "$D/deployer.json")" --url "$RPC" > /dev/null
 
+echo "== Harbor built for this validator's Vault (it forwards only to the Vault it was built for)"
+scripts/build-programs.sh > /dev/null
+scripts/build-programs.sh --harbor-for "$(solana-keygen pubkey target/deploy/bulkhead_vault-keypair.json)" "$D/harbor" > /dev/null
+export HARBOR_SO="$D/harbor/bulkhead_harbor.so"
+
 scripts/deploy.sh "$RPC" "$D/deployer.json" "$D/market" | tee "$D/deploy.log"
 
 echo "== a second run must change nothing (safe re-run after a network failure)"
@@ -77,10 +82,10 @@ node cloud/deploy/vault-check.mjs "$RPC" "$D/market" | grep -E "absolute caps|at
 
 echo "== the deployed programs must run exactly the local build"
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
-SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=bulkhead_harbor"
+SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=$HARBOR_SO"
 echo "== the same check without account reads (cloud/deploy/loader.mjs, getProgramAccounts only)"
 node cloud/deploy/loader.mjs verify "$RPC" "$(solana-keygen pubkey "$D/deployer.json")" \
-  "$(id bulkhead_floor)=target/deploy/bulkhead_floor.so" "$(id bulkhead_vault)=target/deploy/bulkhead_vault.so" "$(id bulkhead_harbor)=target/deploy/bulkhead_harbor.so"
+  "$(id bulkhead_floor)=target/deploy/bulkhead_floor.so" "$(id bulkhead_vault)=target/deploy/bulkhead_vault.so" "$(id bulkhead_harbor)=$HARBOR_SO"
 
 echo "== Floor on a deployed target program (scripts/floor-devnet.sh, as on devnet)"
 scripts/floor-devnet.sh "$RPC" "$D/deployer.json" "$D/floor"

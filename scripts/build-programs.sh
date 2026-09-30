@@ -14,6 +14,15 @@ if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
   cargo-build-sbf --no-rustup-override --arch v3 --manifest-path programs/floor/Cargo.toml \
     --sbf-out-dir target/deploy >/dev/null 2>&1 || true
 fi
+# `--harbor-for <vault-id> <out-dir>`: only Harbor, for a local Vault (Harbor
+# forwards only to the Vault it was built for; programs/harbor/build.rs). The
+# canonical build below always uses the default: the devnet Vault.
+if [ "${1:-}" = --harbor-for ]; then
+  BULKHEAD_VAULT_ID="$2" RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --arch v3 \
+    --manifest-path programs/harbor/Cargo.toml --sbf-out-dir "$3"
+  exit 0
+fi
+unset BULKHEAD_VAULT_ID
 for p in programs/floor programs/vault programs/harbor; do
   RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --arch v3 \
     --manifest-path "$p/Cargo.toml" --sbf-out-dir target/deploy

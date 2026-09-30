@@ -7,7 +7,8 @@
 //! exercise the Vault program through real CPIs.
 //!
 //! Every instruction forwards to Bulkhead, signing as Harbor's caller PDA
-//! `["bulkhead-caller"]`. Accounts: `0` = the Bulkhead Vault program, `1` =
+//! `["bulkhead-caller"]`, and only to the Vault program it was built for
+//! (`build.rs`; docs/07 §3). Accounts: `0` = the Bulkhead Vault program, `1` =
 //! Harbor's caller PDA, then instruction-specific accounts, then the Vault
 //! instruction's accounts from its index 1 on (index 0 is the caller).
 
@@ -24,6 +25,10 @@ pinocchio::no_allocator!();
 pinocchio::nostd_panic_handler!();
 
 pub const CALLER_SEED: &[u8] = b"bulkhead-caller";
+
+// `VAULT_PROGRAM`: the Vault this Harbor forwards to, fixed at build time (build.rs).
+include!(concat!(env!("OUT_DIR"), "/vault_id.rs"));
+const VAULT: Address = Address::new_from_array(VAULT_PROGRAM);
 
 pub mod ix {
     /// Register with Bulkhead (the caller PDA is the registrar). Data: Vault args.
@@ -51,6 +56,11 @@ pub fn process_instruction(
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
     let vault_program = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // Every forwarded call carries the caller PDA's signature, which the Vault
+    // trusts as Harbor itself: forward to that one Vault and nothing else.
+    if vault_program.address() != &VAULT {
+        return Err(ProgramError::IncorrectProgramId);
+    }
     let caller = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
     let (caller_addr, bump) = Address::find_program_address(&[CALLER_SEED], program_id);
     if caller.address() != &caller_addr {

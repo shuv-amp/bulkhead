@@ -217,6 +217,14 @@ impl Env {
         }
     }
 
+    /// The error of a failing transaction, custom or not.
+    pub fn fails_err(&mut self, ixs: &[Instruction], signers: &[&Keypair]) -> TransactionError {
+        match self.send(ixs, signers) {
+            Ok(m) => panic!("expected failure, got success:\n{}", m.logs.join("\n")),
+            Err(e) => e.err,
+        }
+    }
+
     pub fn account(&self, a: &Address) -> Account {
         self.svm.get_account(a).expect("account exists")
     }

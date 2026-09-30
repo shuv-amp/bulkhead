@@ -69,7 +69,8 @@ fn build_world() {
     let mut env = Env::new();
     env.time = now - 80 * 3_600; // genesis 80h ago; the seal executes 8h ago
     env.sync_clock();
-    let (vault_program, harbor) = (program_id("bulkhead_vault"), program_id("bulkhead_harbor"));
+    // The Vault at the id Harbor is built for; the validator loads it there.
+    let (vault_program, harbor) = (harbor_vault_id(), program_id("bulkhead_harbor"));
     let m = Market::with_ids(&mut env, vault_program, harbor);
     let usdc = m.create_vault(&mut env, 6, Limits::default_limits(), [1; 32], None);
     let whale = Keypair::new();

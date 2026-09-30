@@ -32,10 +32,13 @@ deployed() {
   if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deployed "$URL" "$AUTH" "$(id "$1")"
   else solana program show --url "$URL" --keypair "$PAYER" "$(id "$1")" > /dev/null 2>&1; fi
 }
+# HARBOR_SO: a Harbor built for a local Vault (`scripts/build-programs.sh
+# --harbor-for`); the default Harbor forwards only to the devnet Vault.
+so() { if [ "$1" = bulkhead_harbor ] && [ -n "${HARBOR_SO:-}" ]; then echo "$HARBOR_SO"; else echo "target/deploy/$1.so"; fi; }
 deploy_one() {
-  if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deploy "$URL" "$PAYER" "target/deploy/$1-keypair.json" "target/deploy/$1.so"
+  if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deploy "$URL" "$PAYER" "target/deploy/$1-keypair.json" "$(so "$1")"
   else solana program deploy --url "$URL" --keypair "$PAYER" --upgrade-authority "$PAYER" \
-    --program-id "target/deploy/$1-keypair.json" "target/deploy/$1.so"; fi
+    --program-id "target/deploy/$1-keypair.json" "$(so "$1")"; fi
 }
 for p in bulkhead_floor bulkhead_vault bulkhead_harbor; do
   if deployed "$p"; then

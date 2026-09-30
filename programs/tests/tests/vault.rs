@@ -656,6 +656,27 @@ fn attest_never_reports_more_than_the_balance() {
     assert_eq!(a.available_now, 1_000 * USDC, "the balance, not the 1,000,000 floor");
 }
 
+/// A11: Harbor forwards only to the Vault it was built for, even to a copy of
+/// the Vault program deployed at another address.
+#[test]
+fn harbor_forwards_only_to_its_own_vault() {
+    let mut w = World::new();
+    let depositor = w.user();
+    let from = w.account("usdc", &depositor.pubkey());
+    let (mint, auth, program) = (w.usdc.mint, &w.usdc.mint_authority, w.usdc.token_program);
+    w.env.mint_to(&mint, auth, &from, 1_000 * USDC, &program);
+    let copy = Address::new_unique();
+    w.env.svm.add_program(copy, &so("bulkhead_vault")).unwrap();
+    let mut ix = w.m.deposit_ix(&w.env, &w.usdc, &depositor.pubkey(), &from, 1_000 * USDC);
+    ix.accounts[0].pubkey = copy;
+    assert_eq!(
+        w.env.fails_err(&[ix], &[&depositor]),
+        solana_transaction_error::TransactionError::InstructionError(0, solana_instruction_error::InstructionError::IncorrectProgramId)
+    );
+    let ix = w.m.deposit_ix(&w.env, &w.usdc, &depositor.pubkey(), &from, 1_000 * USDC);
+    w.env.ok(&[ix], &[&depositor]);
+}
+
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
