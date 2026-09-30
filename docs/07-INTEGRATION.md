@@ -26,7 +26,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
    - admin = your Squads vault;
    - 2–8 guardians (ops key, the Bulkhead Cloud bot, a security partner) and a threshold ≥ 2;
    - a heartbeat interval (7 days default);
-   - loosen delay ≥ 72h;
+   - a loosen delay between 72h and 30 days;
    - `lifeboat_destination` = a *different* cold multisig.
 3. **Create one vault per custody mint** (`create_vault` with your limits). The mint must pass the Token-2022 policy (`05 §7`).
 4. **Allowlist valued assets** during genesis (`upsert_asset`: Pyth feed id, haircut ≥ your max LTV + 5 points, liability weight, confidence multiple, max age, max confidence). Use feeds for deep assets only.
@@ -48,11 +48,13 @@ Harbor forwards to Bulkhead, signing as its caller PDA:
 
 ```rust
 // accounts: [vault program, caller PDA, …harbor accounts, …Vault instruction accounts from index 1]
+if vault_program.address() != &VAULT { return Err(ProgramError::IncorrectProgramId); } // built in, never passed in
 let seeds = [Seed::from(b"bulkhead-caller".as_ref()), Seed::from(&[bump])];
 invoke_signed_with_bounds::<MAX, &AccountView>(&release_ix, &accounts, &[Signer::from(&seeds)])?;
 // then read the outcome with get_return_data(): backed, instant, queued, ticket_id, eta_s
 ```
 
+- **Check the Vault program id before every CPI that carries your caller PDA's signature.** The Vault trusts that signature as your protocol, so compare the program you invoke with the Vault id built into your program, never one taken from the accounts (`15`, A11). Harbor's id comes from `programs/harbor/build.rs`.
 - **Your own checks come first.** Harbor's `WITHDRAW` requires the user to own the recipient token account. A real protocol also checks the user's claim, LTV and so on. Bulkhead is not your risk engine; it bounds what happens when that engine is wrong or compromised.
 - **Price pairs.** For a `release`, pass `(Asset PDA, Pyth price account)` pairs for the released mint and then for every other mint in the recipient's ledger, in ledger order. For an owner who owes nothing and takes back their own deposit (G2), pass the asset PDA and any non-Pyth account as the price: no prices are needed.
 - **Liquidations:** take the liquidator's repayment first (a `deposit`, which creates backing), then `release` the seized collateral. The bonus uses the limiter, so size the daily bucket for cascades.
@@ -80,6 +82,8 @@ Harbor is deliberately naive, so the scenarios can play a compromised protocol:
 | 1 | `DEPOSIT(amount)` | a user | Forwards to `deposit` |
 | 2 | `WITHDRAW(amount)` | a user who owns the recipient account | Forwards to `release`, any amount (a "buggy" protocol) |
 | 3 | `ADMIN_PAYOUT(amount)` | the admin recorded in Harbor's Bulkhead protocol account | Forwards to `release` for anyone: the Drift path |
+
+Harbor forwards only to the Vault it was built for: the devnet Vault by default, or a local one with `scripts/build-programs.sh --harbor-for <vault-id> <out-dir>` (the deploy rehearsal does this; `scripts/deploy.sh` takes it as `HARBOR_SO`).
 
 A protocol whose admin can pay anyone anything is the worst case. Harbor shows that even then, Bulkhead bounds the outflow (`08` S1, S8).
 

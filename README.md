@@ -97,7 +97,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 21/21, with coverage counters so a vacuous pass fails |
 | Bounded proofs (Kani) and exhaustive checks | **13/13 harnesses verified** (11 for every value of their types); 5 exhaustive tests over ~25.7M inputs |
 | Mutation testing (`cargo-mutants`, 647 injected bugs) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 48/48: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 53/53: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
 | Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
 | End to end | Above |
 | On devnet (28 Sep; Vault upgraded in place 29 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured (with the calibrated absolute caps), the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |

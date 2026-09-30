@@ -19,7 +19,7 @@ Conventions:
 
 | Name | Value | Meaning |
 |---|---|---|
-| `MIN_LOOSEN_DELAY_S` | 259 200 | 72h floor for any loosening, including the seal |
+| `MIN_LOOSEN_DELAY_S` / `MAX_LOOSEN_DELAY_S` | 259 200 / 2 592 000 | 72h floor for any loosening, including the seal; 30-day ceiling, so a raised delay can't put later loosenings (admin and guardian replacement included) out of reach (`15`, A7) |
 | `MAX_FREEZE_S` | 86 400 | Longest single freeze (re-freezable) |
 | `MAX_TICKET_EXTENSION_S` / `_TOTAL_S` | 86 400 / 604 800 | Guardian extension limits |
 | `QUEUE_HORIZON_S` | 604 800 | Requests whose ETA would be further out are refused |
@@ -58,11 +58,11 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 
 | Tag | Instruction | Signer | Checks | Effect |
 |---|---|---|---|---|
-| 0 | `register_protocol` | the protocol's upgrade authority, **or** its caller PDA via CPI | delay ≥ 72h; 2 ≤ threshold ≤ count ≤ 8; guardians unique, ≠ admin; interval 1–30 days; destination ≠ admin | Creates `Protocol` (survives a pre-funded address) |
+| 0 | `register_protocol` | the protocol's upgrade authority, **or** its caller PDA via CPI | 72h ≤ delay ≤ 30 days; 2 ≤ threshold ≤ count ≤ 8; guardians unique, ≠ admin; interval 1–30 days; destination ≠ admin | Creates `Protocol` (survives a pre-funded address) |
 | 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7) | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
 | 2 | `upsert_asset(config)` | admin | genesis only (afterwards: `propose_change`) | Creates or updates `Asset` |
 | 3 | `import_backing(amount)` | admin | genesis only | Credits `Backing[owner]`; `vault.imported += amount` |
-| 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault passed exactly once; `imported ≤ balance` for each | `sealed = true` |
+| 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault passed exactly once; for each, `imported + total_in ≤ balance + lifeboat_amount` (every claim created before the seal is covered, `15` A10) | `sealed = true` |
 | 7 | `deposit(amount)` | caller + source authority | accounts match the vault; source ≠ vault account | EMA update; `transfer_checked`; credits the amount actually **received** (transfer fees) to `Backing[source authority]`; returns `received` |
 | 8 | `release(amount)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
 | 23 | `quote_release(amount)` | none | as `release` | The same outcome as return data, no writes (for `simulateTransaction`) |
@@ -81,7 +81,7 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 | 24 / 25 | `lifeboat_move` / `lifeboat_return` | admin / admin or live quorum | — | Vault ↔ lifeboat (a Bulkhead-held account) |
 | 26 / 28 / 27 | `propose_lifeboat_exit` / `veto_lifeboat_exit` / `execute_lifeboat_exit` | admin / live guardian / anyone | destination set ≥ 72h before the proposal; exit waits ≥ 72h; destination account owned by the committed destination | Lifeboat → the committed destination |
 
-Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin`, `SetLifeboatDestination`, `SetLoosenDelay`. Guardians, admin and destination changes are always loosenings; a delay below 72h is refused even before the seal.
+Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin`, `SetLifeboatDestination`, `SetLoosenDelay`. Guardians, admin and destination changes are always loosenings; a delay outside [72h, 30 days] is refused even before the seal.
 
 **Return data of `release`** (40 bytes, little-endian): `backed u64 | instant u64 | queued u64 | ticket_id u64 | eta_s i64`.
 - It is set after the last CPI, because every CPI clears return data.
@@ -106,7 +106,7 @@ Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin
 Return data (64 bytes): `available_now`, `worst_1h`, `worst_24h`, `balance`, `frozen_until`, `queued`, `loosen_delay_s`, `pending u32`, `live guardians u8`, `guardian count u8`, `sealed u8`.
 
 - `worst_T` is the G1 bound over `T` if nobody freezes.
-- `available_now` is exact: that amount would be instant; one unit more would not.
+- `available_now` is exact: that amount would be instant; one unit more would not. It never exceeds `balance`.
 
 Any program can CPI into it. A router or curator can read a venue's live worst case **on-chain** and refuse to route funds when it's too large.
 
@@ -119,7 +119,8 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 | Extension | Policy | Reason |
 |---|---|---|
 | TransferFeeConfig (1) | Allowed | Deposits credit what was actually received |
-| MintCloseAuthority (3), InterestBearing (10), MetadataPointer / TokenMetadata (18, 19), group pointers and members (20–23), ScaledUiAmount (25), PermissionedBurn (28) | Allowed | No custody effect |
+| InterestBearing (10), MetadataPointer / TokenMetadata (18, 19), group pointers and members (20–23), ScaledUiAmount (25), PermissionedBurn (28) | Allowed | No custody effect |
+| MintCloseAuthority (3) | Allowed only with no close authority | A zero-supply mint with one could be closed and created again with extensions this policy refuses (`15`, A8) |
 | DefaultAccountState (6) | Allowed unless Frozen | A frozen default would trap the vault account |
 | PermanentDelegate (12) | **Refused** | The delegate could move vault tokens outside Bulkhead (tested) |
 | TransferHook (14) | **Refused** | Arbitrary code in the custody path |
@@ -127,11 +128,13 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 | NonTransferable (9), Pausable (26) | **Refused** | Custody would be stuck or controlled elsewhere |
 | Any mint's freeze authority | Disclosed | The issuer can freeze any holder; nobody can prevent that |
 
+Token accounts and mints are checked as what they claim to be: a token account is 165 bytes, or a Token-2022 account carrying the Account type byte; neither a token account nor a mint can be a 355-byte multisig.
+
 ## 8. Errors
 
 Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and the abort code:
 
-`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047).
+`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow`, `DelayAboveMaximum` (8048).
 
 ## 9. The Solana attack classes (`sealevel-attacks`)
 

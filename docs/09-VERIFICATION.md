@@ -29,7 +29,7 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Adversarial tests** | 7 tests (`crates/bulkhead-core/tests/adversarial.rs`): the attacks of `15` run through the real core, before and after each fix | Pass |
 | **Bounded proofs (Kani)** | 13 harnesses: logic at full width, 2 at small width (§5) | **13/13 verified**, 209 s |
 | **Mutation testing** | `cargo-mutants` on the core: 647 mutants (§6) | Every non-equivalent mutant killed; 22 equivalents, each explained |
-| **Program tests** | Floor (21) and Vault (27) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 48/48 |
+| **Program tests** | Floor (21) and Vault (32) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 53/53 |
 | **Program ↔ model differential** | Random operation sequences on-chain vs a host model built only from the core; invariants after every step (§7) | 12,000 steps across 24 seeds, identical; 24,000 steps across 24 seeds after the A1 fix (29 Sep), identical |
 | **End-to-end** | `solana-test-validator` + the programs + the Cloud guardian + an attacker (`cloud/e2e/run.sh`) | Attacker ordered 1.2M and got 100k: the burst is 2% of what is in the vault at each payout, so the second 100k no longer fit (200k before the 29 Sep fix); guardian froze 2–6 s after the triggering block (across runs); every queued payout cancelled; page numbers equal to `attest`; the run fails unless all of this holds |
 | **Client tests** | 25 JavaScript tests: base58, legacy messages, PDA derivation against an on-chain address, 256 curve25519 vectors from `curve25519-dalek`, RFC 8032 test vector 1, the guardian's policy and its follower, a paced attacker against the policy, the 40,000-case JS-vs-Python differential | 25/25 |
@@ -73,7 +73,7 @@ python3 reference/diff_runner.py --cases 200000 --seed 7
 scripts/prove.sh                       # Kani, 13 harnesses (~3.5 min)
 scripts/mutants.sh                     # mutation testing (~40 min)
 scripts/build-programs.sh              # Floor, Vault, Harbor for sBPF v3; checks e_flags == 3
-(cd programs/tests && cargo test --release)            # 48 program tests + the program-vs-model differential
+(cd programs/tests && cargo test --release)            # 53 program tests + the program-vs-model differential
 (cd programs/tests && BULKHEAD_PROGRAM_SEEDS=24 BULKHEAD_PROGRAM_STEPS=500 cargo test --release --test differential)
 cloud/e2e/run.sh                       # validator + guardian + attacker
 node --test cloud/test/*.test.mjs      # client, policy, JS-vs-Python differential
@@ -115,10 +115,10 @@ cloud/e2e/s1.sh <url> <market>                    # S1 with the guardian on any 
 | 23 | 30 Sep | Second review (`15`, A13) | The guardian read events from log text without checking which program wrote them, and didn't notice truncated logs. | Fixed: events are attributed to the emitting program and only the Vault's (or Floor's) count; freeze state and tickets come from the chain; a truncated transaction's outflow comes from token balances. Seven tests (`cloud/test/events.test.mjs`), each verified to fail without its fix. |
 | 24 | 30 Sep | Second review (`15`, A12) | The docs said guardian freezes use priority fees and several RPCs; the code used neither. | Fixed: compute-unit limit and an automatic priority price on every guardian transaction; broadcast to every configured RPC. Three tests (`cloud/test/delivery.test.mjs`). |
 | 25 | 30 Sep | Second review (`15`, A9) | Pyth's Solana trust root changed on 26 Aug 2026 (3 of 5 Pyth Pro keys); the threat model didn't name it. | Documented (`04` assumption 2, T5); bounding new backed liabilities is a design item for the audit build. |
-| 26 | 30 Sep | Second review (`15`, A7) | The loosen delay had no upper bound. | Fixed in the on-chain PR: a 30-day cap in the core, the Vault and Floor. |
-| 27 | 30 Sep | Second review (`15`, A10) | The seal didn't count backing created by pre-seal deposits. | Fixed in the on-chain PR: coverage of imports plus deposits. |
-| 28 | 30 Sep | Second review (`15`, A11) | Harbor forwarded its caller-PDA signature without checking the target program. | Fixed in the on-chain PR: a built-in Vault id; guide step. |
-| 29 | 30 Sep | Second review (`15`, A8) | The mint policy allowed a mint close authority. | Fixed in the on-chain PR: extension 3 only without an authority. |
+| 26 | 30 Sep | Second review (`15`, A7) | The loosen delay had no upper bound. | Fixed: a 30-day cap in the core, the Vault and Floor. Core units, three golden vectors (the Python model agrees), `the_loosen_delay_is_capped_at_30_days` and Floor's delay test. |
+| 27 | 30 Sep | Second review (`15`, A10) | The seal didn't count backing created by pre-seal deposits. | Fixed: imports plus deposits must be covered by the balance plus the lifeboat. `the_seal_requires_imports_and_deposits_to_be_covered_together`. |
+| 28 | 30 Sep | Second review (`15`, A11) | Harbor forwarded its caller-PDA signature without checking the target program. | Fixed: a built-in Vault id (`programs/harbor/build.rs`); guide step (`07 §3`). `harbor_forwards_only_to_its_own_vault`; the deploy rehearsal builds Harbor for its local Vault. |
+| 29 | 30 Sep | Second review (`15`, A8) | The mint policy allowed a mint close authority. | Fixed: extension 3 only without an authority. `a_mint_with_a_close_authority_cannot_become_a_vault`. Each program test in rows 26–29 fails against the previous binary. |
 
 A method that finds a real bug in its own authors' code within minutes, twice, is the best argument for keeping it in CI.
 
