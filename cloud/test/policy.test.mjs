@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -121,4 +121,26 @@ test("after a late freeze, every recorded ticket is swept up once, with its own 
   assert.deepEqual(sweep.map((x) => [x.ticketId, x.mint]), [[3n, mint], [4n, other]]);
   assert.deepEqual(pendingCancels(s), [], "each ticket once");
   assert.deepEqual(pendingCancels(newState(), { ...DEFAULT_POLICY, cancelTicketsWhenFrozen: false }), []);
+});
+
+test("floor readiness: an unarmed stop button and an unpinned snapshot are reported (A5)", () => {
+  const ready = { status: "live", abortStaged: true, snapshotPinned: true };
+  assert.deepEqual(floorAlerts(ready), []);
+  assert.deepEqual(floorAlerts({ ...ready, abortStaged: false }).map((a) => a.code), ["unarmed"]);
+  assert.deepEqual(floorAlerts({ ...ready, snapshotPinned: false }).map((a) => a.code), ["no_snapshot"]);
+  assert.deepEqual(floorAlerts({ ...ready, abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["unarmed", "no_snapshot"]);
+  // Stopped: arming is moot until it is restored; that is the one thing to say.
+  assert.deepEqual(floorAlerts({ status: "aborted", abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["stopped"]);
+});
+
+test("floor readiness reads the real account layout", async () => {
+  const { decodeFloor } = await import("../lib/solana.mjs");
+  const d = new Uint8Array(916);
+  d.set(new TextEncoder().encode("FLOORv01"), 0);
+  assert.deepEqual(floorAlerts(decodeFloor(d)).map((a) => a.code), ["unarmed", "no_snapshot"]);
+  d[448] = 6; // abort buffer (programs/floor/src/state.rs O_ABORT_BUF)
+  d[480] = 7; // snapshot buffer (O_SNAP_BUF)
+  assert.deepEqual(floorAlerts(decodeFloor(d)), []);
+  d[426] = 1; // STATUS_ABORTED
+  assert.deepEqual(floorAlerts(decodeFloor(d)).map((a) => a.code), ["stopped"]);
 });

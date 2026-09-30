@@ -254,7 +254,7 @@ Liquidations:
 - the liquidator's repayment is a deposit, which creates backing;
 - the seized collateral is paid to the liquidator: the part the repayment backs goes backed, the bonus goes unbacked.
 
-Size the daily bucket so a historical liquidation cascade fits inside it (`07 §5`).
+Size the buckets so a liquidation cascade fits inside them (`07 §4`, step 5). More than the bonus is unbacked: the repayment backs collateral at the conservative high price times the liability weight, so in the crash scenario (`08` S11) 14–17% of each liquidation goes to the limiter with a 5% bonus.
 
 ### 4.8 Special flows
 

@@ -31,7 +31,7 @@ Severity is for a mainnet deployment: **High** = more value can leave than the p
 | A2 | **Medium** | The guardian bot only watches a 1-hour window: a paced attacker drips the daily bucket out forever without a freeze | **Fixed** (24-hour rule), residual stated; late-freeze gaps fixed 29 Sep |
 | A3 | **Medium** | A stolen admin key can abdicate `SetAdmin` / `SetGuardians` instantly and forever | **Fixed on-chain, 29 Sep** (guardian quorum; loosening only) |
 | A4 | **Medium** | No recovery path from a compromised Vault admin or Floor owner key | Design decision needed |
-| A5 | Low | Floor's stop button is unarmed after every abort until someone stages a new abort buffer; the fast-restore snapshot must be re-pinned after every upgrade | Operational; recommend the status page shows both |
+| A5 | Low | Floor's stop button is unarmed after every abort until someone stages a new abort buffer; the fast-restore snapshot must be re-pinned after every upgrade | **Alerted, 30 Sep:** the status page shows both; the guardian bot warns when either is missing (`floorProtected`) |
 | A6 | Low | A borrower can pick the most favourable fully-verified Pyth update within `max_age_s` | Residual; calibrate haircuts against it |
 
 ### A1 — The reference balance can be inflated (High)
@@ -131,7 +131,7 @@ Weaknesses in the product argument rather than the code. None of these kills it;
 
 1. **"2% of a vault" was 2% of the reference.** See A1, fixed on 29 Sep: it is now 2% of the lower of the live balance and the reference. A parked-capital attacker still needs absolute caps (A1b), so the pitch claim is "2% of the vault, with calibrated caps".
 2. **Transferable receipt tokens break the backed lane.** Backing belongs to whoever deposited. When a protocol's position is transferable (LP tokens, cTokens, kTokens, LSTs), a buyer on the secondary market withdraws with no backing, so honest withdrawals go through the unbacked lane and can queue. Calibration then pushes the limits up and the bound weakens. The integration guide (`07`) should name which protocol designs fit well (non-transferable positions) and which need a backing-transfer hook.
-3. **A circuit breaker can turn a crash into insolvency.** Liquidation bonuses and cross-mint seizures are partly unbacked. In a cascade, liquidations that exceed the daily bucket queue for at least 6 hours while prices keep falling, which leaves bad debt. `07 §3` says "size the daily bucket for cascades"; that is the whole question for lending protocols, and it deserves a scenario with a historical crash (a Pyth replay of a −30% day).
+3. **A circuit breaker can turn a crash into insolvency.** Liquidation bonuses and cross-mint seizures are partly unbacked. In a cascade, liquidations that exceed the daily bucket queue for at least 6 hours while prices keep falling, which leaves bad debt. `07 §3` says "size the daily bucket for cascades"; that is the whole question for lending protocols, and it deserves a scenario with a historical crash (a Pyth replay of a −30% day). **Measured 30 Sep** on a synthetic −30% day (`08` S11): 14–17% of each liquidation is unbacked, about three times the bonus. With the defaults, a 10-minute −20% crash that liquidates 17% of a vault already queues some liquidations for 6 hours (22% for a 30-minute crash, 43% for a 2-hour one). 4%/h and 10%/day absorb a 30% cascade, at the price of doubling G1. A replay of real Pyth history is still to do.
 4. **"Guardians can only grief" understates a stolen key.** A3 is fixed; A4 is not: a compromised admin or owner key can still block its own rotation.
 5. **The freeze response is a bot plus people.** See A2: thresholds can be paced, and the bot needs uptime, RPC access and a funded key. The claim that should appear in the pitch is the on-chain bound, not the response time.
 6. **Bulkhead's own key is the biggest key.** Until the upgrade authorities are burned after audit (G9), whoever holds the Bulkhead team key can replace the code that holds every protected vault. It is disclosed in `SECURITY.md`; protocols will ask how and when it is burned, so the burn plan (and whether Bulkhead itself sits under Floor meanwhile) should be one slide.
@@ -142,8 +142,8 @@ Weaknesses in the product argument rather than the code. None of these kills it;
 1. ~~A1 on-chain fix, then redeploy and re-verify.~~ Done 29 Sep (devnet upgraded in place); absolute caps in calibration (A1b).
 2. ~~A3.~~ Done 29 Sep. Decide A4.
 3. README and pitch wording for items 1, 4 and 5 of section 4.
-4. A liquidation-cascade scenario (section 4, item 3).
-5. A5 alerts in the status page and the bot.
+4. ~~A liquidation-cascade scenario (section 4, item 3).~~ Synthetic run done 30 Sep (`08` S11); a real Pyth replay and a program-level run remain.
+5. ~~A5 alerts in the status page and the bot.~~ Done 30 Sep.
 
 ## 6. Second review (30 Sep 2026)
 

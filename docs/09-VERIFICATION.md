@@ -27,6 +27,7 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Floor core tests** | 10 tests: the sBPF v3 strict ELF rules restated, murmur3 published vectors, loader-v3 headers, snapshot identity | Pass |
 | **Targeted unit tests** | 17 tests: 16 each written to kill a surviving mutant (§6), and `capacity_base` | Pass |
 | **Adversarial tests** | 7 tests (`crates/bulkhead-core/tests/adversarial.rs`): the attacks of `15` run through the real core, before and after each fix | Pass |
+| **Crash scenario** | 2 tests (`crates/bulkhead-core/tests/cascade.rs`): an honest liquidation cascade on a synthetic −30% day, through the real ledger, pricing and limiter; pins the numbers `08` S11 reports | Pass |
 | **Bounded proofs (Kani)** | 13 harnesses: logic at full width, 2 at small width (§5) | **13/13 verified**, 209 s |
 | **Mutation testing** | `cargo-mutants` on the core: 647 mutants (§6) | Every non-equivalent mutant killed; 22 equivalents, each explained |
 | **Program tests** | Floor (21) and Vault (27) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 48/48 |
