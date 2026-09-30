@@ -5,7 +5,7 @@
 //! stays equal. Anything mixed is `Loosen`. Identity, guardian, admin and
 //! lifeboat-destination changes are always `Loosen` (handled by the program).
 
-use crate::consts::MIN_LOOSEN_DELAY_S;
+use crate::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
@@ -92,9 +92,9 @@ pub fn classify_asset(old: Option<&AssetConfig>, new: &AssetConfig) -> Class {
     }
 }
 
-/// Changing the loosen delay itself. Below the constant minimum is rejected.
+/// Changing the loosen delay itself. Outside [72 hours, 30 days] is rejected.
 pub fn classify_delay(old_s: i64, new_s: i64) -> Option<Class> {
-    if new_s < MIN_LOOSEN_DELAY_S {
+    if !(MIN_LOOSEN_DELAY_S..=MAX_LOOSEN_DELAY_S).contains(&new_s) {
         return None;
     }
     Some(if new_s >= old_s {

@@ -21,6 +21,8 @@ TAU_S = 86_400
 COST_MAX_MS = 1 << 61
 MIN_LOOSEN_DELAY_S = 259_200
 MIN_UPGRADE_DELAY_S = 259_200
+MAX_LOOSEN_DELAY_S = 2_592_000   # 30 days: above it, one key could stall governance (docs/15, A7)
+MAX_UPGRADE_DELAY_S = 2_592_000
 MAX_SLOTS = 8
 VALUE_DECIMALS = 18
 
@@ -315,7 +317,7 @@ def classify_asset(old, new) -> str:
 
 
 def classify_delay(old_s: int, new_s: int) -> str:
-    if new_s < MIN_LOOSEN_DELAY_S:
+    if new_s < MIN_LOOSEN_DELAY_S or new_s > MAX_LOOSEN_DELAY_S:
         return "X"                           # invalid, never accepted
     return "T" if new_s >= old_s else "L"
 

@@ -554,6 +554,108 @@ fn imported_backing_must_be_covered_by_the_balance_at_seal() {
     assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
 }
 
+/// A10: at the seal, every backing claim (imports plus what deposits
+/// credited) must be covered by the tokens the vault holds.
+#[test]
+fn the_seal_requires_imports_and_deposits_to_be_covered_together() {
+    let mut w = World::new();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    let owner = Keypair::new().pubkey();
+    let import = w.m.vault_ix(
+        3,
+        &(1_000 * USDC).to_le_bytes(),
+        vec![
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.m.backing(&owner), false),
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    w.env.ok(&[import], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE, "2,000 of claims, 1,000 of tokens");
+    // The migration moves the imported tokens in; then every claim is covered.
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    w.env.ok(&[ix], &[]);
+}
+
+/// A8: a mint that can be closed (and then created again with other
+/// extensions) can't become a vault; the same extension with no close
+/// authority can.
+#[test]
+fn a_mint_with_a_close_authority_cannot_become_a_vault() {
+    let mut env = Env::new();
+    let m = Market::new(&mut env);
+    let t22 = token_2022();
+    for (close_authority, allowed) in [(Some(Keypair::new().pubkey()), false), (None, true)] {
+        let mint = Keypair::new();
+        let size = 165 + 1 + 4 + 32; // base padded to 165, account type, one TLV entry
+        let lamports = env.svm.minimum_balance_for_rent_exemption(size);
+        let create = solana_system_interface::instruction::create_account(&env.payer.pubkey(), &mint.pubkey(), lamports, size as u64, &t22);
+        let mut d = vec![25u8]; // InitializeMintCloseAuthority
+        match close_authority {
+            Some(k) => {
+                d.push(1);
+                d.extend_from_slice(k.as_ref());
+            }
+            None => d.push(0),
+        }
+        let init_close = solana_instruction::Instruction { program_id: t22, accounts: vec![AccountMeta::new(mint.pubkey(), false)], data: d };
+        let mut d = vec![20u8, 6]; // InitializeMint2
+        d.extend_from_slice(Keypair::new().pubkey().as_ref());
+        d.push(0);
+        let init_mint = solana_instruction::Instruction { program_id: t22, accounts: vec![AccountMeta::new(mint.pubkey(), false)], data: d };
+        env.ok(&[create, init_close, init_mint], &[&mint]);
+        let vault = pda(&[b"vault", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+        let vault_tokens = pda(&[b"vault-tokens", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+        let ix = m.vault_ix(
+            1,
+            &Limits::default_limits().bytes(),
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new_readonly(m.admin.pubkey(), true),
+                AccountMeta::new(m.protocol, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new(vault_tokens, false),
+                AccountMeta::new_readonly(mint.pubkey(), false),
+                AccountMeta::new_readonly(t22, false),
+                AccountMeta::new_readonly(SYSTEM, false),
+            ],
+        );
+        if allowed {
+            env.ok(&[ix], &[&m.admin]);
+        } else {
+            assert_eq!(env.fails(&[ix], &[&m.admin]), verr::EXTENSION_NOT_ALLOWED);
+        }
+    }
+}
+
+/// attest never reports more than the vault holds, even with a floor far
+/// above the balance.
+#[test]
+fn attest_never_reports_more_than_the_balance() {
+    let mut w = World::new();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    let vault = w.usdc.vault;
+    let mut floors = Limits::default_limits();
+    floors.short_floor = 1_000_000 * USDC;
+    floors.long_floor = 1_000_000 * USDC;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &floors.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]); // before the seal a change applies at once
+    w.seal();
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!(a.balance, 1_000 * USDC);
+    assert_eq!(a.available_now, 1_000 * USDC, "the balance, not the 1,000,000 floor");
+}
+
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
@@ -741,6 +843,28 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     let new_admin = Keypair::new().pubkey();
     let ix = w.m.propose_change_ix(&w.env, 3, &new_admin, &[], None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+}
+
+/// A7: raising the loosen delay is a tightening and applies at once, so it is
+/// capped (30 days); above the cap a single key could stall governance.
+#[test]
+fn the_loosen_delay_is_capped_at_30_days() {
+    let mut w = World::new();
+    w.seal();
+    let zero = Address::default();
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(30 * DAY + 1).to_le_bytes(), None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_ABOVE_MAXIMUM);
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(30 * DAY).to_le_bytes(), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let d = w.env.account(&w.m.protocol).data;
+    assert_eq!(i64::from_le_bytes(d[436..444].try_into().unwrap()), 30 * DAY, "raised at once, to the cap");
+    // A new protocol can't register above the cap either.
+    let harbor = Address::new_unique();
+    w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let ix = w.m.register_ix(&w.env, harbor, 30 * DAY + 1);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DELAY_ABOVE_MAXIMUM);
+    let ix = w.m.register_ix(&w.env, harbor, 30 * DAY);
+    w.env.ok(&[ix], &[]);
 }
 
 #[test]

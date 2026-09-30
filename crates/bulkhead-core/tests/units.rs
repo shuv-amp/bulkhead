@@ -3,7 +3,10 @@
 //! soundness ("never too permissive"); these pin completeness and exact
 //! behavior ("permissive exactly where the spec says").
 
-use bulkhead_core::classify::{classify_asset, classify_limits, AssetConfig, Class, LimitConfig};
+use bulkhead_core::classify::{
+    classify_asset, classify_delay, classify_limits, AssetConfig, Class, LimitConfig,
+};
+use bulkhead_core::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 use bulkhead_core::floor::{deployable_after_simd0500, elf_info};
 use bulkhead_core::governance::Abdications;
 use bulkhead_core::ledger::{Ledger, Mint, PricedAsset, Pricing};
@@ -654,4 +657,36 @@ fn capacity_base_is_the_lower_of_reference_and_live_balance() {
     assert_eq!(capacity_base(0, u64::MAX), 0);
     assert_eq!(capacity_base(u64::MAX, 0), 0);
     assert_eq!(capacity_base(u64::MAX, u64::MAX), u64::MAX);
+}
+
+/// A7: the loosen delay lives in [72 hours, 30 days]; raising within it is a
+/// tightening, lowering a loosening, and anything outside is refused.
+#[test]
+fn the_loosen_delay_is_bounded_both_ways() {
+    assert_eq!(
+        classify_delay(MIN_LOOSEN_DELAY_S, MAX_LOOSEN_DELAY_S),
+        Some(Class::Tighten)
+    );
+    assert_eq!(
+        classify_delay(MIN_LOOSEN_DELAY_S, MAX_LOOSEN_DELAY_S + 1),
+        None
+    );
+    assert_eq!(classify_delay(MIN_LOOSEN_DELAY_S, i64::MAX), None);
+    assert_eq!(
+        classify_delay(MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S),
+        Some(Class::Loosen)
+    );
+    assert_eq!(
+        classify_delay(MIN_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S - 1),
+        None
+    );
+}
+
+/// An extreme publish time is simply stale; the age can't overflow.
+#[test]
+fn a_price_from_the_far_past_is_stale_not_an_overflow() {
+    use bulkhead_core::price::is_usable;
+    assert!(!is_usable(100, 1, i64::MIN, 1_000, 60, 10_000));
+    assert!(!is_usable(100, 1, i64::MIN, i64::MAX, i64::MAX, 10_000));
+    assert!(is_usable(100, 1, 1_000, 1_000, 60, 10_000));
 }

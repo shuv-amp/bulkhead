@@ -16,6 +16,15 @@ pub const MIN_LOOSEN_DELAY_S: i64 = 259_200;
 /// Minimum delay for a Tier 0 program upgrade (same 72 hours, same reason).
 pub const MIN_UPGRADE_DELAY_S: i64 = 259_200;
 
+/// Longest loosen delay a protocol can set (30 days). Raising the delay is a
+/// tightening and applies at once, so without a bound one key could put every
+/// later loosening, admin and guardian replacement included, out of reach
+/// (docs/15, A7).
+pub const MAX_LOOSEN_DELAY_S: i64 = 2_592_000;
+
+/// Longest upgrade delay Floor accepts, for the same reason (30 days).
+pub const MAX_UPGRADE_DELAY_S: i64 = 2_592_000;
+
 /// Longest single freeze a guardian can apply. Guardians may re-freeze.
 pub const MAX_FREEZE_S: i64 = 86_400;
 

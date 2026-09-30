@@ -33,10 +33,11 @@ pub fn attest(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResu
     let params = params_from_config(&v2.limits, capacity_base(v2.ref_balance, balance));
     let frozen = p.frozen_until.max(v.frozen_until);
     let now_ms = t.saturating_mul(1_000);
+    // Never more than the vault holds (only matters with a floor above it).
     let instant = if t < frozen {
         0
     } else {
-        available_now(&v.limiter_state(), &params, now_ms)
+        available_now(&v.limiter_state(), &params, now_ms).min(balance)
     };
     let cap = |x: u128| x.min(u64::MAX as u128) as u64;
     let alive = p.alive_mask(t).count_ones() as u8;

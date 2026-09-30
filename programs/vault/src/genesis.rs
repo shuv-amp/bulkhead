@@ -4,7 +4,7 @@
 use crate::state::{Asset, Protocol, Vault, R};
 use crate::*;
 use bulkhead_core::classify::{AssetConfig, LimitConfig};
-use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
+use bulkhead_core::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 use bulkhead_core::floor::{program_programdata, programdata_header};
 use bulkhead_core::governance::{can_execute, schedule, Schedule};
 use bulkhead_core::limiter::config_is_valid;
@@ -47,6 +47,9 @@ pub fn register_protocol(
     let destination = r.key()?;
     if loosen_delay < MIN_LOOSEN_DELAY_S {
         return Err(VaultError::DelayBelowMinimum.into());
+    }
+    if loosen_delay > MAX_LOOSEN_DELAY_S {
+        return Err(VaultError::DelayAboveMaximum.into());
     }
     if destination == admin || destination == [0; 32] {
         return Err(VaultError::InvalidGuardians.into());
@@ -291,9 +294,9 @@ pub(crate) fn write_asset(
 // Accounts: 0 payer [s,w], 1 admin [s], 2 protocol, 3 vault [w],
 //           4 backing PDA [w], 5 owner, 6 system. Data: amount u64.
 //
-// Imports are public events and, at seal, must be covered by the vault's
-// balance; the seal waits 72h so anyone can compare them with the protocol's
-// own books (T19).
+// Imports are public events and, at seal, must be covered together with what
+// deposits credited; the seal waits 72h so anyone can compare them with the
+// protocol's own books (T19).
 pub fn import_backing(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -389,7 +392,12 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
             return Err(VaultError::DuplicateAccount.into());
         }
         seen[i] = k;
-        if v.imported > token::balance(&pair[1])? {
+        // Every backing claim must be covered: imports plus what deposits
+        // credited, against the tokens in the vault and its lifeboat. Checking
+        // imports alone let total claims exceed the tokens held (docs/15, A10).
+        let claims = v.imported as u128 + v.total_in;
+        let held = token::balance(&pair[1])? as u128 + v.lifeboat_amount as u128;
+        if claims > held {
             return Err(VaultError::ImportExceedsBalance.into());
         }
     }

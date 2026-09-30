@@ -56,7 +56,13 @@ fn parse(
             }
             Parsed::Key(*target)
         }
-        change::SET_LOOSEN_DELAY => Parsed::Delay(r.i64()?),
+        change::SET_LOOSEN_DELAY => {
+            let d = r.i64()?;
+            if d > bulkhead_core::consts::MAX_LOOSEN_DELAY_S {
+                return Err(VaultError::DelayAboveMaximum.into());
+            }
+            Parsed::Delay(d)
+        }
         _ => return Err(VaultError::InvalidInstruction.into()),
     })
 }

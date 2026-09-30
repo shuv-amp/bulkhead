@@ -1,9 +1,10 @@
 //! Reference balance: a slow average of the vault balance (or mint supply).
 //!
-//! Capacities are a percentage of this reference, not of the live balance, so:
+//! Capacities are a percentage of the lower of this reference and the live
+//! balance (`limiter::capacity_base`), so:
 //! - an attacker cannot raise the limit by depositing right before an attack
 //!   (the reference moves at most `dt / 24h` of the way toward the balance);
-//! - a drain does not instantly shrink the limit for honest users either.
+//! - money that leaves stops counting at once (docs/15, A1).
 //!
 //! The step is linear, `(balance - reference) * min(dt, TAU) / TAU`, truncated
 //! toward the old reference, so it never overshoots the balance.

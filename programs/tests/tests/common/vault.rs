@@ -46,6 +46,7 @@ pub mod verr {
     pub const CANNOT_EJECT: u32 = 8042;
     pub const GENESIS_ONLY: u32 = 8043;
     pub const DESTINATION_NOT_SETTLED: u32 = 8044;
+    pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
 }
 
 pub fn so(name: &str) -> Vec<u8> {
@@ -247,28 +248,38 @@ impl Market {
             env.fund(k);
         }
         let m = Market { vault_program, harbor, caller, protocol, admin, g, destination };
-        // Register through Harbor: the caller PDA is the registrar.
-        let mut args = Vec::new();
-        args.extend_from_slice(m.admin.pubkey().as_ref());
-        args.push(3);
-        for k in &m.g {
-            args.extend_from_slice(k.pubkey().as_ref());
-        }
-        args.push(2);
-        args.extend_from_slice(&(7 * DAY).to_le_bytes());
-        args.extend_from_slice(&(3 * DAY).to_le_bytes());
-        args.extend_from_slice(m.destination.pubkey().as_ref());
-        let accounts = vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(m.protocol, false),
-            AccountMeta::new_readonly(m.harbor, false),
-            AccountMeta::new_readonly(m.harbor, false), // programdata: unused with a caller registrar
-            AccountMeta::new_readonly(m.caller, false),
-            AccountMeta::new_readonly(SYSTEM, false),
-        ];
-        let ix = m.harbor_ix(0, &args, vec![], accounts);
+        let ix = m.register_ix(env, harbor, 3 * DAY);
         env.ok(&[ix], &[]);
         m
+    }
+
+    /// Harbor's REGISTER for a Harbor deployed at `harbor` (its caller PDA is
+    /// the registrar), with this market's admin, guardians and lifeboat
+    /// destination and the given loosen delay.
+    pub fn register_ix(&self, env: &Env, harbor: Address, loosen_delay: i64) -> Instruction {
+        let caller = pda(&[b"bulkhead-caller"], &harbor);
+        let protocol = pda(&[b"protocol", harbor.as_ref()], &self.vault_program);
+        let mut data = vec![0u8];
+        data.extend_from_slice(self.admin.pubkey().as_ref());
+        data.push(3);
+        for k in &self.g {
+            data.extend_from_slice(k.pubkey().as_ref());
+        }
+        data.push(2);
+        data.extend_from_slice(&(7 * DAY).to_le_bytes());
+        data.extend_from_slice(&loosen_delay.to_le_bytes());
+        data.extend_from_slice(self.destination.pubkey().as_ref());
+        let accounts = vec![
+            AccountMeta::new_readonly(self.vault_program, false),
+            AccountMeta::new_readonly(caller, false),
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(protocol, false),
+            AccountMeta::new_readonly(harbor, false),
+            AccountMeta::new_readonly(harbor, false), // programdata: unused with a caller registrar
+            AccountMeta::new_readonly(caller, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ];
+        Instruction { program_id: harbor, accounts, data }
     }
 
     pub fn harbor_ix(&self, tag: u8, args: &[u8], harbor_accounts: Vec<AccountMeta>, vault_accounts: Vec<AccountMeta>) -> Instruction {

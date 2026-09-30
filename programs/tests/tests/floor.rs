@@ -459,6 +459,13 @@ fn the_delay_can_be_raised_instantly_but_lowered_only_after_the_delay() {
         err::INVALID_DELAY,
         "never below 72h"
     );
+    let too_high = (30 * DAY + 1).to_le_bytes();
+    let ix = f.propose(&p.owner.pubkey(), SET_DELAY, &zero, &too_high, None);
+    assert_eq!(
+        env.fails(&[ix], &[&p.owner]),
+        err::INVALID_DELAY,
+        "never above 30 days (docs/15, A7)"
+    );
 }
 
 #[test]

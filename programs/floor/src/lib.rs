@@ -70,8 +70,9 @@ pub const SYSVAR_CLOCK: Address = Address::new_from_array([
 
 pub const CONFIG_SEED: &[u8] = b"floor";
 pub const AUTHORITY_SEED: &[u8] = b"authority";
-/// Upper bound on the configurable upgrade delay (a longer one is a self-lock).
-pub const MAX_UPGRADE_DELAY_S: i64 = 365 * 86_400;
+/// Upper bound on the configurable upgrade delay (a longer one is a self-lock);
+/// the same 30 days as the Vault's loosen delay (docs/15, A7).
+pub const MAX_UPGRADE_DELAY_S: i64 = bulkhead_core::consts::MAX_UPGRADE_DELAY_S;
 
 /// Instruction tags (first byte of instruction data).
 pub mod ix {

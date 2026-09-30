@@ -36,7 +36,11 @@ pub fn is_usable(
     max_age_s: i64,
     max_conf_bps: u32,
 ) -> bool {
-    if price <= 0 || publish_time > now || now - publish_time > max_age_s {
+    // Checked: an extreme `publish_time` must not overflow the age.
+    let fresh = now
+        .checked_sub(publish_time)
+        .is_some_and(|age| age <= max_age_s);
+    if price <= 0 || publish_time > now || !fresh {
         return false;
     }
     conf as u128 * BPS <= max_conf_bps as u128 * price as u128

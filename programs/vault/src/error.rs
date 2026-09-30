@@ -54,6 +54,7 @@ pub enum VaultError {
     NothingToExit,
     ZeroAmount,
     Overflow,
+    DelayAboveMaximum,
 }
 
 impl From<VaultError> for ProgramError {
