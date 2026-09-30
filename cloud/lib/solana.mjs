@@ -398,14 +398,69 @@ export function decodeAttestation(bytes) {
   };
 }
 
-/** Structured events: "Program data: <base64>" lines, fields concatenated. */
-export function parseEvents(logs) {
-  const out = [];
+/**
+ * Structured events from a transaction's log messages, each attributed to the
+ * program that emitted it, and whether the runtime truncated the log.
+ *
+ * Any program can write a "Program data:" line, so a line only means something
+ * when it was emitted inside an invocation of the program you trust. The
+ * runtime brackets every invocation with "Program <id> invoke [n]" and
+ * "Program <id> success" (or "failed"); the line belongs to the innermost open
+ * one. Logs are capped (10,000 bytes per transaction); past the cap the
+ * runtime writes "Log truncated" and drops the rest, so a truncated log can't
+ * be read as complete.
+ */
+export function parseLogs(logs) {
+  const events = [];
+  const stack = [];
+  let truncated = false;
   for (const line of logs ?? []) {
-    const m = /^Program data: (.*)$/.exec(line);
+    if (line === "Log truncated") {
+      truncated = true;
+      continue;
+    }
+    let m = /^Program (\S+) invoke \[\d+\]$/.exec(line);
+    if (m) {
+      stack.push(m[1]);
+      continue;
+    }
+    m = /^Program (\S+) (success|failed.*)$/.exec(line);
+    if (m && stack[stack.length - 1] === m[1]) {
+      stack.pop();
+      continue;
+    }
+    m = /^Program data: (.*)$/.exec(line);
     if (!m) continue;
-    const fields = m[1].split(" ").map((b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
-    out.push({ name: text(fields[0]), fields: fields.slice(1) });
+    let fields;
+    try {
+      fields = m[1].split(" ").map((b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
+    } catch {
+      continue; // not base64: nobody's event
+    }
+    events.push({ program: stack[stack.length - 1] ?? null, name: text(fields[0]), fields: fields.slice(1) });
   }
-  return out;
+  return { events, truncated };
+}
+
+/** Events emitted by one of `programs` (base58 ids); all events if none given. */
+export function parseEvents(logs, programs = null) {
+  const { events } = parseLogs(logs);
+  return programs ? events.filter((e) => programs.includes(e.program)) : events;
+}
+
+/** A Vault `Ticket` account (programs/vault/src/state.rs). */
+export function decodeTicket(d) {
+  if (text(d.slice(0, 8)) !== "BHTICKT1") throw new Error("not a Bulkhead ticket account");
+  const r = new Reader(d, 8);
+  return {
+    protocol: b58encode(r.key()),
+    vault: b58encode(r.key()),
+    recipient: b58encode(r.key()),
+    recipientOwner: b58encode(r.key()),
+    payer: b58encode(r.key()),
+    id: r.u64(),
+    amount: r.u64(),
+    createdS: Number(r.i64()),
+    etaS: Number(r.i64()),
+  };
 }

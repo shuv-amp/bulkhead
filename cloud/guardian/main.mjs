@@ -17,19 +17,34 @@
 // that window from chain history (block times, not the wall clock) and, if it
 // is already over a threshold and the protocol is not frozen, freezes once.
 // A failed freeze is retried; it does not stick in `state.freezing`.
+//
+// What it believes: an event counts only if the Vault (or Floor) program wrote
+// it (any program can write a "Program data:" line); the freeze state and new
+// tickets are read from the chain every cycle; and when a transaction's log was
+// truncated, that transaction's outflow is taken from the vault's token balances.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, parseEvents } from "../lib/solana.mjs";
-import { Keypair, send } from "../lib/signer.mjs";
+import { Rpc, b58encode, parseLogs, decodeProtocol, decodeTicket } from "../lib/solana.mjs";
+import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, breach, decode, newState, pendingCancels, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { pageQuery, morePages, MAX_PAGES } from "./follow.mjs";
+import { vaultOutflows, ticketRelease } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
 const rpc = new Rpc(cfg.rpc);
+// Extra endpoints every guardian transaction is also sent to (optional).
+const extraRpcs = (cfg.rpcs ?? []).map((url) => new Rpc(url));
 const guardian = Keypair.load(cfg.guardianKey);
 const vc = await new VaultClient(cfg.vaultProgram, cfg.protocolProgram).init();
+// The watched vaults, by vault address and by token account address.
+const watched = await Promise.all(cfg.mints.map(async (mint) => ({ mint, ...(await vc.vault(mint)) })));
+const vaultMints = new Map(watched.map((v) => [b58encode(v.vault), v.mint]));
+const tokenMints = new Map(watched.map((v) => [b58encode(v.vaultTokens), v.mint]));
+// Only these programs' events count: any program can write "Program data:".
+const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
+let nextTicket = null; // first ticket id the chain scan hasn't looked at
 const state = newState();
 const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
 
@@ -66,8 +81,22 @@ async function refreshWorstCase() {
   }
 }
 
+/** Compute budget, priority price and extra endpoints for one guardian transaction. */
+async function sendOptions() {
+  let microLamports = policy.priorityMicroLamports;
+  if (microLamports === "auto") {
+    try {
+      const fees = await rpc.call("getRecentPrioritizationFees", [[b58encode(vc.protocol)]]);
+      microLamports = priorityPrice(fees, { cap: policy.maxPriorityMicroLamports });
+    } catch {
+      microLamports = 0; // no fee data: send anyway, without a price
+    }
+  }
+  return { computeUnits: policy.computeUnits, microLamports: Number(microLamports) || 0, rpcs: extraRpcs };
+}
+
 async function heartbeat() {
-  const sig = await send(rpc, guardian, [vc.heartbeat(guardian.publicKey)]);
+  const sig = await send(rpc, guardian, [vc.heartbeat(guardian.publicKey)], [], await sendOptions());
   log({ action: "heartbeat", signature: sig });
 }
 
@@ -102,7 +131,7 @@ async function execute(action, event, eventTime) {
       default:
         return false;
     }
-    const sig = await send(rpc, guardian, ixs);
+    const sig = await send(rpc, guardian, ixs, [], await sendOptions());
     const confirmed = Date.now();
     log({
       action: action.type,
@@ -168,22 +197,62 @@ async function signatures(until, oldestWanted) {
   return out;
 }
 
+/** One fact (a release, freeze or proposal), from an event or from the chain. */
+async function consider(e, signature, now, act) {
+  // Only a release needs the worst case; other events carry no mint.
+  const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
+  const actions = assess(state, e, ctx, policy, act);
+  if (!act) return;
+  log({ event: e.kind, signature, ...e });
+  await applyActions(actions, e, now);
+}
+
 async function ingest(sigs, act) {
   for (const s of sigs) {
     if (s.err) continue;
     const tx = await rpc.call("getTransaction", [s.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
     const now = s.blockTime ?? tx?.blockTime ?? wallNow();
-    for (const raw of parseEvents(tx?.meta?.logMessages)) {
+    const { events, truncated } = parseLogs(tx?.meta?.logMessages);
+    if (truncated) {
+      // Events past the log cap are gone; the balances are not. Every decrease
+      // of a watched vault in this transaction counts as unbacked outflow.
+      if (act) log({ level: "warn", msg: "log truncated: outflow taken from token balances", signature: s.signature });
+      for (const [mint, amount] of vaultOutflows(tx, tokenMints)) {
+        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
+        await consider(e, s.signature, now, act);
+      }
+    }
+    for (const raw of events) {
+      if (!trusted.includes(raw.program)) continue; // written by another program: not an event
       const e = decode(raw);
       if (e.kind === "other") continue;
-      // Only a release needs the worst case; other events carry no mint.
-      const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
-      const actions = assess(state, e, ctx, policy, act);
-      if (!act) continue;
-      log({ event: e.kind, signature: s.signature, ...e });
-      await applyActions(actions, e, s.blockTime ?? now);
+      if (truncated && e.kind === "released") e.instant = 0n; // counted from the balances above
+      await consider(e, s.signature, now, act);
     }
   }
+}
+
+/**
+ * The chain's own record: the protocol's freeze (a log line can't fake it) and
+ * every ticket created since the last look (an event can be missing, a ticket
+ * account can't). A ticket seen through its event too counts once.
+ */
+async function syncFromChain(act, scanFrom = null) {
+  const acc = await rpc.account(vc.protocol);
+  if (!acc) return;
+  const p = decodeProtocol(acc.bytes);
+  state.frozenUntil = p.frozenUntil;
+  if (p.frozenUntil > wallNow()) state.freezing = false;
+  const last = BigInt(p.nextTicketId);
+  for (let id = scanFrom ?? nextTicket ?? last; id < last; id++) {
+    const t = await rpc.account(await vc.ticketAddress(id));
+    if (!t) continue; // settled or cancelled already
+    const ticket = decodeTicket(t.bytes);
+    if (ticket.createdS < wallNow() - DAY_S) continue; // outside every window
+    const e = ticketRelease(ticket, vaultMints);
+    if (e) await consider(e, "chain:ticket", ticket.createdS, act);
+  }
+  nextTicket = last;
 }
 
 async function freezeIfWindowStillOpen(now) {
@@ -209,6 +278,11 @@ async function main() {
   const until = history[0]?.signature;
   const inWindow = history.filter((s) => s.blockTime == null || s.blockTime >= oldest);
   await ingest([...inWindow].reverse(), false);
+  // The freeze state, and tickets from the last day whose events the replay
+  // didn't see, from the chain (the last 256 ids at most).
+  const p0 = await rpc.account(vc.protocol);
+  const first = p0 ? BigInt(decodeProtocol(p0.bytes).nextTicketId) : 0n;
+  await syncFromChain(false, first > 256n ? first - 256n : 0n);
   await freezeIfWindowStillOpen(wallNow());
   log({ msg: "caught up", signatures: inWindow.length });
   let cursor = until;
@@ -228,6 +302,7 @@ async function main() {
       const sigs = await signatures(cursor, null);
       if (sigs.length) cursor = sigs[0].signature;
       await ingest([...sigs].reverse(), true);
+      await syncFromChain(true);
       if (Date.now() - lastAttest > 10_000) {
         await refreshWorstCase();
         lastAttest = Date.now();

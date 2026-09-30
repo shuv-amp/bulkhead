@@ -30,13 +30,21 @@ export const DEFAULT_POLICY = {
   /** Floor: veto upgrade proposals whose buffer isn't pre-approved. */
   approvedUpgradeBuffers: [],
   heartbeatEveryS: 86_400,
+  /** Compute-unit limit on every guardian transaction (a freeze, cancel,
+   * veto or heartbeat uses a small fraction of it). */
+  computeUnits: 50_000,
+  /** Priority price in micro-lamports per compute unit, or "auto": the 90th
+   * percentile of recent fees paid on the protocol account, capped below. A
+   * freeze is only as good as the slot it lands in. */
+  priorityMicroLamports: "auto",
+  maxPriorityMicroLamports: 1_000_000,
 };
 
 export const HOUR_S = 3_600;
 export const DAY_S = 86_400;
 
 export function newState() {
-  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), freezing: false };
+  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), freezing: false };
 }
 
 /**
@@ -142,9 +150,14 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
   const frozen = state.freezing || ctx.now < state.frozenUntil;
   switch (e.kind) {
     case "released": {
-      const unbacked = e.instant + e.queued;
+      // A ticket can reach the guardian twice (its event, and the chain scan
+      // for tickets whose event was missed): its queued amount counts once.
+      const ticket = e.queued > 0n ? e.ticketId : null;
+      const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
+      if (ticket !== null) state.tickets.add(ticket);
+      const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
-      state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: e.queued > 0n ? e.ticketId : null });
+      state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
       const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
       const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
       if (act && !frozen && lastHour >= limit) {
