@@ -144,3 +144,21 @@ Weaknesses in the product argument rather than the code. None of these kills it;
 3. README and pitch wording for items 1, 4 and 5 of section 4.
 4. A liquidation-cascade scenario (section 4, item 3).
 5. A5 alerts in the status page and the bot.
+
+## 6. Second review (30 Sep 2026)
+
+A line-by-line pass over every program, the core, the Cloud guardian and the tooling, with the external facts re-read from primary sources (Token-2022 and Agave source, Pyth's SDK, docs and DAO proposals). The HumanLayer research and design documents for it are `02-research` and `03-design-discussion` in the task folder.
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| A7 | **Medium** | The Vault's loosen delay had no upper bound; raising it is a tightening, so one key could put every later loosening (admin and guardian replacement included) out of reach | Fix: a 30-day cap in the core, the Vault and Floor (on-chain PR, merged with the devnet upgrade after the S1 run) |
+| A8 | Low | The mint policy allowed `MintCloseAuthority` with an authority set; a zero-supply mint can then be closed and created again with extensions the policy refuses | Fix: extension 3 only with no close authority (on-chain PR) |
+| A9 | **Medium** | Pyth's trust root changed on 26 Aug 2026 (3 of the Pyth Pro set's 5 keys); backed borrowing trusts a verified price completely | Documented in `04` (assumption 2, T5); a rate limit on new backed liabilities is a design item for the audit build |
+| A10 | **Medium** | The seal compared imported backing with balances but not the backing pre-seal deposits create, so total claims could exceed the tokens held | Fix: `imported + total_in ≤ balance + lifeboat_amount` (on-chain PR) |
+| A11 | **Medium** | Harbor, the reference integration, didn't check which program it forwarded its caller-PDA signature to, and the guide didn't say to | Fix: Harbor checks a built-in Vault id; guide step added (on-chain PR) |
+| A12 | **Medium** | The docs said guardian freezes use priority fees and several RPCs; the code used neither | **Fixed**: compute budget with an automatic priority price, broadcast to every configured RPC |
+| A13 | **High** (response layer) | The guardian believed any `Program data:` line in any transaction touching the protocol, and didn't notice truncated logs | **Fixed**: events count only when the Vault or Floor emitted them; freeze state and tickets come from the chain; a truncated log's outflow comes from token balances |
+
+The on-chain bound (G1) was never affected by A12 or A13: they concern how fast, and on what information, the response layer acts.
+
+Hardening in the on-chain PR: the account-type byte in `token::account_info`, a checked age in `price::is_usable`, `attest` capping "available now" at the balance, and two stale comments rewritten line-for-line. Design notes recorded without change: vaults created after the seal, a queued loosening replacing a later tightening, loosenings executing during a freeze, a threshold equal to the guardian count. A4 remains open, and any fix to it inherits A7's cap.
