@@ -7,7 +7,12 @@
 //   { "rpc": "http://127.0.0.1:8899",
 //     "vaultProgram": "...", "protocolProgram": "...",
 //     "mints": ["..."], "guardianKey": "path/to/keypair.json",
-//     "pollMs": 400, "policy": { ...overrides of DEFAULT_POLICY } }
+//     "pollMs": 400, "policy": { ...overrides of DEFAULT_POLICY },
+//     "floorProgram": "...", "floorProtected": ["program id", ...] }
+//
+// With `floorProtected`, the bot also checks each program's Floor config every
+// minute and logs a warning whenever what is missing changes: no abort buffer
+// staged (nobody can stop it) or no snapshot pinned (docs/15, A5).
 //
 // Every decision is one JSON line on stdout: the triggering event, the action,
 // the reason, the transaction, and the latency from the triggering
@@ -24,10 +29,10 @@
 // truncated, that transaction's outflow is taken from the vault's token balances.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, parseLogs, decodeProtocol, decodeTicket } from "../lib/solana.mjs";
+import { Rpc, b58encode, parseLogs, decodeProtocol, decodeTicket, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, newState, pendingCancels, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, pendingCancels, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { pageQuery, morePages, MAX_PAGES } from "./follow.mjs";
 import { vaultOutflows, ticketRelease } from "./chain.mjs";
 
@@ -47,6 +52,12 @@ const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
 let nextTicket = null; // first ticket id the chain scan hasn't looked at
 const state = newState();
 const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+
+// Programs under Floor whose readiness the bot reports (A5).
+const floorWatch = cfg.floorProgram
+  ? await Promise.all((cfg.floorProtected ?? []).map((p) => new FloorClient(cfg.floorProgram, p).init()))
+  : [];
+const floorReported = new Map();
 
 const worst1h = new Map();
 const worst24h = new Map();
@@ -255,6 +266,20 @@ async function syncFromChain(act, scanFrom = null) {
   nextTicket = last;
 }
 
+/** Log each Floor program's missing pieces, once per change (A5). */
+async function checkFloor() {
+  for (const fc of floorWatch) {
+    const program = b58encode(fc.protected);
+    const acc = await rpc.account(fc.config);
+    const alerts = acc ? floorAlerts(decodeFloor(acc.bytes)) : [{ code: "missing", msg: "no Floor config for this program" }];
+    const codes = alerts.map((a) => a.code).join(",");
+    if (floorReported.get(program) === codes) continue;
+    floorReported.set(program, codes);
+    if (alerts.length) log({ level: "warn", msg: "floor not ready", program, alerts });
+    else log({ msg: "floor ready", program });
+  }
+}
+
 async function freezeIfWindowStillOpen(now) {
   if (now < state.frozenUntil || state.freezing) return;
   const mints = new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
@@ -285,9 +310,11 @@ async function main() {
   await syncFromChain(false, first > 256n ? first - 256n : 0n);
   await freezeIfWindowStillOpen(wallNow());
   log({ msg: "caught up", signatures: inWindow.length });
+  await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
   let lastHeartbeat = Date.now();
   let lastAttest = Date.now();
+  let lastFloorCheck = Date.now();
   for (;;) {
     try {
       if (pendingFreeze && wallNow() >= state.frozenUntil) {
@@ -306,6 +333,10 @@ async function main() {
       if (Date.now() - lastAttest > 10_000) {
         await refreshWorstCase();
         lastAttest = Date.now();
+      }
+      if (floorWatch.length && Date.now() - lastFloorCheck > 60_000) {
+        lastFloorCheck = Date.now();
+        await checkFloor();
       }
       if (Date.now() - lastHeartbeat > policy.heartbeatEveryS * 1000) {
         await heartbeat();

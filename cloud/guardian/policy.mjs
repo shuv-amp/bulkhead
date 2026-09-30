@@ -43,6 +43,27 @@ export const DEFAULT_POLICY = {
 export const HOUR_S = 3_600;
 export const DAY_S = 86_400;
 
+/**
+ * What is not ready under Floor, from a decoded Floor config (docs/15, A5).
+ * Every abort consumes the staged abort buffer, and every upgrade or restore
+ * unpins the snapshot; until someone stages and pins new ones, the program is
+ * live with no stop button or no instant restore. Both steps are
+ * permissionless, so the fix is a runbook step, and this is its alarm.
+ */
+export function floorAlerts(fl) {
+  if (fl.status === "aborted") {
+    return [{ code: "stopped", msg: "the program is stopped: restore the snapshot or approve a fix" }];
+  }
+  const alerts = [];
+  if (!fl.abortStaged) {
+    alerts.push({ code: "unarmed", msg: "no abort buffer staged: no guardian can stop the program until one is" });
+  }
+  if (!fl.snapshotPinned) {
+    alerts.push({ code: "no_snapshot", msg: "no snapshot pinned: after a stop, restoring needs a new frozen buffer and a quorum" });
+  }
+  return alerts;
+}
+
 export function newState() {
   return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), freezing: false };
 }
