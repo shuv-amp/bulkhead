@@ -16,7 +16,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
   2. Pin a snapshot: write your live binary to a buffer, hand its authority to Floor, and call `pin_snapshot`. Floor verifies it byte-for-byte on-chain.
 
   Anyone can do both, including the Bulkhead Cloud bot.
-- From then on your owner key *proposes* upgrades, and they execute after the delay (≥ 72h; **7 days recommended**) unless a guardian vetoes. Any live guardian can stop the program in one instruction.
+- From then on your owner key *proposes* upgrades, and they execute after the delay (72h through 30 days; **7 days recommended**) unless a guardian vetoes. Any live guardian can stop the program in one instruction.
 - Read `elf_is_v3` in the config, or run `python3 tools/floor_check.py <program-id>`. If it's false, build and test an sBPF v3 version now (`06 §8`).
 
 ## 2. Vault (Tier 1) checklist
@@ -26,7 +26,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
    - admin = your Squads vault;
    - 2–8 guardians (ops key, the Bulkhead Cloud bot, a security partner) and a threshold ≥ 2;
    - a heartbeat interval (7 days default);
-   - loosen delay ≥ 72h;
+   - loosen delay from 72h through 30 days (a raise applies at once, so a longer one is refused);
    - `lifeboat_destination` = a *different* cold multisig.
 3. **Create one vault per custody mint** (`create_vault` with your limits). The mint must pass the Token-2022 policy (`05 §7`).
 4. **Allowlist valued assets** during genesis (`upsert_asset`: Pyth feed id, haircut ≥ your max LTV + 5 points, liability weight, confidence multiple, max age, max confidence). Use feeds for deep assets only.
