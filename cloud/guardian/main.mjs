@@ -19,10 +19,10 @@
 // A failed freeze is retried; it does not stick in `state.freezing`.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, parseEvents, decodeProtocol, decodeVault, decodeTicket } from "../lib/solana.mjs";
+import { Rpc, b58encode, key, parseEvents, decodeProtocol, decodeVault, decodeTicket } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, newState, pendingCancels, DEFAULT_POLICY, DAY_S, missedInstant } from "./policy.mjs";
+import { assess, breach, decode, newState, pendingCancels, DEFAULT_POLICY, DAY_S, missedInstant, mintForVault } from "./policy.mjs";
 import { pageQuery, morePages, MAX_PAGES } from "./follow.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
@@ -89,7 +89,7 @@ async function execute(action, event, eventTime) {
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       case "cancel": {
-        const { vault } = await vc.vault(action.mint ?? event.mint);
+        const vault = action.vault ? key(action.vault) : (await vc.vault(action.mint ?? event.mint)).vault;
         const ticket = await vc.ticketAddress(action.ticketId);
         const acc = await rpc.account(ticket);
         if (!acc) {
@@ -228,6 +228,11 @@ async function syncFromChain(now, recordGaps) {
   const span = next - from;
   const end = span > 32n ? from + 32n : next;
   if (span > 32n) log({ level: "warn", msg: "ticket catch-up capped at 32; the rest waits for the next cycle", from: from.toString(), next: next.toString() });
+  const vaults = [];
+  for (const m of cfg.mints) {
+    const { vault } = await vc.vault(m);
+    vaults.push({ mint: m, vault: b58encode(vault) });
+  }
   const known = new Set(state.outflows.filter((o) => o.ticketId !== null).map((o) => o.ticketId));
   for (let id = from; id < end; id++) {
     if (known.has(id)) continue;
@@ -239,16 +244,15 @@ async function syncFromChain(now, recordGaps) {
     } catch {
       continue;
     }
-    let mint = cfg.mints[0];
-    for (const m of cfg.mints) {
-      const { vault } = await vc.vault(m);
-      if (b58encode(vault) === ticket.vault) {
-        mint = m;
-        break;
-      }
-    }
-    const e = { kind: "released", mint, owner: ticket.owner, backed: 0n, instant: 0n, queued: ticket.amount, ticketId: ticket.id, etaS: ticket.etaS };
-    log({ level: "warn", msg: "ticket from account state; logs did not report it", ticketId: id.toString(), mint });
+    const listed = mintForVault(ticket.vault, vaults);
+    const mint = listed ?? ticket.vault;
+    const e = { kind: "released", mint, vault: ticket.vault, owner: ticket.owner, backed: 0n, instant: 0n, queued: ticket.amount, ticketId: ticket.id, etaS: ticket.etaS };
+    log({
+      level: "warn",
+      msg: listed ? "ticket from account state; logs did not report it" : "ticket for an unconfigured vault; worst case treated as 0",
+      ticketId: id.toString(),
+      mint,
+    });
     await applyActions(assess(state, e, { ...worstFor(mint), now }, policy, true), e, now);
   }
   baseline.nextTicket = end;

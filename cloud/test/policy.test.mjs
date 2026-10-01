@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, mintForVault, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -121,4 +121,24 @@ test("after a late freeze, every recorded ticket is swept up once, with its own 
   assert.deepEqual(sweep.map((x) => [x.ticketId, x.mint]), [[3n, mint], [4n, other]]);
   assert.deepEqual(pendingCancels(s), [], "each ticket once");
   assert.deepEqual(pendingCancels(newState(), { ...DEFAULT_POLICY, cancelTicketsWhenFrozen: false }), []);
+});
+
+test("a ticket vault the guardian does not list is not filed under another mint", () => {
+  const listedVault = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
+  const otherVault = "6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh";
+  assert.equal(mintForVault(listedVault, [{ mint, vault: listedVault }]), mint);
+  assert.equal(mintForVault(otherVault, [{ mint, vault: listedVault }]), null);
+  const s = newState();
+  const e = released({ queued: 1n, ticketId: 9n, mint: otherVault });
+  e.vault = otherVault;
+  const actions = assess(s, e, { worst1h: 0n, worst24h: 0n, now: 1 });
+  assert.deepEqual(
+    actions.map((x) => [x.type, x.mint, x.vault]),
+    [
+      ["freeze", undefined, undefined],
+      ["cancel", otherVault, otherVault],
+    ],
+  );
+  assert.equal(s.outflows[0].mint, otherVault);
+  assert.equal(s.outflows[0].vault, otherVault);
 });

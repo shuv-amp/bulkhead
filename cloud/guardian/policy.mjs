@@ -37,6 +37,19 @@ export const DEFAULT_POLICY = {
 };
 
 /**
+ * Configured mint for a ticket's vault address, or null when the guardian
+ * does not list that vault. Callers must not substitute another mint: the
+ * amount would sit in the wrong window, and cancel_ticket checks the ticket's
+ * own vault.
+ */
+export function mintForVault(ticketVault, pairs) {
+  for (const pair of pairs) {
+    if (pair.vault === ticketVault) return pair.mint;
+  }
+  return null;
+}
+
+/**
  * Instant outflow the chain shows beyond what complete logs already recorded.
  * `chainInstants` is `unbacked_out - settled` (settling a ticket increases both,
  * so it is not a new instant). `recorded` is what events in this window already added.
@@ -137,7 +150,7 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
   for (const o of state.outflows) {
     if (o.ticketId !== null && !state.cancelled.has(o.ticketId)) {
       state.cancelled.add(o.ticketId);
-      actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
+      actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, ...(o.vault ? { vault: o.vault } : {}), reason: `incident: ticket to ${o.owner}` });
     }
   }
   return actions;
@@ -158,7 +171,14 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
     case "released": {
       const unbacked = e.instant + e.queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
-      state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: e.queued > 0n ? e.ticketId : null });
+      state.outflows.push({
+        t: ctx.now,
+        amount: unbacked,
+        owner: e.owner,
+        mint: e.mint,
+        ticketId: e.queued > 0n ? e.ticketId : null,
+        ...(e.vault ? { vault: e.vault } : {}),
+      });
       const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
       const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
       if (act && !frozen && lastHour >= limit) {
@@ -174,7 +194,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
             state.cancelled.add(o.ticketId);
             // The ticket's own mint: the freeze is protocol-wide, so this loop
             // also cancels other vaults' tickets, and cancel_ticket needs that vault.
-            actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
+            actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, ...(o.vault ? { vault: o.vault } : {}), reason: `incident: ticket to ${o.owner}` });
           }
         }
       }
