@@ -3,11 +3,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { b58decode, b58encode, key, onCurve, findPda, compileMessage } from "../lib/solana.mjs";
+import { COMPUTE_BUDGET, budgetInstructions, Keypair, send } from "../lib/signer.mjs";
 
 const here = new URL(".", import.meta.url);
 
 test("base58 round-trips well-known ids", () => {
-  for (const s of ["11111111111111111111111111111111", "BPFLoaderUpgradeab1e11111111111111111111111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "SysvarC1ock11111111111111111111111111111111"]) {
+  for (const s of ["11111111111111111111111111111111", "BPFLoaderUpgradeab1e11111111111111111111111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "SysvarC1ock11111111111111111111111111111111", "ComputeBudget111111111111111111111111111111"]) {
     assert.equal(b58encode(key(s)), s);
   }
   assert.deepEqual(b58decode("1"), Uint8Array.of(0));
@@ -44,7 +45,6 @@ test("legacy messages order signers first, the fee payer at index 0", () => {
   assert.deepEqual(signers[0], payer);
 });
 
-import { Keypair, send, budgetInstructions } from "../lib/signer.mjs";
 import { verify, createPublicKey } from "node:crypto";
 
 test("signer: RFC 8032 test vector 1 (empty message)", () => {
@@ -58,6 +58,8 @@ test("signer: RFC 8032 test vector 1 (empty message)", () => {
 
 test("compute-budget instructions encode limit and price", () => {
   const [limit, price] = budgetInstructions({ computeUnits: 200_000, priorityMicroLamports: 50_000 });
+  assert.equal(b58encode(limit.programId), "ComputeBudget111111111111111111111111111111");
+  assert.equal(b58encode(COMPUTE_BUDGET), "ComputeBudget111111111111111111111111111111");
   assert.equal(limit.data[0], 2);
   assert.equal(new DataView(limit.data.buffer).getUint32(1, true), 200_000);
   assert.equal(price.data[0], 3);

@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { b58encode, compileMessage, serializeTransaction, key } from "./solana.mjs";
 
 /** Compute Budget program. Limit is instruction 2 (u32); price is 3 (u64 micro-lamports). */
-export const COMPUTE_BUDGET = key("ComputeBudget11111111111111111111111111111");
+export const COMPUTE_BUDGET = key("ComputeBudget111111111111111111111111111111");
 
 export function budgetInstructions({ computeUnits = 0, priorityMicroLamports = 0 } = {}) {
   const out = [];

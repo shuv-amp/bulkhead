@@ -146,7 +146,7 @@ Since 26 Aug 2026, Full verification on Solana is 3 of the Pyth Pro set's 5 keys
 
 **What happens.** `cloud/lib/signer.mjs` sent one transaction to one RPC, with no Compute Budget instructions. Under congestion the freeze lands later. G1 bounds the loss by when it lands.
 
-**Fix.** Guardian transactions set a compute-unit limit and a price (`policy.computeUnits`, `policy.priorityMicroLamports`) and the signed transaction is submitted to `rpc` and every URL in `rpcs`. The docs no longer say "bundle tips". Tests: `compute-budget instructions encode limit and price`, `a signed transaction is broadcast to every configured rpc`.
+**Fix.** Guardian transactions set a compute-unit limit and a price (`policy.computeUnits`, `policy.priorityMicroLamports`) and the signed transaction is submitted to `rpc` and every URL in `rpcs`. The Compute Budget program id is the 43-character address; the 42-character truncation is not a program, and every guardian transaction then fails simulation with `ProgramAccountNotFound`. The docs no longer say "bundle tips". Tests: `compute-budget instructions encode limit and price`, `base58 round-trips well-known ids`, `a signed transaction is broadcast to every configured rpc`.
 
 ### A13 — The guardian believes any log line (Medium)
 
