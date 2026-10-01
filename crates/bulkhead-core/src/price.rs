@@ -55,6 +55,8 @@ mod tests {
     #[test]
     fn an_age_that_would_overflow_is_unusable() {
         assert!(!is_usable(1, 0, -1, i64::MAX, 10, 10_000));
+        assert!(!is_usable(1, 0, i64::MIN, 1_000, 60, 10_000));
+        assert!(!is_usable(1, 0, i64::MIN, i64::MAX, i64::MAX, 10_000));
         assert!(!is_usable(1, 0, 100, 90, 10, 10_000));
         assert!(is_usable(1, 0, 100, 105, 10, 10_000));
     }

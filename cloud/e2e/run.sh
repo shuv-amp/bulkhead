@@ -14,9 +14,6 @@ E=target/e2e
 PORT="${PORT:-18899}"
 RPC="http://127.0.0.1:$PORT"
 
-echo "== Harbor bound to this build's Vault (it signs only for that program id)"
-scripts/build-harbor.sh "$(solana-keygen pubkey target/deploy/bulkhead_vault-keypair.json)"
-
 echo "== building the world (LiteSVM, the same program ids)"
 (cd programs/tests && cargo test --release --test e2e_world -- --ignored >/dev/null 2>&1)
 field() { python3 -c "import json,sys; print(json.load(open('$E/world.json'))['$1'])"; }

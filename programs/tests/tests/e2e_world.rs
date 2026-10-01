@@ -69,7 +69,13 @@ fn build_world() {
     let mut env = Env::new();
     env.time = now - 80 * 3_600; // genesis 80h ago; the seal executes 8h ago
     env.sync_clock();
-    let (vault_program, harbor) = (program_id("bulkhead_vault"), program_id("bulkhead_harbor"));
+    // Harbor's binary signs only for the Vault id baked in at build time, which
+    // `scripts/build-programs.sh` sets to the devnet Vault. The Harbor program
+    // id itself is still the local keypair.
+    let (vault_program, harbor) = (
+        Address::from_str_const("HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b"),
+        program_id("bulkhead_harbor"),
+    );
     let m = Market::with_ids(&mut env, vault_program, harbor);
     let usdc = m.create_vault(&mut env, 6, Limits::default_limits(), [1; 32], None);
     let whale = Keypair::new();

@@ -24,6 +24,9 @@ pub fn is_token_program(a: &Address) -> bool {
 
 const MINT_BASE_LEN: usize = 82;
 const ACCOUNT_BASE_LEN: usize = 165;
+/// Classic and Token-2022 multisig. Byte 165 is a signer pubkey byte, not an
+/// account-type tag, so a length check alone can accept one as an account.
+const MULTISIG_LEN: usize = 355;
 const ACCOUNT_TYPE_MINT: u8 = 1;
 const ACCOUNT_TYPE_ACCOUNT: u8 = 2;
 
@@ -34,7 +37,7 @@ pub fn account_info(a: &AccountView) -> Result<([u8; 32], [u8; 32], u64), Progra
         return Err(VaultError::WrongTokenProgram.into());
     }
     let d = a.try_borrow()?;
-    if d.len() < ACCOUNT_BASE_LEN || d[108] == 0 {
+    if d.len() < ACCOUNT_BASE_LEN || d.len() == MULTISIG_LEN || d[108] == 0 {
         return Err(VaultError::WrongAccountType.into());
     }
     // A classic token account is exactly 165 bytes. Anything longer is
@@ -73,7 +76,7 @@ pub fn checked_mint_decimals(
         return Err(VaultError::WrongTokenProgram.into());
     }
     let d = mint.try_borrow()?;
-    if d.len() < MINT_BASE_LEN || d[45] != 1 {
+    if d.len() < MINT_BASE_LEN || d.len() == MULTISIG_LEN || d[45] != 1 {
         return Err(VaultError::WrongMint.into());
     }
     let decimals = d[44];

@@ -25,8 +25,10 @@ bad=0
 for pair in "$@"; do
   id="${pair%%=*}"
   name="${pair#*=}"
+  local_so="target/deploy/$name.so"
+  case "$name" in *.so) local_so="$name" ;; esac
   solana program dump --url "$URL" "$id" "$T/$id.so" > /dev/null
-  if python3 - "target/deploy/$name.so" "$T/$id.so" <<'PY'
+  if python3 - "$local_so" "$T/$id.so" <<'PY'
 import hashlib, sys
 sys.path.insert(0, "reference")
 import bulkhead_ref as ref

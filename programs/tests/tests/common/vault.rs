@@ -22,6 +22,7 @@ pub fn pyth_receiver() -> Address {
 
 /// Vault error codes (programs/vault/src/error.rs).
 pub mod verr {
+    pub const WRONG_ACCOUNT_TYPE: u32 = 8001;
     pub const WRONG_ADDRESS: u32 = 8002;
     pub const NOT_ADMIN: u32 = 8005;
     pub const NOT_GUARDIAN: u32 = 8006;
@@ -275,6 +276,34 @@ impl Market {
         let ix = m.harbor_ix(0, &args, vec![], accounts);
         env.ok(&[ix], &[]);
         m
+    }
+
+    /// Harbor's REGISTER for a program at `harbor`, using this market's admin,
+    /// guardians and lifeboat destination, and the given loosen delay.
+    pub fn register_ix(&self, env: &Env, harbor: Address, loosen_delay: i64) -> Instruction {
+        let caller = pda(&[b"bulkhead-caller"], &harbor);
+        let protocol = pda(&[b"protocol", harbor.as_ref()], &self.vault_program);
+        let mut data = vec![0u8];
+        data.extend_from_slice(self.admin.pubkey().as_ref());
+        data.push(3);
+        for k in &self.g {
+            data.extend_from_slice(k.pubkey().as_ref());
+        }
+        data.push(2);
+        data.extend_from_slice(&(7 * DAY).to_le_bytes());
+        data.extend_from_slice(&loosen_delay.to_le_bytes());
+        data.extend_from_slice(self.destination.pubkey().as_ref());
+        let accounts = vec![
+            AccountMeta::new_readonly(self.vault_program, false),
+            AccountMeta::new_readonly(caller, false),
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(protocol, false),
+            AccountMeta::new_readonly(harbor, false),
+            AccountMeta::new_readonly(harbor, false),
+            AccountMeta::new_readonly(caller, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ];
+        Instruction { program_id: harbor, accounts, data }
     }
 
     pub fn harbor_ix(&self, tag: u8, args: &[u8], harbor_accounts: Vec<AccountMeta>, vault_accounts: Vec<AccountMeta>) -> Instruction {

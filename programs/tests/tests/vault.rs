@@ -579,7 +579,10 @@ fn pre_seal_deposits_cannot_hide_an_uncovered_import() {
     w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
     w.env.advance(3 * DAY);
     let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
-    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE, "2,000 of claims, 1,000 of tokens");
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    w.env.ok(&[ix], &[]);
 }
 
 #[test]
@@ -866,6 +869,16 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     let too_long = (31 * DAY).to_le_bytes();
     let ix = w.m.propose_change_ix(&w.env, 5, &zero, &too_long, None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_ABOVE_MAXIMUM);
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(30 * DAY).to_le_bytes(), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let d = w.env.account(&w.m.protocol).data;
+    assert_eq!(i64::from_le_bytes(d[436..444].try_into().unwrap()), 30 * DAY, "raised at once, to the cap");
+    let harbor = Address::new_unique();
+    w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let ix = w.m.register_ix(&w.env, harbor, 30 * DAY + 1);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DELAY_ABOVE_MAXIMUM);
+    let ix = w.m.register_ix(&w.env, harbor, 30 * DAY);
+    w.env.ok(&[ix], &[]);
     let abdicate = |w: &World, kind: u8, guardians: &[Address]| {
         let mut a = vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.admin.pubkey(), true)];
         a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
@@ -915,6 +928,55 @@ fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
     looser.short_bps = 300;
     let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+}
+
+/// A floor above the balance must not make attest promise more than the vault holds.
+#[test]
+fn attest_never_reports_more_than_the_balance() {
+    let mut w = World::new();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    let vault = w.usdc.vault;
+    let mut floors = Limits::default_limits();
+    floors.short_floor = 1_000_000 * USDC;
+    floors.long_floor = 1_000_000 * USDC;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &floors.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.seal();
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!(a.balance, 1_000 * USDC);
+    assert_eq!(a.available_now, 1_000 * USDC, "the balance, not the 1,000,000 floor");
+}
+
+/// Byte 165 of a 355-byte multisig is a signer byte. It must not be read as an account type.
+#[test]
+fn a_token_multisig_is_not_a_token_account() {
+    let mut w = World::new();
+    let u = w.user();
+    let _acc = w.deposit("usdc", &u, 1_000 * USDC);
+    w.seal();
+    let fake = Address::new_unique();
+    let mut data = vec![0u8; 355];
+    data[..32].copy_from_slice(w.usdc.mint.as_ref());
+    data[32..64].copy_from_slice(u.pubkey().as_ref());
+    data[108] = 1;
+    data[165] = 2;
+    let lamports = w.env.svm.minimum_balance_for_rent_exemption(data.len());
+    w.env
+        .svm
+        .set_account(
+            fake,
+            solana_account::Account {
+                lamports,
+                data,
+                owner: token_2022(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &fake, 1, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[ix], &[&u]), verr::WRONG_ACCOUNT_TYPE);
 }
 
 // ---------------------------------------------------------------------------

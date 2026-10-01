@@ -77,10 +77,13 @@ node cloud/deploy/vault-check.mjs "$RPC" "$D/market" | grep -E "absolute caps|at
 
 echo "== the deployed programs must run exactly the local build"
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
-SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=bulkhead_harbor"
+# A fresh Vault keypair is not the devnet Vault, so the deployed Harbor is the
+# side build. The canonical target/deploy binary stays bound to the devnet Vault.
+HARBOR_SO="$D/market/bulkhead_harbor.so"
+SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=$HARBOR_SO"
 echo "== the same check without account reads (cloud/deploy/loader.mjs, getProgramAccounts only)"
 node cloud/deploy/loader.mjs verify "$RPC" "$(solana-keygen pubkey "$D/deployer.json")" \
-  "$(id bulkhead_floor)=target/deploy/bulkhead_floor.so" "$(id bulkhead_vault)=target/deploy/bulkhead_vault.so" "$(id bulkhead_harbor)=target/deploy/bulkhead_harbor.so"
+  "$(id bulkhead_floor)=target/deploy/bulkhead_floor.so" "$(id bulkhead_vault)=target/deploy/bulkhead_vault.so" "$(id bulkhead_harbor)=$HARBOR_SO"
 
 echo "== Floor on a deployed target program (scripts/floor-devnet.sh, as on devnet)"
 scripts/floor-devnet.sh "$RPC" "$D/deployer.json" "$D/floor"

@@ -120,6 +120,7 @@ mod tests {
             classify_delay(MIN_LOOSEN_DELAY_S, MAX_LOOSEN_DELAY_S + 1),
             None
         );
+        assert_eq!(classify_delay(MIN_LOOSEN_DELAY_S, i64::MAX), None);
         assert_eq!(
             classify_delay(MIN_LOOSEN_DELAY_S, MAX_LOOSEN_DELAY_S),
             Some(Class::Tighten)
