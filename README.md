@@ -22,7 +22,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 **Who the guardians are.** A protocol names 2–8 guardian keys when it registers: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
 
-**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian (the bot that froze the end-to-end attack within seconds), limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day."
+**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian (the bot that froze the end-to-end attack within seconds; a patient attacker who paces payouts under its thresholds is bounded by the on-chain limits, not by the bot, [15](docs/15-ADVERSARIAL-REVIEW.md) A2), limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day."
 
 **Why not just an abort binary?** Dean Little's `sbpf-asm-abort` showed that a program can be stopped by upgrading it to a tiny binary that always fails. Floor builds on that pattern (credited in [DISCLOSURE.md](DISCLOSURE.md)). But a bare abort:
 - is pressed by whoever holds the upgrade key, the same key that can deploy anything;
@@ -101,7 +101,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
 | End to end | Above |
 | On devnet (28 Sep; Vault upgraded in place 29 Sep) | Those binaries match commit `422bd1f`, not this tree (A7–A13 change the bytes; upgrade still pending). Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured (with the calibrated absolute caps), the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |
-| What this process found in our own code and docs | 27 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | 29 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
@@ -174,7 +174,7 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [05 Program spec](docs/05-PROGRAM-SPEC.md) | Accounts, instructions, errors, measured compute, Token-2022 policy |
 | [06 Floor](docs/06-FLOOR.md) | Tier 0: the upgrade-key floor, stop, snapshot restore, SIMD-0500, and why it beats a bare abort binary |
 | [07 Integration](docs/07-INTEGRATION.md) | How a protocol integrates; calibration; Harbor |
-| [08 Scenarios](docs/08-SCENARIOS.md) | S1 Drift, S4 bank run, S7 loosen, S8 one-transaction attack, S9 honest borrower, S10 Floor: where each runs and what it showed |
+| [08 Scenarios](docs/08-SCENARIOS.md) | S1 Drift, S4 bank run, S7 loosen, S8 one-transaction attack, S9 honest borrower, S10 Floor, S11 liquidation cascade: where each runs and what it showed |
 | [09 Verification](docs/09-VERIFICATION.md) | The method, every result, every bug it found |
 | [10 Build plan](docs/10-BUILD-PLAN.md) | What remains to 12 Oct, cut rules, risks |
 | [11 Business](docs/11-BUSINESS.md) | Market, pricing, go-to-market, competition, moat |

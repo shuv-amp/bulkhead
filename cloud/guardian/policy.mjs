@@ -30,40 +30,42 @@ export const DEFAULT_POLICY = {
   /** Floor: veto upgrade proposals whose buffer isn't pre-approved. */
   approvedUpgradeBuffers: [],
   heartbeatEveryS: 86_400,
-  /** Compute-unit price (micro-lamports) on every guardian transaction. */
-  priorityMicroLamports: 50_000,
-  /** Compute-unit limit on every guardian transaction. */
-  computeUnits: 200_000,
+  /** Compute-unit limit on every guardian transaction (a freeze, cancel,
+   * veto or heartbeat uses a small fraction of it). */
+  computeUnits: 50_000,
+  /** Priority price in micro-lamports per compute unit, or "auto": the 90th
+   * percentile of recent fees paid on the protocol account, capped below. A
+   * freeze is only as good as the slot it lands in. */
+  priorityMicroLamports: "auto",
+  maxPriorityMicroLamports: 1_000_000,
 };
-
-/**
- * Configured mint for a ticket's vault address, or null when the guardian
- * does not list that vault. Callers must not substitute another mint: the
- * amount would sit in the wrong window, and cancel_ticket checks the ticket's
- * own vault.
- */
-export function mintForVault(ticketVault, pairs) {
-  for (const pair of pairs) {
-    if (pair.vault === ticketVault) return pair.mint;
-  }
-  return null;
-}
-
-/**
- * Instant outflow the chain shows beyond what complete logs already recorded.
- * `chainInstants` is `unbacked_out - settled` (settling a ticket increases both,
- * so it is not a new instant). `recorded` is what events in this window already added.
- */
-export function missedInstant(chainInstants, recorded) {
-  const gap = BigInt(chainInstants) - BigInt(recorded);
-  return gap > 0n ? gap : 0n;
-}
 
 export const HOUR_S = 3_600;
 export const DAY_S = 86_400;
 
+/**
+ * What is not ready under Floor, from a decoded Floor config (docs/15, A5).
+ * Every abort consumes the staged abort buffer, and every upgrade or restore
+ * unpins the snapshot; until someone stages and pins new ones, the program is
+ * live with no stop button or no instant restore. Both steps are
+ * permissionless, so the fix is a runbook step, and this is its alarm.
+ */
+export function floorAlerts(fl) {
+  if (fl.status === "aborted") {
+    return [{ code: "stopped", msg: "the program is stopped: restore the snapshot or approve a fix" }];
+  }
+  const alerts = [];
+  if (!fl.abortStaged) {
+    alerts.push({ code: "unarmed", msg: "no abort buffer staged: no guardian can stop the program until one is" });
+  }
+  if (!fl.snapshotPinned) {
+    alerts.push({ code: "no_snapshot", msg: "no snapshot pinned: after a stop, restoring needs a new frozen buffer and a quorum" });
+  }
+  return alerts;
+}
+
 export function newState() {
-  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), freezing: false };
+  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), freezing: false };
 }
 
 /**
@@ -150,7 +152,7 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
   for (const o of state.outflows) {
     if (o.ticketId !== null && !state.cancelled.has(o.ticketId)) {
       state.cancelled.add(o.ticketId);
-      actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, ...(o.vault ? { vault: o.vault } : {}), reason: `incident: ticket to ${o.owner}` });
+      actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
     }
   }
   return actions;
@@ -169,16 +171,14 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
   const frozen = state.freezing || ctx.now < state.frozenUntil;
   switch (e.kind) {
     case "released": {
-      const unbacked = e.instant + e.queued;
+      // A ticket can reach the guardian twice (its event, and the chain scan
+      // for tickets whose event was missed): its queued amount counts once.
+      const ticket = e.queued > 0n ? e.ticketId : null;
+      const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
+      if (ticket !== null) state.tickets.add(ticket);
+      const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
-      state.outflows.push({
-        t: ctx.now,
-        amount: unbacked,
-        owner: e.owner,
-        mint: e.mint,
-        ticketId: e.queued > 0n ? e.ticketId : null,
-        ...(e.vault ? { vault: e.vault } : {}),
-      });
+      state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
       const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
       const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
       if (act && !frozen && lastHour >= limit) {
@@ -194,7 +194,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
             state.cancelled.add(o.ticketId);
             // The ticket's own mint: the freeze is protocol-wide, so this loop
             // also cancels other vaults' tickets, and cancel_ticket needs that vault.
-            actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, ...(o.vault ? { vault: o.vault } : {}), reason: `incident: ticket to ${o.owner}` });
+            actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
           }
         }
       }

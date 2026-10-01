@@ -43,7 +43,7 @@ Re-read the official rules on Sun 11 Oct.
 
 1. **0:00–0:30** Terminal: `scripts/check.sh` and the `scripts/prove.sh` summary. Every rule stated independently in Rust and Python and checked on millions of cases; 13 bounded proofs; the bugs these checks found in our own code (`09 §4`).
 2. **0:30–1:20** S8: the one-transaction attack. Legacy drained despite a next-slot stop; protected: ten payouts in one transaction, 199k paid (the 2% burst, sized to what is in the vault at each payout), 800k waiting in public.
-3. **1:20–1:50** S1 live (`E2E=1 scripts/check-programs.sh`, or devnet once deployed): the attacker orders 1.2M and gets 100k; the Cloud guardian freezes on its own within seconds and cancels every queued payout; the status page shows the worst case.
+3. **1:20–1:50** S1 live (`E2E=1 scripts/check-programs.sh`, or devnet once deployed): the attacker orders 1.2M and gets 100k; the Cloud guardian freezes on its own within seconds and cancels every queued payout; the status page shows the worst case. Say "against this attacker": a patient one who stays under the bot's thresholds is bounded by the on-chain limit, which is the claim (`15` A2).
 4. **1:50–2:15** S4 and S9: bank run 100% instant with zero tickets; honest borrower 100% backed. "Nobody noticed Bulkhead."
 5. **2:15–2:40** S7 and S10: a loosening waits 72h and gets vetoed. Then `scripts/floor-demo.sh` on a real mainnet program's bytes: Floor takes its key with zero code changes, one guardian stops it, and two restore it byte-identical (the Dean Little question, answered on screen).
 6. **2:40–3:00** Status page line: "Worst case right now: $X, then $Y/hour, at most $Z/day."
@@ -96,6 +96,9 @@ Re-read the official rules on Sun 11 Oct.
 | Why not just pause? | "One of 87 hacked protocols paused within an hour; 44% of attacks are one transaction. We build the stop button in, but the limit is what works inside the transaction." |
 | What if Bulkhead has a bug? | "It's the top risk. Every rule is stated independently more than once and checked on millions of cases; those checks have already caught real bugs in our own code, one of them shared by two implementations. Then audits, TVL caps, immutability." |
 | Slow drain under the limit? | "The daily cap: with nobody watching for a full day, at most 10% leaves (the day's 5% on top of a full 5% bucket), not everything. Half a vault takes nine days. Guardians and alerts do the rest." |
+| Won't it block liquidations in a crash? | "It can, and we measured it. On a synthetic −30% day, the defaults start queuing liquidations once a 10-minute crash liquidates 17% of a vault. A lending market sets 4% an hour and 10% a day and a 30% cascade goes through, at the cost of a bigger theft bound. We publish that trade-off per market." (`08` S11) |
+| Who controls Bulkhead itself? | "Today a disclosed team key, on devnet. On mainnet: two audits, a capped first partner, then we burn it. After that nobody can change Bulkhead, including us; a new version is a new deployment that protocols move to through their 72-hour lifeboat exit." |
+| What if the admin key is stolen for good? | "It can't steal. Today it can block its own rotation, which is a denial of service we list as open (A4). The option we're weighing is letting a guardian quorum rotate the key after 72 hours." |
 | Business? | "Free, immutable core. Protocols pay for Cloud: a guardian that freezes in minutes, calibration, attestations, STRIDE evidence. 10 Pro customers is $300k ARR." |
 | Why you? | "I find bugs in shipped crypto code. One is an official BIP-352 test vector; two Bitcoin Core PRs merged. Bulkhead is verified the same way." |
 | What do you need? | "Intros to three protocol design partners and one security firm to run a guardian." |

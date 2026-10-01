@@ -48,9 +48,13 @@ We reported it privately, and it has been acknowledged. We will publish the deta
 ## Known limitations (by design; `docs/04-THREAT-MODEL.md`)
 
 - A compromised admin can tighten limits instantly, including closing the unbacked lane. That is denial of service. Owners taking back their own deposits are unaffected.
+- **Open (`docs/15-ADVERSARIAL-REVIEW.md` A4):** a compromised Vault admin or Floor owner key can block its own replacement, because only that key can propose a rotation and it can cancel any the team proposes. The denial of service above then lasts until A4 is fixed, not until the key is rotated. It is still never theft.
+- The guardian bot bounds a greedy attacker within seconds, not a patient one: an attacker who keeps every window under its thresholds is bounded only by the on-chain limits (A2).
+- In a fast crash, the default limits can queue honest liquidations for 6 hours (`docs/08-SCENARIOS.md` S11). Lending markets must size their limits for a cascade, which also raises what a thief can take.
 - A malicious guardian can freeze, cancel, extend, veto or stop the program. That is denial of service, never theft. It lasts until a live quorum of the other guardians ejects that guardian, which takes effect instantly.
 - G2 bounds only what Bulkhead does to an owner taking back their own deposit. Whether the tokens are actually in the vault depends on the pool's liquidity (`docs/03-MECHANISM.md §4.6`).
 - Receipt tokens transferred to a new holder carry no backing. Their redemptions use the rate-limited lane.
 - A Floor stop takes effect in the next slot at the earliest, because new code becomes visible only from the next slot.
 - Once SIMD-0500 is active, a Floor stop of a pre-v3 program can only be undone with an sBPF v3 build.
 - Mint gates and flash loans are specified (`docs/03-MECHANISM.md §4.8`) but not built.
+- Immutable means unpatchable. After the upgrade authorities are burned (G9), a bug in Bulkhead cannot be fixed in place: the upgrade path is a new deployment, and funds move to it through each protocol's lifeboat exit (at least 72h, to a destination committed 72h earlier). Until the burn, the team key above can replace the code of every protected vault, which is why it is disclosed and why the burn is step 6 of the mainnet path.

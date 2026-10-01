@@ -147,7 +147,7 @@ After SIMD-0500 activates, `Upgrade` accepts only sBPF v3. So:
 | A guardian quorum is malicious | Out of scope: it holds Security Council power (fast restore). The status page checks the set against the on-chain parts of L2BEAT's bar (≥ 8 members, ≥ 75% threshold); the third part (≥ 50% outside the team) must be published by the team (§10). |
 | Bug in Floor | Every protected program at once. Mitigations: small instruction set, no arbitrary CPI, one dependency, verified core, devnet only until audited. |
 | Pre-signed (durable-nonce) proposals | Proposals expire 7 days after becoming executable, and are public for ≥ 72h |
-| The stop lands one slot late | New code is visible from the next slot, and a program can be upgraded once per slot. Guardian transactions set a compute-unit limit and price and are sent to every configured RPC. One runtime-level interaction is under responsible disclosure; see `SECURITY.md`. |
+| The stop lands one slot late | New code is visible from the next slot, and a program can be upgraded once per slot. Guardians send stops with a priority fee, to several RPCs. One runtime-level interaction is under responsible disclosure; see `SECURITY.md`. |
 | Snapshot made stale by an upgrade | Decided at the moment of the abort against the live bytes; a stale snapshot only removes the fast undo, never blocks the stop |
 | Abort buffer too large for the program | Refused at staging (`AbortDoesNotFit`); the 136-byte minimal binary fits almost any program |
 

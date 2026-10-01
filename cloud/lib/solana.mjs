@@ -399,64 +399,68 @@ export function decodeAttestation(bytes) {
 }
 
 /**
- * A Bulkhead ticket account (`programs/vault/src/state.rs`, `Ticket`).
- * `bytes` is the raw account data.
+ * Structured events from a transaction's log messages, each attributed to the
+ * program that emitted it, and whether the runtime truncated the log.
+ *
+ * Any program can write a "Program data:" line, so a line only means something
+ * when it was emitted inside an invocation of the program you trust. The
+ * runtime brackets every invocation with "Program <id> invoke [n]" and
+ * "Program <id> success" (or "failed"); the line belongs to the innermost open
+ * one. Logs are capped (10,000 bytes per transaction); past the cap the
+ * runtime writes "Log truncated" and drops the rest, so a truncated log can't
+ * be read as complete.
  */
+export function parseLogs(logs) {
+  const events = [];
+  const stack = [];
+  let truncated = false;
+  for (const line of logs ?? []) {
+    if (line === "Log truncated") {
+      truncated = true;
+      continue;
+    }
+    let m = /^Program (\S+) invoke \[\d+\]$/.exec(line);
+    if (m) {
+      stack.push(m[1]);
+      continue;
+    }
+    m = /^Program (\S+) (success|failed.*)$/.exec(line);
+    if (m && stack[stack.length - 1] === m[1]) {
+      stack.pop();
+      continue;
+    }
+    m = /^Program data: (.*)$/.exec(line);
+    if (!m) continue;
+    let fields;
+    try {
+      fields = m[1].split(" ").map((b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
+    } catch {
+      continue; // not base64: nobody's event
+    }
+    events.push({ program: stack[stack.length - 1] ?? null, name: text(fields[0]), fields: fields.slice(1) });
+  }
+  return { events, truncated };
+}
+
+/** Events emitted by one of `programs` (base58 ids); all events if none given. */
+export function parseEvents(logs, programs = null) {
+  const { events } = parseLogs(logs);
+  return programs ? events.filter((e) => programs.includes(e.program)) : events;
+}
+
+/** A Vault `Ticket` account (programs/vault/src/state.rs). */
 export function decodeTicket(d) {
-  if (text(d.slice(0, 8)) !== "BHTICKT1") throw new Error("not a Bulkhead ticket");
+  if (text(d.slice(0, 8)) !== "BHTICKT1") throw new Error("not a Bulkhead ticket account");
   const r = new Reader(d, 8);
   return {
     protocol: b58encode(r.key()),
     vault: b58encode(r.key()),
     recipient: b58encode(r.key()),
-    owner: b58encode(r.key()),
+    recipientOwner: b58encode(r.key()),
     payer: b58encode(r.key()),
     id: r.u64(),
     amount: r.u64(),
     createdS: Number(r.i64()),
     etaS: Number(r.i64()),
   };
-}
-
-const INVOKE_RE = /^Program ([1-9A-HJ-NP-Za-km-z]+) invoke \[\d+\]$/;
-const DONE_RE = /^Program ([1-9A-HJ-NP-Za-km-z]+) (?:success|failed)/;
-
-/**
- * Structured events: "Program data: <base64>" lines, attributed to the
- * innermost program that is currently invoked.
- *
- * `programs`, when set, is a list of program ids (base58). Lines emitted by
- * any other program are dropped, so a transaction that merely mentions the
- * protocol account cannot forge a `vault:released`. `truncated` is set when
- * the runtime cut the log (the 10 KB limit); the caller must not treat the
- * event list as complete.
- */
-export function parseEvents(logs, { programs } = {}) {
-  const allow = programs ? new Set(programs) : null;
-  const stack = [];
-  const events = [];
-  let truncated = false;
-  for (const line of logs ?? []) {
-    if (line === "Log truncated" || line === "Program log: Log truncated") {
-      truncated = true;
-      continue;
-    }
-    const inv = INVOKE_RE.exec(line);
-    if (inv) {
-      stack.push(inv[1]);
-      continue;
-    }
-    const done = DONE_RE.exec(line);
-    if (done && stack[stack.length - 1] === done[1]) {
-      stack.pop();
-      continue;
-    }
-    const m = /^Program data: (.*)$/.exec(line);
-    if (!m) continue;
-    const program = stack[stack.length - 1] ?? null;
-    if (allow && !allow.has(program)) continue;
-    const fields = m[1].split(" ").map((b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
-    events.push({ name: text(fields[0]), fields: fields.slice(1), program });
-  }
-  return { events, truncated };
 }

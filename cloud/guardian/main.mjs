@@ -7,7 +7,12 @@
 //   { "rpc": "http://127.0.0.1:8899",
 //     "vaultProgram": "...", "protocolProgram": "...",
 //     "mints": ["..."], "guardianKey": "path/to/keypair.json",
-//     "pollMs": 400, "policy": { ...overrides of DEFAULT_POLICY } }
+//     "pollMs": 400, "policy": { ...overrides of DEFAULT_POLICY },
+//     "floorProgram": "...", "floorProtected": ["program id", ...] }
+//
+// With `floorProtected`, the bot also checks each program's Floor config every
+// minute and logs a warning whenever what is missing changes: no abort buffer
+// staged (nobody can stop it) or no snapshot pinned (docs/15, A5).
 //
 // Every decision is one JSON line on stdout: the triggering event, the action,
 // the reason, the transaction, and the latency from the triggering
@@ -17,30 +22,42 @@
 // that window from chain history (block times, not the wall clock) and, if it
 // is already over a threshold and the protocol is not frozen, freezes once.
 // A failed freeze is retried; it does not stick in `state.freezing`.
+//
+// What it believes: an event counts only if the Vault (or Floor) program wrote
+// it (any program can write a "Program data:" line); the freeze state and new
+// tickets are read from the chain every cycle; and when a transaction's log was
+// truncated, that transaction's outflow is taken from the vault's token balances.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, key, parseEvents, decodeProtocol, decodeVault, decodeTicket } from "../lib/solana.mjs";
-import { Keypair, send } from "../lib/signer.mjs";
+import { Rpc, b58encode, parseLogs, decodeProtocol, decodeTicket, decodeFloor } from "../lib/solana.mjs";
+import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, newState, pendingCancels, DEFAULT_POLICY, DAY_S, missedInstant, mintForVault } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, pendingCancels, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { pageQuery, morePages, MAX_PAGES } from "./follow.mjs";
+import { vaultOutflows, ticketRelease } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
 const rpc = new Rpc(cfg.rpc);
-const programs = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
-const extraRpcs = (cfg.rpcs ?? []).filter((u) => u && u !== cfg.rpc).map((u) => new Rpc(u));
-const feeOpts = () => ({
-  priorityMicroLamports: policy.priorityMicroLamports,
-  computeUnits: policy.computeUnits,
-  rpcs: extraRpcs,
-});
-/** Chain totals already reflected in `state`, so a later truncated log only adds the difference. */
-const baseline = { instants: new Map(), nextTicket: null, recorded: new Map() };
+// Extra endpoints every guardian transaction is also sent to (optional).
+const extraRpcs = (cfg.rpcs ?? []).map((url) => new Rpc(url));
 const guardian = Keypair.load(cfg.guardianKey);
 const vc = await new VaultClient(cfg.vaultProgram, cfg.protocolProgram).init();
+// The watched vaults, by vault address and by token account address.
+const watched = await Promise.all(cfg.mints.map(async (mint) => ({ mint, ...(await vc.vault(mint)) })));
+const vaultMints = new Map(watched.map((v) => [b58encode(v.vault), v.mint]));
+const tokenMints = new Map(watched.map((v) => [b58encode(v.vaultTokens), v.mint]));
+// Only these programs' events count: any program can write "Program data:".
+const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
+let nextTicket = null; // first ticket id the chain scan hasn't looked at
 const state = newState();
 const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+
+// Programs under Floor whose readiness the bot reports (A5).
+const floorWatch = cfg.floorProgram
+  ? await Promise.all((cfg.floorProtected ?? []).map((p) => new FloorClient(cfg.floorProgram, p).init()))
+  : [];
+const floorReported = new Map();
 
 const worst1h = new Map();
 const worst24h = new Map();
@@ -75,8 +92,22 @@ async function refreshWorstCase() {
   }
 }
 
+/** Compute budget, priority price and extra endpoints for one guardian transaction. */
+async function sendOptions() {
+  let microLamports = policy.priorityMicroLamports;
+  if (microLamports === "auto") {
+    try {
+      const fees = await rpc.call("getRecentPrioritizationFees", [[b58encode(vc.protocol)]]);
+      microLamports = priorityPrice(fees, { cap: policy.maxPriorityMicroLamports });
+    } catch {
+      microLamports = 0; // no fee data: send anyway, without a price
+    }
+  }
+  return { computeUnits: policy.computeUnits, microLamports: Number(microLamports) || 0, rpcs: extraRpcs };
+}
+
 async function heartbeat() {
-  const sig = await send(rpc, guardian, [vc.heartbeat(guardian.publicKey)], [], feeOpts());
+  const sig = await send(rpc, guardian, [vc.heartbeat(guardian.publicKey)], [], await sendOptions());
   log({ action: "heartbeat", signature: sig });
 }
 
@@ -89,7 +120,7 @@ async function execute(action, event, eventTime) {
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       case "cancel": {
-        const vault = action.vault ? key(action.vault) : (await vc.vault(action.mint ?? event.mint)).vault;
+        const { vault } = await vc.vault(action.mint ?? event.mint);
         const ticket = await vc.ticketAddress(action.ticketId);
         const acc = await rpc.account(ticket);
         if (!acc) {
@@ -111,7 +142,7 @@ async function execute(action, event, eventTime) {
       default:
         return false;
     }
-    const sig = await send(rpc, guardian, ixs, [], feeOpts());
+    const sig = await send(rpc, guardian, ixs, [], await sendOptions());
     const confirmed = Date.now();
     log({
       action: action.type,
@@ -177,85 +208,14 @@ async function signatures(until, oldestWanted) {
   return out;
 }
 
-async function accountBytes(address) {
-  const acc = await rpc.account(typeof address === "string" ? address : b58encode(address));
-  return acc?.bytes ?? null;
-}
-
-/**
- * Freeze state comes from the protocol account, not from log lines.
- * When `recordGaps` is set, instant outflow and tickets that logs did not
- * report (a truncated log, or a line we refused to attribute) are taken from
- * `unbacked_out - settled` and from `next_ticket_id`.
- */
-async function syncFromChain(now, recordGaps) {
-  const protoBytes = await accountBytes(vc.protocol);
-  if (!protoBytes) return;
-  const protocol = decodeProtocol(protoBytes);
-  state.frozenUntil = protocol.frozenUntil;
-  for (const mint of cfg.mints) {
-    const { vault } = await vc.vault(mint);
-    const bytes = await accountBytes(vault);
-    if (!bytes) continue;
-    let instants;
-    try {
-      const v = decodeVault(bytes);
-      instants = v.unbackedOut - v.settled;
-    } catch {
-      continue;
-    }
-    const prev = baseline.instants.get(mint);
-    baseline.instants.set(mint, instants);
-    if (prev === undefined) {
-      baseline.recorded.set(mint, 0n);
-      continue;
-    }
-    const recorded = baseline.recorded.get(mint) ?? 0n;
-    const gap = missedInstant(instants - prev, recorded);
-    baseline.recorded.set(mint, 0n);
-    if (recordGaps && gap > 0n) {
-      const e = { kind: "released", mint, owner: "", backed: 0n, instant: gap, queued: 0n, ticketId: null, etaS: 0 };
-      log({ level: "warn", msg: "unbacked outflow from account state; logs did not report it", mint, amount: gap.toString() });
-      await applyActions(assess(state, e, { ...worstFor(mint), now }, policy, true), e, now);
-    }
-  }
-  const next = protocol.nextTicketId;
-  const from = baseline.nextTicket;
-  if (from === null || !recordGaps) {
-    baseline.nextTicket = next;
-    return;
-  }
-  const span = next - from;
-  const end = span > 32n ? from + 32n : next;
-  if (span > 32n) log({ level: "warn", msg: "ticket catch-up capped at 32; the rest waits for the next cycle", from: from.toString(), next: next.toString() });
-  const vaults = [];
-  for (const m of cfg.mints) {
-    const { vault } = await vc.vault(m);
-    vaults.push({ mint: m, vault: b58encode(vault) });
-  }
-  const known = new Set(state.outflows.filter((o) => o.ticketId !== null).map((o) => o.ticketId));
-  for (let id = from; id < end; id++) {
-    if (known.has(id)) continue;
-    const bytes = await accountBytes(await vc.ticketAddress(id));
-    if (!bytes) continue;
-    let ticket;
-    try {
-      ticket = decodeTicket(bytes);
-    } catch {
-      continue;
-    }
-    const listed = mintForVault(ticket.vault, vaults);
-    const mint = listed ?? ticket.vault;
-    const e = { kind: "released", mint, vault: ticket.vault, owner: ticket.owner, backed: 0n, instant: 0n, queued: ticket.amount, ticketId: ticket.id, etaS: ticket.etaS };
-    log({
-      level: "warn",
-      msg: listed ? "ticket from account state; logs did not report it" : "ticket for an unconfigured vault; worst case treated as 0",
-      ticketId: id.toString(),
-      mint,
-    });
-    await applyActions(assess(state, e, { ...worstFor(mint), now }, policy, true), e, now);
-  }
-  baseline.nextTicket = end;
+/** One fact (a release, freeze or proposal), from an event or from the chain. */
+async function consider(e, signature, now, act) {
+  // Only a release needs the worst case; other events carry no mint.
+  const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
+  const actions = assess(state, e, ctx, policy, act);
+  if (!act) return;
+  log({ event: e.kind, signature, ...e });
+  await applyActions(actions, e, now);
 }
 
 async function ingest(sigs, act) {
@@ -263,24 +223,60 @@ async function ingest(sigs, act) {
     if (s.err) continue;
     const tx = await rpc.call("getTransaction", [s.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
     const now = s.blockTime ?? tx?.blockTime ?? wallNow();
-    const parsed = parseEvents(tx?.meta?.logMessages, { programs });
-    if (parsed.truncated) {
-      log({ level: "warn", msg: "transaction logs truncated; ignoring its events and reading accounts", signature: s.signature });
-      continue;
+    const { events, truncated } = parseLogs(tx?.meta?.logMessages);
+    if (truncated) {
+      // Events past the log cap are gone; the balances are not. Every decrease
+      // of a watched vault in this transaction counts as unbacked outflow.
+      if (act) log({ level: "warn", msg: "log truncated: outflow taken from token balances", signature: s.signature });
+      for (const [mint, amount] of vaultOutflows(tx, tokenMints)) {
+        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
+        await consider(e, s.signature, now, act);
+      }
     }
-    for (const raw of parsed.events) {
+    for (const raw of events) {
+      if (!trusted.includes(raw.program)) continue; // written by another program: not an event
       const e = decode(raw);
       if (e.kind === "other") continue;
-      if (act && e.kind === "released") {
-        baseline.recorded.set(e.mint, (baseline.recorded.get(e.mint) ?? 0n) + e.instant);
-      }
-      // Only a release needs the worst case; other events carry no mint.
-      const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
-      const actions = assess(state, e, ctx, policy, act);
-      if (!act) continue;
-      log({ event: e.kind, signature: s.signature, ...e });
-      await applyActions(actions, e, s.blockTime ?? now);
+      if (truncated && e.kind === "released") e.instant = 0n; // counted from the balances above
+      await consider(e, s.signature, now, act);
     }
+  }
+}
+
+/**
+ * The chain's own record: the protocol's freeze (a log line can't fake it) and
+ * every ticket created since the last look (an event can be missing, a ticket
+ * account can't). A ticket seen through its event too counts once.
+ */
+async function syncFromChain(act, scanFrom = null) {
+  const acc = await rpc.account(vc.protocol);
+  if (!acc) return;
+  const p = decodeProtocol(acc.bytes);
+  state.frozenUntil = p.frozenUntil;
+  if (p.frozenUntil > wallNow()) state.freezing = false;
+  const last = BigInt(p.nextTicketId);
+  for (let id = scanFrom ?? nextTicket ?? last; id < last; id++) {
+    const t = await rpc.account(await vc.ticketAddress(id));
+    if (!t) continue; // settled or cancelled already
+    const ticket = decodeTicket(t.bytes);
+    if (ticket.createdS < wallNow() - DAY_S) continue; // outside every window
+    const e = ticketRelease(ticket, vaultMints);
+    if (e) await consider(e, "chain:ticket", ticket.createdS, act);
+  }
+  nextTicket = last;
+}
+
+/** Log each Floor program's missing pieces, once per change (A5). */
+async function checkFloor() {
+  for (const fc of floorWatch) {
+    const program = b58encode(fc.protected);
+    const acc = await rpc.account(fc.config);
+    const alerts = acc ? floorAlerts(decodeFloor(acc.bytes)) : [{ code: "missing", msg: "no Floor config for this program" }];
+    const codes = alerts.map((a) => a.code).join(",");
+    if (floorReported.get(program) === codes) continue;
+    floorReported.set(program, codes);
+    if (alerts.length) log({ level: "warn", msg: "floor not ready", program, alerts });
+    else log({ msg: "floor ready", program });
   }
 }
 
@@ -307,12 +303,18 @@ async function main() {
   const until = history[0]?.signature;
   const inWindow = history.filter((s) => s.blockTime == null || s.blockTime >= oldest);
   await ingest([...inWindow].reverse(), false);
-  await syncFromChain(wallNow(), false);
+  // The freeze state, and tickets from the last day whose events the replay
+  // didn't see, from the chain (the last 256 ids at most).
+  const p0 = await rpc.account(vc.protocol);
+  const first = p0 ? BigInt(decodeProtocol(p0.bytes).nextTicketId) : 0n;
+  await syncFromChain(false, first > 256n ? first - 256n : 0n);
   await freezeIfWindowStillOpen(wallNow());
   log({ msg: "caught up", signatures: inWindow.length });
+  await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
   let lastHeartbeat = Date.now();
   let lastAttest = Date.now();
+  let lastFloorCheck = Date.now();
   for (;;) {
     try {
       if (pendingFreeze && wallNow() >= state.frozenUntil) {
@@ -327,10 +329,14 @@ async function main() {
       const sigs = await signatures(cursor, null);
       if (sigs.length) cursor = sigs[0].signature;
       await ingest([...sigs].reverse(), true);
-      await syncFromChain(wallNow(), true);
+      await syncFromChain(true);
       if (Date.now() - lastAttest > 10_000) {
         await refreshWorstCase();
         lastAttest = Date.now();
+      }
+      if (floorWatch.length && Date.now() - lastFloorCheck > 60_000) {
+        lastFloorCheck = Date.now();
+        await checkFloor();
       }
       if (Date.now() - lastHeartbeat > policy.heartbeatEveryS * 1000) {
         await heartbeat();

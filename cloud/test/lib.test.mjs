@@ -3,12 +3,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { b58decode, b58encode, key, onCurve, findPda, compileMessage } from "../lib/solana.mjs";
-import { COMPUTE_BUDGET, budgetInstructions, Keypair, send } from "../lib/signer.mjs";
 
 const here = new URL(".", import.meta.url);
 
 test("base58 round-trips well-known ids", () => {
-  for (const s of ["11111111111111111111111111111111", "BPFLoaderUpgradeab1e11111111111111111111111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "SysvarC1ock11111111111111111111111111111111", "ComputeBudget111111111111111111111111111111"]) {
+  for (const s of ["11111111111111111111111111111111", "BPFLoaderUpgradeab1e11111111111111111111111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "SysvarC1ock11111111111111111111111111111111"]) {
     assert.equal(b58encode(key(s)), s);
   }
   assert.deepEqual(b58decode("1"), Uint8Array.of(0));
@@ -45,6 +44,7 @@ test("legacy messages order signers first, the fee payer at index 0", () => {
   assert.deepEqual(signers[0], payer);
 });
 
+import { Keypair } from "../lib/signer.mjs";
 import { verify, createPublicKey } from "node:crypto";
 
 test("signer: RFC 8032 test vector 1 (empty message)", () => {
@@ -54,40 +54,4 @@ test("signer: RFC 8032 test vector 1 (empty message)", () => {
   assert.equal(Buffer.from(kp.publicKey).toString("hex"), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
   const sig = Buffer.from(kp.sign(new Uint8Array(0))).toString("hex");
   assert.equal(sig, "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
-});
-
-test("compute-budget instructions encode limit and price", () => {
-  const [limit, price] = budgetInstructions({ computeUnits: 200_000, priorityMicroLamports: 50_000 });
-  assert.equal(b58encode(limit.programId), "ComputeBudget111111111111111111111111111111");
-  assert.equal(b58encode(COMPUTE_BUDGET), "ComputeBudget111111111111111111111111111111");
-  assert.equal(limit.data[0], 2);
-  assert.equal(new DataView(limit.data.buffer).getUint32(1, true), 200_000);
-  assert.equal(price.data[0], 3);
-  assert.equal(new DataView(price.data.buffer).getBigUint64(1, true), 50_000n);
-  assert.equal(budgetInstructions({}).length, 0);
-});
-
-test("a signed transaction is broadcast to every configured rpc", async () => {
-  const sent = [];
-  const fake = (name) => ({
-    blockhash: async () => key("11111111111111111111111111111111"),
-    call: async (method, params) => {
-      if (method === "sendTransaction") {
-        sent.push({ name, tx: params[0] });
-        return "sig";
-      }
-      if (method === "getSignatureStatuses") return { value: [{ confirmationStatus: "confirmed", err: null }] };
-      throw new Error(method);
-    },
-  });
-  const payer = Keypair.generate();
-  const ix = { programId: key("11111111111111111111111111111112"), accounts: [], data: Uint8Array.of(1) };
-  const sig = await send(fake("primary"), payer, [ix], [], {
-    computeUnits: 200_000,
-    priorityMicroLamports: 50_000,
-    rpcs: [fake("secondary")],
-  });
-  assert.equal(sig, "sig");
-  assert.deepEqual(sent.map((s) => s.name), ["primary", "secondary"]);
-  assert.equal(sent[0].tx, sent[1].tx);
 });

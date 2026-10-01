@@ -18,6 +18,7 @@ Status (28 Sep 2026):
 | S8 one-transaction attack | `tests/vault.rs::s8_…` | **Runs** |
 | S9 honest borrower | `tests/vault.rs::s9_…` | **Runs** |
 | S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle` (+ 20 more Floor tests); on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
+| S11 liquidation cascade | core only: `crates/bulkhead-core/tests/cascade.rs`; synthetic market | **Runs** (core); a program-level run and a replay of real Pyth history are not done |
 
 ## S1: a compromised admin (Drift class)
 
@@ -110,6 +111,33 @@ The other Floor tests cover:
 - non-canonical, unfrozen and oversized abort buffers;
 - the delay rules, expiry and release of the authority;
 - measured compute on a 200 KB program (`06 §7`).
+
+## S11: a liquidation cascade (the honest worst day)
+
+The question a lending protocol asks first (`15` §4, item 3): in a crash, do Bulkhead's limits hold back honest liquidations while prices are still falling? A liquidation that waits 6 hours in a falling market is one a rational liquidator won't take, and the protocol keeps the bad debt.
+
+`cascade.rs` runs the liquidator's backing (`Ledger::backed_amount` at `conservative` prices), the reference, the capacity base and the limiter through the real core. The market is **synthetic**, and every input is stated in the file:
+- a 1,000,000 SOL collateral vault at $150;
+- −20% in a fast leg (2 hours, 30 minutes or 10 minutes), then to −30% by hour 24;
+- Pyth's EMA as a 1-hour average; confidence 0.25% of spot in the fast leg, 0.08% after; confidence multiplier 2;
+- G-11 weights (USDC haircut 99%, SOL liability 105%) and a 5% liquidation bonus;
+- a share S of the vault seized over the day, in proportion to the fall, in requests of at most 1,000 SOL.
+
+**What it showed.**
+
+| | Fast leg 2 h | 30 min | 10 min |
+|---|---|---|---|
+| Unbacked share of each liquidation | 14.4% | 16.2% | 17.1% |
+| Defaults (2%/h, 5%/day) first delay a liquidation at S = | 43% | 22% | 17% |
+| At S = 30%: liquidations queued (SOL) | 0 | 12,801 | 20,427 |
+| At S = 30%: what the delayed liquidators lose to the price falling while they wait | $0 | $88,568 | $157,412 |
+
+- **More than the bonus is unbacked:** about three times the 5% bonus. The repayment backs collateral at the conservative *high* price times the 105% liability weight, and while the price falls Pyth's EMA sits above spot.
+- **Every delayed payout waits the 6-hour minimum.** None is rejected.
+- **The A1b absolute caps change nothing here.** During a cascade the capacity base only falls, so the caps never bind.
+- **What would absorb it:** 4%/h and 10%/day absorb a 30% cascade even in the 10-minute crash, with nothing queued. That also doubles what a thief can take (G1 scales with the limits). A lending market chooses between the two and publishes the choice (`07 §4`, step 5).
+
+Not done: the same run on the programs (LiteSVM), and a replay of a real crash day from Pyth history instead of a synthetic path.
 
 ## Devnet signatures
 
