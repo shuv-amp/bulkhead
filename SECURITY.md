@@ -9,7 +9,7 @@
 | `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 13 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, a JavaScript-vs-Python differential, the end-to-end run |
-| Devnet deployment | Deployed 28 Sep 2026 (below) | `scripts/verify-deployed.sh`: the deployed code equals this checkout's deterministic build, byte for byte |
+| Devnet deployment | Deployed 28 Sep 2026; Vault upgraded in place 29 Sep (below) | Those binaries match commit `422bd1f`. This tree's A7–A13 fixes change the program bytes and are not on devnet until the next in-place upgrade, so `scripts/verify-deployed.sh` against devnet fails until then |
 
 None of this is an audit. The mainnet path:
 1. two independent audits (a Solana specialist, and a formal-methods review of the core);

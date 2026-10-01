@@ -30,7 +30,21 @@ export const DEFAULT_POLICY = {
   /** Floor: veto upgrade proposals whose buffer isn't pre-approved. */
   approvedUpgradeBuffers: [],
   heartbeatEveryS: 86_400,
+  /** Compute-unit price (micro-lamports) on every guardian transaction. */
+  priorityMicroLamports: 50_000,
+  /** Compute-unit limit on every guardian transaction. */
+  computeUnits: 200_000,
 };
+
+/**
+ * Instant outflow the chain shows beyond what complete logs already recorded.
+ * `chainInstants` is `unbacked_out - settled` (settling a ticket increases both,
+ * so it is not a new instant). `recorded` is what events in this window already added.
+ */
+export function missedInstant(chainInstants, recorded) {
+  const gap = BigInt(chainInstants) - BigInt(recorded);
+  return gap > 0n ? gap : 0n;
+}
 
 export const HOUR_S = 3_600;
 export const DAY_S = 86_400;

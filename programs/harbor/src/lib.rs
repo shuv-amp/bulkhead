@@ -25,6 +25,12 @@ pinocchio::nostd_panic_handler!();
 
 pub const CALLER_SEED: &[u8] = b"bulkhead-caller";
 
+include!(concat!(env!("OUT_DIR"), "/vault_id.rs"));
+
+/// The Vault program this Harbor binary will sign for. Set at build time
+/// (`BULKHEAD_VAULT_ID`, default the devnet Vault). See `build.rs`.
+pub const VAULT_ID: Address = Address::new_from_array(VAULT_ID_BYTES);
+
 pub mod ix {
     /// Register with Bulkhead (the caller PDA is the registrar). Data: Vault args.
     pub const REGISTER: u8 = 0;
@@ -51,6 +57,12 @@ pub fn process_instruction(
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
     let vault_program = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // The caller PDA is the signature the Vault trusts as "this protocol".
+    // Harbor signs only for the Vault it was built for. A caller-supplied
+    // program id would carry that signature into whatever program was named.
+    if vault_program.address() != &VAULT_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
     let caller = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
     let (caller_addr, bump) = Address::find_program_address(&[CALLER_SEED], program_id);
     if caller.address() != &caller_addr {

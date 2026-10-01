@@ -33,6 +33,7 @@ pub mod verr {
     pub const SEAL_NOT_EXECUTABLE: u32 = 8018;
     pub const IMPORT_EXCEEDS_BALANCE: u32 = 8019;
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
+    pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;
@@ -229,7 +230,12 @@ pub fn asset_bytes(allowlisted: bool, haircut: u32, liability: u32, conf_mult: u
 
 impl Market {
     pub fn new(env: &mut Env) -> Market {
-        Market::with_ids(env, Address::new_unique(), Address::new_unique())
+        // Harbor's binary signs only for the Vault id baked in at build time.
+        // `scripts/build-programs.sh` uses the devnet Vault unless
+        // BULKHEAD_VAULT_ID is set; the end-to-end run rebuilds Harbor for
+        // its own Vault and loads it through `with_ids`.
+        let vault = Address::from_str_const("HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b");
+        Market::with_ids(env, vault, Address::new_unique())
     }
 
     /// Like `new`, with fixed program ids (the E2E world uses the ids of the

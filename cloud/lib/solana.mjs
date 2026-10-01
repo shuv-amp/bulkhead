@@ -398,14 +398,65 @@ export function decodeAttestation(bytes) {
   };
 }
 
-/** Structured events: "Program data: <base64>" lines, fields concatenated. */
-export function parseEvents(logs) {
-  const out = [];
+/**
+ * A Bulkhead ticket account (`programs/vault/src/state.rs`, `Ticket`).
+ * `bytes` is the raw account data.
+ */
+export function decodeTicket(d) {
+  if (text(d.slice(0, 8)) !== "BHTICKT1") throw new Error("not a Bulkhead ticket");
+  const r = new Reader(d, 8);
+  return {
+    protocol: b58encode(r.key()),
+    vault: b58encode(r.key()),
+    recipient: b58encode(r.key()),
+    owner: b58encode(r.key()),
+    payer: b58encode(r.key()),
+    id: r.u64(),
+    amount: r.u64(),
+    createdS: Number(r.i64()),
+    etaS: Number(r.i64()),
+  };
+}
+
+const INVOKE_RE = /^Program ([1-9A-HJ-NP-Za-km-z]+) invoke \[\d+\]$/;
+const DONE_RE = /^Program ([1-9A-HJ-NP-Za-km-z]+) (?:success|failed)/;
+
+/**
+ * Structured events: "Program data: <base64>" lines, attributed to the
+ * innermost program that is currently invoked.
+ *
+ * `programs`, when set, is a list of program ids (base58). Lines emitted by
+ * any other program are dropped, so a transaction that merely mentions the
+ * protocol account cannot forge a `vault:released`. `truncated` is set when
+ * the runtime cut the log (the 10 KB limit); the caller must not treat the
+ * event list as complete.
+ */
+export function parseEvents(logs, { programs } = {}) {
+  const allow = programs ? new Set(programs) : null;
+  const stack = [];
+  const events = [];
+  let truncated = false;
   for (const line of logs ?? []) {
+    if (line === "Log truncated" || line === "Program log: Log truncated") {
+      truncated = true;
+      continue;
+    }
+    const inv = INVOKE_RE.exec(line);
+    if (inv) {
+      stack.push(inv[1]);
+      continue;
+    }
+    const done = DONE_RE.exec(line);
+    if (done && stack[stack.length - 1] === done[1]) {
+      stack.pop();
+      continue;
+    }
     const m = /^Program data: (.*)$/.exec(line);
     if (!m) continue;
+    const program = stack[stack.length - 1] ?? null;
+    if (allow && !allow.has(program)) continue;
     const fields = m[1].split(" ").map((b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
-    out.push({ name: text(fields[0]), fields: fields.slice(1) });
+    events.push({ name: text(fields[0]), fields: fields.slice(1), program });
   }
-  return out;
+  return { events, truncated };
 }

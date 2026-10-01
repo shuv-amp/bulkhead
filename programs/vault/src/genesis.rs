@@ -4,7 +4,7 @@
 use crate::state::{Asset, Protocol, Vault, R};
 use crate::*;
 use bulkhead_core::classify::{AssetConfig, LimitConfig};
-use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
+use bulkhead_core::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 use bulkhead_core::floor::{program_programdata, programdata_header};
 use bulkhead_core::governance::{can_execute, schedule, Schedule};
 use bulkhead_core::limiter::config_is_valid;
@@ -47,6 +47,9 @@ pub fn register_protocol(
     let destination = r.key()?;
     if loosen_delay < MIN_LOOSEN_DELAY_S {
         return Err(VaultError::DelayBelowMinimum.into());
+    }
+    if loosen_delay > MAX_LOOSEN_DELAY_S {
+        return Err(VaultError::DelayAboveMaximum.into());
     }
     if destination == admin || destination == [0; 32] {
         return Err(VaultError::InvalidGuardians.into());
@@ -389,7 +392,16 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
             return Err(VaultError::DuplicateAccount.into());
         }
         seen[i] = k;
-        if v.imported > token::balance(&pair[1])? {
+        // Imports and pre-seal deposits both create backing claims. The tokens
+        // that cover them are the vault balance plus anything already in the
+        // lifeboat. Checking `imported` alone lets a deposit hide an uncovered import.
+        let claims = (v.imported as u128)
+            .checked_add(v.total_in)
+            .ok_or(VaultError::Overflow)?;
+        let held = (token::balance(&pair[1])? as u128)
+            .checked_add(v.lifeboat_amount as u128)
+            .ok_or(VaultError::Overflow)?;
+        if claims > held {
             return Err(VaultError::ImportExceedsBalance.into());
         }
     }

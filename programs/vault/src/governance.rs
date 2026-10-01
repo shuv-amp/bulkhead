@@ -12,6 +12,7 @@ use crate::*;
 use bulkhead_core::classify::{
     classify_asset, classify_delay, classify_limits, AssetConfig, Class, LimitConfig,
 };
+use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
 use bulkhead_core::governance::{can_execute, schedule, Abdications, Schedule};
 use bulkhead_core::limiter::config_is_valid;
 
@@ -158,9 +159,13 @@ pub fn propose_change(
             };
             classify_asset(old.as_ref(), a)
         }
-        // Below the 72h constant is never accepted, even before the seal.
+        // Outside [72h, 30 days] is never accepted, even before the seal.
         Parsed::Delay(d) => {
-            classify_delay(p.loosen_delay_s, *d).ok_or(VaultError::DelayBelowMinimum)?
+            classify_delay(p.loosen_delay_s, *d).ok_or(if *d < MIN_LOOSEN_DELAY_S {
+                VaultError::DelayBelowMinimum
+            } else {
+                VaultError::DelayAboveMaximum
+            })?
         }
         Parsed::Guardians(_) | Parsed::Key(_) => Class::Loosen,
     };

@@ -21,7 +21,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
 
 ## 2. Vault (Tier 1) checklist
 
-1. **Derive your caller PDA:** `["bulkhead-caller"]` under your own program id. Only your program can sign as it, so only your program can deposit and release.
+1. **Derive your caller PDA:** `["bulkhead-caller"]` under your own program id. Only your program can sign as it, so only your program can deposit and release. **Check the Vault program id before signing.** The caller PDA is the signature the Vault trusts as "this protocol", and signer privileges carry into nested calls. Harbor refuses any program id other than the one it was built for (`BULKHEAD_VAULT_ID`). Copy that check. Do not forward the signature to a program id the caller supplied.
 2. **Register** (`register_protocol`), signed by your upgrade authority or by the caller PDA through a CPI:
    - admin = your Squads vault;
    - 2–8 guardians (ops key, the Bulkhead Cloud bot, a security partner) and a threshold ≥ 2;
@@ -54,6 +54,7 @@ invoke_signed_with_bounds::<MAX, &AccountView>(&release_ix, &accounts, &[Signer:
 ```
 
 - **Your own checks come first.** Harbor's `WITHDRAW` requires the user to own the recipient token account. A real protocol also checks the user's claim, LTV and so on. Bulkhead is not your risk engine; it bounds what happens when that engine is wrong or compromised.
+- **Pin the Vault program id.** Harbor compares account 0 with a build-time constant and returns `IncorrectProgramId` otherwise. An integration that signs for whatever program the transaction names hands the caller PDA to that program.
 - **Price pairs.** For a `release`, pass `(Asset PDA, Pyth price account)` pairs for the released mint and then for every other mint in the recipient's ledger, in ledger order. For an owner who owes nothing and takes back their own deposit (G2), pass the asset PDA and any non-Pyth account as the price: no prices are needed.
 - **Liquidations:** take the liquidator's repayment first (a `deposit`, which creates backing), then `release` the seized collateral. The bonus uses the limiter, so size the daily bucket for cascades.
 

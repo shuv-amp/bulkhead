@@ -1,9 +1,10 @@
 //! Reference balance: a slow average of the vault balance (or mint supply).
 //!
-//! Capacities are a percentage of this reference, not of the live balance, so:
+//! The reference moves slowly. Capacity then uses `min(reference, live balance)`,
+//! so:
 //! - an attacker cannot raise the limit by depositing right before an attack
 //!   (the reference moves at most `dt / 24h` of the way toward the balance);
-//! - a drain does not instantly shrink the limit for honest users either.
+//! - a drain shrinks the limit at once, because the live balance is the cap.
 //!
 //! The step is linear, `(balance - reference) * min(dt, TAU) / TAU`, truncated
 //! toward the old reference, so it never overshoots the balance.

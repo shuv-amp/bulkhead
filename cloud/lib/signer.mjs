@@ -6,6 +6,26 @@ import { createPrivateKey, createPublicKey, sign as edSign, randomBytes } from "
 import { readFileSync, writeFileSync } from "node:fs";
 import { b58encode, compileMessage, serializeTransaction, key } from "./solana.mjs";
 
+/** Compute Budget program. Limit is instruction 2 (u32); price is 3 (u64 micro-lamports). */
+export const COMPUTE_BUDGET = key("ComputeBudget11111111111111111111111111111");
+
+export function budgetInstructions({ computeUnits = 0, priorityMicroLamports = 0 } = {}) {
+  const out = [];
+  if (computeUnits) {
+    const data = new Uint8Array(5);
+    data[0] = 2;
+    new DataView(data.buffer).setUint32(1, computeUnits, true);
+    out.push({ programId: COMPUTE_BUDGET, accounts: [], data });
+  }
+  if (priorityMicroLamports) {
+    const data = new Uint8Array(9);
+    data[0] = 3;
+    new DataView(data.buffer).setBigUint64(1, BigInt(priorityMicroLamports), true);
+    out.push({ programId: COMPUTE_BUDGET, accounts: [], data });
+  }
+  return out;
+}
+
 const PKCS8_ED25519 = Buffer.from("302e020100300506032b657004220420", "hex");
 
 export class Keypair {
@@ -37,9 +57,16 @@ export class Keypair {
   }
 }
 
-/** Builds, signs and sends a transaction; returns its signature once confirmed. */
-export async function send(rpc, payer, instructions, extraSigners = [], { skipPreflight = false } = {}) {
-  const { message, signers } = compileMessage(payer.publicKey, instructions, await rpc.blockhash());
+/**
+ * Builds, signs and sends a transaction; returns its signature once confirmed.
+ *
+ * `computeUnits` and `priorityMicroLamports` prepend Compute Budget instructions.
+ * The signed transaction is submitted to `rpc` and to every entry of `rpcs`.
+ * Confirmation is polled on the first endpoint that accepted it.
+ */
+export async function send(rpc, payer, instructions, extraSigners = [], { skipPreflight = false, computeUnits = 0, priorityMicroLamports = 0, rpcs = [] } = {}) {
+  const ixs = [...budgetInstructions({ computeUnits, priorityMicroLamports }), ...instructions];
+  const { message, signers } = compileMessage(payer.publicKey, ixs, await rpc.blockhash());
   const all = [payer, ...extraSigners];
   const sigs = signers.map((k) => {
     const kp = all.find((s) => b58encode(s.publicKey) === b58encode(k));
@@ -47,9 +74,22 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
     return kp.sign(message);
   });
   const tx = Buffer.from(serializeTransaction(message, sigs)).toString("base64");
-  const signature = await rpc.call("sendTransaction", [tx, { encoding: "base64", skipPreflight, preflightCommitment: "confirmed" }]);
+  const targets = [rpc, ...rpcs.filter((r) => r && r !== rpc)];
+  const opts = { encoding: "base64", skipPreflight, preflightCommitment: "confirmed" };
+  let signature;
+  let confirmOn;
+  const errors = [];
+  for (const target of targets) {
+    try {
+      signature = await target.call("sendTransaction", [tx, opts]);
+      confirmOn ??= target;
+    } catch (e) {
+      errors.push(e);
+    }
+  }
+  if (!signature) throw errors[0] ?? new Error("no rpc accepted the transaction");
   for (let i = 0; i < 120; i++) {
-    const st = (await rpc.call("getSignatureStatuses", [[signature]])).value[0];
+    const st = (await confirmOn.call("getSignatureStatuses", [[signature]])).value[0];
     if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);
     if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return signature;
     await new Promise((r) => setTimeout(r, 500));

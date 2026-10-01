@@ -10,7 +10,7 @@ Floor is a small program (`programs/floor`, Pinocchio, one dependency: `bulkhead
 
 It is a separate program from the Vault so each has a small audit surface and its own blast radius.
 
-Status: built, 21 tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`), 56 KB. Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`), byte-identical to this checkout's build, and the full lifecycle has run there (§7). Unaudited.
+Status: built, tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`). Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`). The bytes on devnet are that deployment, not this tree (the upgrade-delay cap changed). The full lifecycle has run there (§7). Unaudited.
 
 ## 1. Why it exists
 
@@ -60,7 +60,7 @@ Each was checked in agave's source (master `f771659`, 26 Sep 2026) or on-chain; 
 | `program`, `programdata` | The protected program and its loader-v3 data account |
 | `owner` | Proposes upgrades, restores and configuration changes (e.g. a Squads vault) |
 | `guardians[≤8]`, `last_heartbeat[≤8]`, `threshold` (≥ 2), `heartbeat_interval_s` (1–30 days) | Only guardians that heart-beat within the interval can act (Lido pattern) |
-| `upgrade_delay_s` | ≥ 72h (constant floor), ≤ 365 days; **7 days recommended** (L2BEAT Stage-1 exit window) |
+| `upgrade_delay_s` | ≥ 72h (constant floor), ≤ 30 days (same cap as the Vault's loosen delay); **7 days recommended** (L2BEAT Stage-1 exit window) |
 | `status` | Live or Aborted |
 | `elf_is_v3` | Whether the live code is deployable after SIMD-0500 (updated at every install) |
 | `abort_buffer` | The staged canonical abort binary (frozen buffer) |
@@ -147,7 +147,7 @@ After SIMD-0500 activates, `Upgrade` accepts only sBPF v3. So:
 | A guardian quorum is malicious | Out of scope: it holds Security Council power (fast restore). The status page checks the set against the on-chain parts of L2BEAT's bar (≥ 8 members, ≥ 75% threshold); the third part (≥ 50% outside the team) must be published by the team (§10). |
 | Bug in Floor | Every protected program at once. Mitigations: small instruction set, no arbitrary CPI, one dependency, verified core, devnet only until audited. |
 | Pre-signed (durable-nonce) proposals | Proposals expire 7 days after becoming executable, and are public for ≥ 72h |
-| The stop lands one slot late | New code is visible from the next slot, and a program can be upgraded once per slot. Guardians send stops with priority fees and bundle tips, from several relays. One runtime-level interaction is under responsible disclosure; see `SECURITY.md`. |
+| The stop lands one slot late | New code is visible from the next slot, and a program can be upgraded once per slot. Guardian transactions set a compute-unit limit and price and are sent to every configured RPC. One runtime-level interaction is under responsible disclosure; see `SECURITY.md`. |
 | Snapshot made stale by an upgrade | Decided at the moment of the abort against the live bytes; a stale snapshot only removes the fast undo, never blocks the stop |
 | Abort buffer too large for the program | Refused at staging (`AbortDoesNotFit`); the 136-byte minimal binary fits almost any program |
 

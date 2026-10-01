@@ -14,10 +14,13 @@ if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
   cargo-build-sbf --no-rustup-override --arch v3 --manifest-path programs/floor/Cargo.toml \
     --sbf-out-dir target/deploy >/dev/null 2>&1 || true
 fi
-for p in programs/floor programs/vault programs/harbor; do
+for p in programs/floor programs/vault; do
   RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --arch v3 \
     --manifest-path "$p/Cargo.toml" --sbf-out-dir target/deploy
 done
+# Harbor is bound to one Vault id at compile time. Default: the devnet Vault.
+# A local deploy sets BULKHEAD_VAULT_ID to the Vault keypair it just built.
+scripts/build-harbor.sh
 python3 - <<'PY'
 import glob, sys
 sys.path.insert(0, "reference")

@@ -554,6 +554,63 @@ fn imported_backing_must_be_covered_by_the_balance_at_seal() {
     assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
 }
 
+/// A pre-seal deposit covers `imported` by itself, so the old seal check
+/// (imported ≤ balance) passed while total backing claims were twice the tokens.
+#[test]
+fn pre_seal_deposits_cannot_hide_an_uncovered_import() {
+    let mut w = World::new();
+    let u = w.user();
+    w.deposit("usdc", &u, 1_000 * USDC);
+    let owner = Keypair::new().pubkey();
+    let import = w.m.vault_ix(
+        3,
+        &(1_000 * USDC).to_le_bytes(),
+        vec![
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.m.backing(&owner), false),
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    w.env.ok(&[import], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
+}
+
+#[test]
+fn harbor_will_not_sign_for_a_different_vault_program() {
+    let mut env = Env::new();
+    let harbor = Address::new_unique();
+    let wrong = Address::new_unique();
+    env.svm.add_program(wrong, &so("bulkhead_vault")).unwrap();
+    env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let caller = pda(&[b"bulkhead-caller"], &harbor);
+    let ix = solana_instruction::Instruction {
+        program_id: harbor,
+        accounts: vec![
+            AccountMeta::new_readonly(wrong, false),
+            AccountMeta::new_readonly(caller, false),
+        ],
+        data: vec![2], // withdraw; rejected before any Vault account is touched
+    };
+    match env.send(&[ix], &[]) {
+        Ok(m) => panic!("expected IncorrectProgramId, succeeded\n{}", m.logs.join("\n")),
+        Err(e) => {
+            let text = format!("{:?}", e.err);
+            assert!(
+                text.contains("IncorrectProgramId"),
+                "{text}\n{}",
+                e.meta.logs.join("\n")
+            );
+        }
+    }
+}
+
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
@@ -603,6 +660,88 @@ fn a_mint_with_a_permanent_delegate_cannot_become_a_vault() {
         ],
     );
     assert_eq!(env.fails(&[ix], &[&m.admin]), verr::EXTENSION_NOT_ALLOWED);
+}
+
+/// MintCloseAuthority with a real authority can close the mint at supply 0 and
+/// reopen the address with an extension this policy refuses. No authority is fine.
+#[test]
+fn a_mint_close_authority_is_refused_unless_it_is_unset() {
+    fn mint_with_close_authority(env: &mut Env, authority: Option<&Address>) -> (Keypair, Address) {
+        let mint = Keypair::new();
+        let mint_authority = Keypair::new();
+        let size = 165 + 1 + 4 + 32;
+        let lamports = env.svm.minimum_balance_for_rent_exemption(size);
+        let t22 = token_2022();
+        let create = solana_system_interface::instruction::create_account(
+            &env.payer.pubkey(),
+            &mint.pubkey(),
+            lamports,
+            size as u64,
+            &t22,
+        );
+        let mut d = vec![25u8]; // InitializeMintCloseAuthority, COption<Pubkey>
+        match authority {
+            Some(k) => {
+                d.extend_from_slice(&1u32.to_le_bytes());
+                d.extend_from_slice(k.as_ref());
+            }
+            None => d.extend_from_slice(&0u32.to_le_bytes()),
+        }
+        let init_close = solana_instruction::Instruction {
+            program_id: t22,
+            accounts: vec![AccountMeta::new(mint.pubkey(), false)],
+            data: d,
+        };
+        let mut d = vec![20u8, 6]; // InitializeMint2
+        d.extend_from_slice(mint_authority.pubkey().as_ref());
+        d.push(0);
+        let init_mint = solana_instruction::Instruction {
+            program_id: t22,
+            accounts: vec![AccountMeta::new(mint.pubkey(), false)],
+            data: d,
+        };
+        env.ok(&[create, init_close, init_mint], &[&mint]);
+        (mint, t22)
+    }
+    let mut env = Env::new();
+    let m = Market::new(&mut env);
+    let authority = Keypair::new();
+    let (mint, t22) = mint_with_close_authority(&mut env, Some(&authority.pubkey()));
+    let vault = pda(&[b"vault", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let ix = m.vault_ix(
+        1,
+        &Limits::default_limits().bytes(),
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new_readonly(m.admin.pubkey(), true),
+            AccountMeta::new(m.protocol, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(vault_tokens, false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new_readonly(t22, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    assert_eq!(env.fails(&[ix], &[&m.admin]), verr::EXTENSION_NOT_ALLOWED);
+    let (mint, t22) = mint_with_close_authority(&mut env, None);
+    let vault = pda(&[b"vault", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let ix = m.vault_ix(
+        1,
+        &Limits::default_limits().bytes(),
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new_readonly(m.admin.pubkey(), true),
+            AccountMeta::new(m.protocol, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(vault_tokens, false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new_readonly(t22, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    env.ok(&[ix], &[&m.admin]);
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +863,9 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     let zero = Address::default();
     let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(DAY).to_le_bytes(), None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_BELOW_MINIMUM);
+    let too_long = (31 * DAY).to_le_bytes();
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &too_long, None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_ABOVE_MAXIMUM);
     let abdicate = |w: &World, kind: u8, guardians: &[Address]| {
         let mut a = vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.admin.pubkey(), true)];
         a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));

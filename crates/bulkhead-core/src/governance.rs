@@ -140,8 +140,8 @@ pub fn can_eject(approvals: u8, alive: u8, threshold: u8, target: u8, count: u8)
 }
 
 /// Abdication bitmap over change kinds (Morpho V2 pattern): once a kind is
-/// abdicated it can never be proposed or executed again. Abdicating is always
-/// a tightening and is itself irreversible.
+/// abdicated, loosening it can never be proposed or executed again. Tightening
+/// it still applies at once. Abdicating is irreversible.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Abdications(pub u32);
 

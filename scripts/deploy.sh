@@ -22,6 +22,12 @@ DIR="${3:-target/market-$(date +%Y%m%d-%H%M%S)}"
 
 scripts/build-programs.sh
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
+# Harbor signs only for the Vault it was built for. A fresh keypair is not the
+# devnet Vault, so rebuild Harbor against this deploy's Vault before sending it.
+DEVNET_VAULT=HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b
+if [ "$(id bulkhead_vault)" != "$DEVNET_VAULT" ]; then
+  scripts/build-harbor.sh "$(id bulkhead_vault)"
+fi
 # Safe to re-run after a network failure: deployed programs are skipped (and
 # checked by scripts/verify-deployed.sh), a failed deploy is retried, and the
 # market is set up only once.

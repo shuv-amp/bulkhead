@@ -14,7 +14,7 @@ A security product with a bug is worse than no product. This file lists every ad
 
 **Trust assumptions we make (and state):**
 1. The Solana runtime, loaders and token programs behave as specified.
-2. Pyth's receiver program and Full verification are sound for allowlisted feeds.
+2. Pyth's receiver programs (`rec5EKMG…` and `rec2HHDD…`) and Full verification are sound for allowlisted feeds. Since 26 Aug 2026, Full verification on Solana is 3 of the Pyth Pro set's 5 keys, not 13 of Wormhole's 19 guardians. A price those keys sign is final for the backed lane, which is not rate-limited. A rate limit on new backed liabilities is deferred to the audit build (`15`, A9).
 3. At least one guardian is honest and awake within the queue delay (6h) for tickets. Freeze speed only changes how much of the burst/refill is used; see G1.
 4. Bulkhead's own code is correct. This is the largest risk (T10) and gets the most verification.
 
@@ -43,9 +43,9 @@ A security product with a bug is worse than no product. This file lists every ad
 | T19 | **Genesis import fraud** | Admin imports fake backing before seal | Σ imported per mint ≤ vault balance at seal; imports emitted as events; **seal itself waits 72h** so anyone can compare imports with the protocol's own ledger | A protocol malicious at launch is out of scope for any tool |
 | T20 | **Front-running `settle_ticket`** | Anyone cranks | Pays only the stored recipient | None |
 | T21 | **Clock skew** (refill faster than real time) | Push `Clock::unix_timestamp` ahead | Solana's clock is the stake-weighted median ("50% of the stake"); Agave bounds each timestamp to within 25% of the expected epoch time | Needs a stake majority; even then G1 measured in wall-clock time stretches by at most 1.25× |
-| T22 | **Censoring or delaying a guardian's freeze** (congestion, spam) | Freeze lands later | G1 bounds loss as a function of when the freeze lands; the guardian bot uses priority fees and multiple RPCs/relays; every guardian can freeze independently | Loss grows along the published G1 curve until the freeze lands |
+| T22 | **Censoring or delaying a guardian's freeze** (congestion, spam) | Freeze lands later | G1 bounds loss as a function of when the freeze lands; every guardian transaction sets a compute-unit limit and price (`priorityMicroLamports`) and is sent to every URL in `rpcs`; every guardian can freeze independently | Loss grows along the published G1 curve until the freeze lands |
 | T23 | **Pool liquidity** (backed claims exceed what the vault holds) | Lending moves deposits out; bounded unbacked losses (G1) reduce the pool | Bulkhead never *blocks* an own-deposit return (G2) and never pays more than the vault holds; the protocol's own rules allocate a bounded loss | A last withdrawer can find the pool short by at most what left through the unbacked lane (found by the program-vs-model differential, `09 §4`) |
-| T24 | **A stop that lands late** (Floor) | New code is visible from the next slot; a program is upgraded at most once per slot | Guardians send stops with priority fees and bundle tips through several relays; the Cloud guardian reacts in seconds (`cloud/e2e`) | One runtime-level interaction affecting every upgrade-based stop is under responsible disclosure (`SECURITY.md`); Vault's in-path limits don't depend on a stop |
+| T24 | **A stop that lands late** (Floor) | New code is visible from the next slot; a program is upgraded at most once per slot | Guardian transactions set a compute-unit limit and price and are sent to every configured RPC; the Cloud guardian reacts in seconds (`cloud/e2e`) | One runtime-level interaction affecting every upgrade-based stop is under responsible disclosure (`SECURITY.md`); Vault's in-path limits don't depend on a stop |
 
 ## 3. Invariants and where they are tested
 
