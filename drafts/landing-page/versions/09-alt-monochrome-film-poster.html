@@ -311,7 +311,7 @@ dialog[open] { animation: rise 220ms var(--out); }
 /* Reduced motion: no pinning, no travelling things; every scene finished and in order */
 .still .stage { height: auto !important; }
 .still .frame { position: relative; height: auto; overflow: visible; }
-.still .scene { position: relative; min-height: 100svh; opacity: 1; }
+.still .scene, .still .hero { position: relative; min-height: 100svh; opacity: 1; overflow: hidden; }
 .still .scene.light { background: var(--light); }
 .still .vessel, .still .sun, .still .ribbon, .still .orbit, .still .rail, .still .layer { display: none; }
 .still .vault-scene .content { padding: 0; }
