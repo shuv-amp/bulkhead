@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { activeTickets, vaultOutflows, ticketRelease } from "./chain.mjs";
 
@@ -118,7 +118,7 @@ async function heartbeat() {
   log({ action: "heartbeat", signature: sig });
 }
 
-async function execute(action, event, eventTime) {
+async function execute(action, event, eventTime, { retrying = false } = {}) {
   const started = Date.now();
   try {
     let ixs;
@@ -147,10 +147,30 @@ async function execute(action, event, eventTime) {
         break;
       }
       case "veto_change":
+        if (retrying) {
+          const acc = await rpc.account(await vc.changeAddress(action.changeId));
+          const what = vetoRetryDisposition(action, acc ? readChangeVeto(acc.bytes) : null);
+          if (what !== "send") {
+            if (what === "drop") log({ action: "veto_change", skipped: "change is already closed", changeId: action.changeId });
+            return what === "drop";
+          }
+        }
         ixs = [vc.vetoChange(await vc.changeAddress(action.changeId), guardian.publicKey)];
         break;
       case "floor_veto": {
         const fc = await new FloorClient(cfg.floorProgram, action.program).init();
+        if (retrying) {
+          const acc = await rpc.account(fc.config);
+          let chain = null;
+          if (acc) {
+            try { chain = decodeFloor(acc.bytes); } catch { chain = null; }
+          }
+          const what = vetoRetryDisposition(action, chain);
+          if (what !== "send") {
+            if (what === "drop") log({ action: "floor_veto", skipped: "that proposal is no longer pending", proposalId: action.proposalId });
+            return what === "drop";
+          }
+        }
         ixs = [fc.veto(guardian.publicKey)];
         break;
       }
@@ -413,7 +433,7 @@ async function main() {
       if (pendingVetoes.length && Date.now() >= vetoNotBefore) {
         const still = [];
         for (const action of pendingVetoes) {
-          if (!(await execute(action, { reason: action.reason }, now))) still.push(action);
+          if (!(await execute(action, { reason: action.reason }, now, { retrying: true }))) still.push(action);
         }
         pendingVetoes = still;
         if (still.length) vetoNotBefore = Date.now() + VETO_RETRY_MS;

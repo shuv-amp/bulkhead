@@ -235,6 +235,36 @@ export function queueFailedVeto(pending, action) {
 }
 
 /**
+ * What a *retry* should do with a veto. The first send follows the event.
+ * A retry has to look again: Floor's veto instruction names no proposal, so it
+ * vetoes whatever is pending now, and a change that already executed or was
+ * vetoed must not be sent forever.
+ * `chain` null means the account could not be read.
+ * Returns "send", "drop", or "keep".
+ */
+export function vetoRetryDisposition(action, chain) {
+  if (action.type === "floor_veto") {
+    if (!chain) return "keep";
+    if (chain.pendingKind !== 1 || chain.pendingVetoed) return "drop";
+    if (BigInt(chain.pendingId) !== BigInt(action.proposalId)) return "drop";
+    return "send";
+  }
+  if (action.type === "veto_change") {
+    if (!chain) return "keep";
+    if (chain.vetoed || chain.executed) return "drop";
+    return "send";
+  }
+  return "drop";
+}
+
+/** Vetoed and executed flags of a `BHCHNG01` account. Null if it is not one. */
+export function readChangeVeto(bytes) {
+  if (!bytes || bytes.length < 51) return null;
+  if (new TextDecoder().decode(bytes.slice(0, 8)) !== "BHCHNG01") return null;
+  return { vetoed: bytes[49] !== 0, executed: bytes[50] !== 0 };
+}
+
+/**
  * When the next heartbeat may be sent. A success waits out the interval.
  * A failure is retried on the short delay: treating it as a success schedules
  * the next one a full interval later, and a dead guardian cannot revive itself.

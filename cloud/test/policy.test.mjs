@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, decisionTime, floorAlerts, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingFreezeAfterSync, queueFailedVeto, rememberTicket, retirePendingFreeze, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, decisionTime, floorAlerts, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingFreezeAfterSync, queueFailedVeto, readChangeVeto, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -152,6 +152,8 @@ test("floor readiness reads the real account layout", async () => {
   const { decodeFloor } = await import("../lib/solana.mjs");
   const d = new Uint8Array(916);
   d.set(new TextEncoder().encode("FLOORv01"), 0);
+  new DataView(d.buffer).setBigUint64(528, 4n, true);
+  assert.equal(decodeFloor(d).pendingId, 4n);
   assert.deepEqual(floorAlerts(decodeFloor(d)).map((a) => a.code), ["unarmed", "no_snapshot"]);
   d[448] = 6; // abort buffer (programs/floor/src/state.rs O_ABORT_BUF)
   d[480] = 7; // snapshot buffer (O_SNAP_BUF)
@@ -216,4 +218,27 @@ test("a failed veto is queued once and can be sent again", () => {
 test("a failed heartbeat is retried shortly, and a success waits out the interval", () => {
   assert.equal(nextHeartbeatAt(false, 1_000, 86_400_000, 15_000), 16_000);
   assert.equal(nextHeartbeatAt(true, 1_000, 86_400_000, 15_000), 86_401_000);
+});
+
+test("a retried floor veto is dropped when a different proposal is pending", () => {
+  const action = { type: "floor_veto", program: "p", proposalId: 4n };
+  const open = { pendingKind: 1, pendingId: 4n, pendingVetoed: false };
+  assert.equal(vetoRetryDisposition(action, open), "send");
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingId: 5n }), "drop");
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingKind: 0 }), "drop");
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingVetoed: true }), "drop");
+  assert.equal(vetoRetryDisposition(action, null), "keep");
+});
+
+test("a retried vault veto stops once the change is closed", () => {
+  const action = { type: "veto_change", changeId: 3n };
+  assert.equal(vetoRetryDisposition(action, { vetoed: false, executed: false }), "send");
+  assert.equal(vetoRetryDisposition(action, { vetoed: true, executed: false }), "drop");
+  assert.equal(vetoRetryDisposition(action, { vetoed: false, executed: true }), "drop");
+  assert.equal(vetoRetryDisposition(action, null), "keep");
+  const bytes = new Uint8Array(51);
+  bytes.set(new TextEncoder().encode("BHCHNG01"));
+  bytes[50] = 1;
+  assert.deepEqual(readChangeVeto(bytes), { vetoed: false, executed: true });
+  assert.equal(readChangeVeto(new Uint8Array(51)), null);
 });
