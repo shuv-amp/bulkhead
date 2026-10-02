@@ -123,9 +123,12 @@ export function decode(ev) {
 }
 
 function sumsFor(state, mint, now) {
-  state.outflows = state.outflows.filter((o) => now - o.t <= DAY_S);
+  // Drop only what is already older than a day. An outflow dated after `now`
+  // stays: a decision made at an earlier timestamp must not erase it, and it
+  // does not count until `now` catches up.
+  state.outflows = state.outflows.filter((o) => o.t > now || now - o.t <= DAY_S);
   const rows = state.outflows.filter((o) => o.mint === mint);
-  const sumSince = (secs) => rows.filter((o) => now - o.t <= secs).reduce((s, o) => s + o.amount, 0n);
+  const sumSince = (secs) => rows.filter((o) => o.t <= now && now - o.t <= secs).reduce((s, o) => s + o.amount, 0n);
   return { lastHour: sumSince(HOUR_S), lastDay: sumSince(DAY_S) };
 }
 
@@ -181,6 +184,15 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
   return actions;
 }
 
+/**
+ * A freeze that is already on chain retires a local send that failed or timed
+ * out. Leaving it queued would freeze the protocol again when that freeze thaws,
+ * with no new breach.
+ */
+export function retirePendingFreeze(pending, chainFrozenUntil, now) {
+  return pending && chainFrozenUntil > now ? null : pending;
+}
+
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
 export function observeProtocolFreeze(state, until, now, policy = DEFAULT_POLICY, act = true) {
   state.frozenUntil = Math.max(state.frozenUntil, until);
@@ -208,7 +220,8 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner });
       const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
-      state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
+      // `e.at` is when the outflow happened. `ctx.now` is when the decision is made.
+      state.outflows.push({ t: e.at ?? ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
       const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
       const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
       if (act && !frozen && lastHour >= limit) {

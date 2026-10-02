@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { activeTickets, vaultOutflows, ticketRelease } from "./chain.mjs";
 
@@ -262,7 +262,10 @@ async function refreshPendingTickets({ recoverOutflows = false, act = false } = 
       if (ticket.createdS < cutoff) continue;
       if (state.tickets.has(ticket.id)) continue;
       const e = ticketRelease(ticket, vaultMints);
-      if (e) await consider(e, "chain:ticket", ticket.createdS, act);
+      if (e) {
+        e.at = ticket.createdS;
+        await consider(e, "chain:ticket", wallNow(), act);
+      }
     }
   }
   // Merge positive on-chain observations. Do not discard event-derived tickets
@@ -297,6 +300,7 @@ async function syncFromChain(act, { startup = false } = {}) {
   const p = decodeProtocol(acc.bytes);
   const now = wallNow();
   state.frozenUntil = p.frozenUntil;
+  pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now);
   if (p.frozenUntil > now) state.freezing = false;
   const frozen = p.frozenUntil > now;
   const newFreeze = frozen && p.frozenUntil !== sweptFreezeUntil;
