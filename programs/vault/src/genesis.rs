@@ -364,7 +364,8 @@ pub fn veto_seal(program_id: &Address, accounts: &mut [AccountView]) -> ProgramR
     Ok(())
 }
 
-// execute: 0 protocol [w], then (vault, vault token account) for every vault.
+// execute: 0 protocol [w], then (vault, vault token account, lifeboat token
+// account) for every vault. A lifeboat that has not been used is an empty PDA.
 pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let mut p = load_protocol(program_id, protocol)?;
@@ -378,28 +379,50 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
     can_execute(&s, now()?, p.seal_vetoed, p.sealed, false)
         .map_err(|_| VaultError::SealNotExecutable)?;
     let pairs = &accounts[1..];
-    if pairs.len() != 2 * p.vault_count as usize {
+    if pairs.len() != 3 * p.vault_count as usize {
         return Err(VaultError::VaultCountMismatch.into());
     }
-    let mut seen = [[0u8; 32]; 64];
-    for (i, pair) in pairs.chunks(2).enumerate() {
+    for (i, pair) in pairs.chunks(3).enumerate() {
         let v = load_vault(program_id, protocol, &pair[0])?;
         if key(&pair[1]) != v.token_account {
             return Err(VaultError::WrongVault.into());
         }
-        let k = key(&pair[0]);
-        if i >= seen.len() || seen[..i].contains(&k) {
+        expect_pda(
+            &[seeds::LIFEBOAT_TOKENS, &v.protocol, &v.mint],
+            program_id,
+            &pair[2],
+        )?;
+        let vault_key = key(&pair[0]);
+        if pairs[..i * 3]
+            .chunks(3)
+            .any(|previous| key(&previous[0]) == vault_key)
+        {
             return Err(VaultError::DuplicateAccount.into());
         }
-        seen[i] = k;
-        // Imports and pre-seal deposits both create backing claims. The tokens
-        // that cover them are the vault balance plus anything already in the
-        // lifeboat. Checking `imported` alone lets a deposit hide an uncovered import.
+        // Imports and pre-seal deposits both create backing claims. Check the
+        // actual spendable token balance in both Bulkhead-held accounts: a
+        // Token-2022 transfer fee can make the lifeboat balance smaller than
+        // the gross amount originally transferred into it.
         let claims = (v.imported as u128)
             .checked_add(v.total_in)
             .ok_or(VaultError::Overflow)?;
+        let lifeboat_balance = if pair[2].is_data_empty() {
+            if !pair[2].owned_by(&SYSTEM_PROGRAM) {
+                return Err(VaultError::WrongAccountType.into());
+            }
+            0
+        } else {
+            if pair[2].owner() != &Address::new_from_array(v.token_program) {
+                return Err(VaultError::WrongTokenProgram.into());
+            }
+            let (mint, owner, balance) = token::account_info(&pair[2])?;
+            if mint != v.mint || owner != key(&pair[0]) {
+                return Err(VaultError::WrongVault.into());
+            }
+            balance
+        };
         let held = (token::balance(&pair[1])? as u128)
-            .checked_add(v.lifeboat_amount as u128)
+            .checked_add(lifeboat_balance as u128)
             .ok_or(VaultError::Overflow)?;
         if claims > held {
             return Err(VaultError::ImportExceedsBalance.into());

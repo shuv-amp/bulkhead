@@ -77,10 +77,9 @@ pub fn move_in(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
         v.decimals,
         &[Signer::from(&seeds)],
     )?;
-    v.lifeboat_amount = v
-        .lifeboat_amount
-        .checked_add(amount)
-        .ok_or(VaultError::Overflow)?;
+    // Token-2022 transfer fees reduce the spendable amount credited to the
+    // lifeboat. Track its actual balance, not the gross source debit.
+    v.lifeboat_amount = token::balance(lifeboat)?;
     save(&mut accounts[1], |d| v.store(d))?;
     sys::event(&[b"vault:lifeboat_in", &v.mint, &amount.to_le_bytes()]);
     Ok(())
@@ -134,7 +133,9 @@ pub fn move_back(program_id: &Address, accounts: &mut [AccountView], args: &[u8]
         v.decimals,
         &[Signer::from(&seeds)],
     )?;
-    v.lifeboat_amount = v.lifeboat_amount.saturating_sub(amount);
+    // Reading the source account also repairs any stale gross-transfer value
+    // left by an older build.
+    v.lifeboat_amount = token::balance(lifeboat)?;
     v.exit_amount = v.exit_amount.min(v.lifeboat_amount);
     save(&mut accounts[1], |d| v.store(d))?;
     sys::event(&[b"vault:lifeboat_out", &v.mint, &amount.to_le_bytes()]);
@@ -227,7 +228,7 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
         v.decimals,
         &[Signer::from(&seeds)],
     )?;
-    v.lifeboat_amount = v.lifeboat_amount.saturating_sub(amount);
+    v.lifeboat_amount = token::balance(lifeboat)?;
     v.exit_amount = 0;
     save(&mut accounts[1], |d| v.store(d))?;
     sys::event(&[b"vault:exit_executed", &v.mint, &amount.to_le_bytes()]);

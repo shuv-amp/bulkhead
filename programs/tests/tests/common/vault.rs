@@ -79,10 +79,39 @@ impl Env {
         (mint.pubkey(), authority)
     }
 
+    /// Creates a Token-2022 mint with a fixed transfer fee and no update
+    /// authorities. The extension bytes match TransferFeeConfig's on-chain
+    /// layout; both schedules apply from epoch zero.
+    pub fn create_fee_mint(&mut self, decimals: u8, fee_bps: u16, max_fee: u64) -> (Address, Keypair) {
+        let mint = Keypair::new();
+        let authority = Keypair::new();
+        let mut data = vec![0u8; 278]; // Mint base + padding/type + TransferFeeConfig TLV
+        data[..4].copy_from_slice(&1u32.to_le_bytes()); // Some mint authority
+        data[4..36].copy_from_slice(authority.pubkey().as_ref());
+        data[44] = decimals;
+        data[45] = 1; // initialized
+        data[165] = 1; // AccountType::Mint
+        data[166..168].copy_from_slice(&1u16.to_le_bytes()); // TransferFeeConfig
+        data[168..170].copy_from_slice(&108u16.to_le_bytes());
+        // Both OptionalNonZeroPubkeys and withheld_amount are zero. Encode
+        // identical older/newer schedules: epoch 0, max_fee, fee_bps.
+        for at in [242usize, 260] {
+            data[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
+            data[at + 8..at + 16].copy_from_slice(&max_fee.to_le_bytes());
+            data[at + 16..at + 18].copy_from_slice(&fee_bps.to_le_bytes());
+        }
+        let lamports = self.svm.minimum_balance_for_rent_exemption(data.len());
+        self.svm.set_account(mint.pubkey(), Account {
+            lamports, data, owner: token_2022(), executable: false, rent_epoch: 0,
+        }).unwrap();
+        (mint.pubkey(), authority)
+    }
+
     pub fn token_account(&mut self, mint: &Address, owner: &Address, program: &Address) -> Address {
         let acc = Keypair::new();
-        let size = 165; // no extensions: the same base layout in both token programs
-        let _ = program;
+        // TransferFeeConfig requires the Token-2022 TransferFeeAmount account extension.
+        let mint_data = self.svm.get_account(mint).expect("mint exists").data;
+        let size = if program == &token_2022() && mint_data.len() > 165 { 178 } else { 165 };
         let lamports = self.svm.minimum_balance_for_rent_exemption(size);
         let create = solana_system_interface::instruction::create_account(
             &self.payer.pubkey(),
@@ -444,8 +473,10 @@ impl Market {
     pub fn execute_seal_ix(&self, vaults: &[&VaultRef]) -> Instruction {
         let mut a = vec![AccountMeta::new(self.protocol, false)];
         for v in vaults {
+            let lifeboat = pda(&[b"lifeboat-tokens", self.protocol.as_ref(), v.mint.as_ref()], &self.vault_program);
             a.push(AccountMeta::new_readonly(v.vault, false));
             a.push(AccountMeta::new_readonly(v.vault_tokens, false));
+            a.push(AccountMeta::new_readonly(lifeboat, false));
         }
         self.vault_ix(5, &[], a)
     }

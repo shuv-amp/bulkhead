@@ -53,6 +53,21 @@ impl World {
         w
     }
 
+    fn with_transfer_fee_mint() -> World {
+        let mut env = Env::new();
+        let m = Market::new(&mut env);
+        let (mint, mint_authority) = env.create_fee_mint(6, 1_000, 1_000_000 * USDC);
+        let usdc = m.create_vault_for(&mut env, mint, mint_authority, 6, Limits::default_limits(), USDC_FEED, token_2022());
+        let sol = m.create_vault(&mut env, 9, Limits::default_limits(), SOL_FEED, None);
+        let ix = m.upsert_asset_ix(&env, &usdc, &usdc_cfg());
+        env.ok(&[ix], &[&m.admin]);
+        let ix = m.upsert_asset_ix(&env, &sol, &sol_cfg());
+        env.ok(&[ix], &[&m.admin]);
+        let mut w = World { env, m, usdc, sol };
+        w.refresh_prices();
+        w
+    }
+
     /// USDC $1.00 ± 0.0002; SOL $150.00 ± 0.075 with EMA $151.00 (golden G-10).
     fn refresh_prices(&mut self) {
         let t = self.env.time;
@@ -1044,6 +1059,35 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     let right = exit(dest);
     w.env.ok(&[right], &[]);
     assert_eq!(w.env.balance(&dest), 4_000_000 * USDC);
+}
+
+#[test]
+fn sealing_counts_the_spendable_lifeboat_balance_after_token_2022_fees() {
+    let mut w = World::with_transfer_fee_mint();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 900 * USDC);
+
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let mv = w.m.vault_ix(24, &(900 * USDC).to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.usdc.vault_tokens, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    w.env.ok(&[mv], &[&w.m.admin]);
+    assert_eq!(w.env.balance(&lifeboat), 810 * USDC);
+
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[seal], &[]), verr::IMPORT_EXCEEDS_BALANCE,
+        "the seal must reject 900 in backing claims against 810 spendable tokens");
 }
 
 #[test]
