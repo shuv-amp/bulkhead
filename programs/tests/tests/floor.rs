@@ -645,6 +645,11 @@ fn a_named_veto_does_not_apply_to_a_different_proposal() {
         err::NO_PROPOSAL
     );
     assert_eq!(read_config(&env, f).pending_vetoed, 0);
+    // An id that is not exactly 8 bytes is malformed, not a different proposal.
+    let mut short = f.veto_id(&p.g[0].pubkey(), Some(id));
+    short.data.truncate(5);
+    assert_eq!(env.fails(&[short], &[&p.g[0]]), err::INVALID_INSTRUCTION);
+    assert_eq!(read_config(&env, f).pending_vetoed, 0);
     env.ok(&[f.veto_id(&p.g[0].pubkey(), Some(id))], &[&p.g[0]]);
     assert_eq!(read_config(&env, f).pending_vetoed, 1);
 }

@@ -30,6 +30,7 @@ pub const T0: i64 = 1_790_000_000; // a fixed start time (Sep 2026)
 
 /// Floor error codes (programs/floor/src/error.rs), checked by the tests.
 pub mod err {
+    pub const INVALID_INSTRUCTION: u32 = 7000;
     pub const NOT_CURRENT_AUTHORITY: u32 = 7007;
     pub const INVALID_GUARDIANS: u32 = 7008;
     pub const INVALID_THRESHOLD: u32 = 7009;
