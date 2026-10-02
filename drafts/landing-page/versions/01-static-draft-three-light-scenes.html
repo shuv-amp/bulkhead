@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulkhead: a circuit breaker your admin can't turn off</title>
+<meta name="description" content="Bulkhead keeps Solana protocol vaults under an immutable program: own deposits return instantly, other outflow is capped at 2%/hour, loosening waits 72h.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Lora:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
+<style>
+/* Tokens: Bulkhead Pitch Deck v2 */
+:root {
+  --bg: #050608;
+  --paper: #F2F3F5;
+  --mist: #B8C0D8;
+  --cobalt: #2F5BFF;
+  --light: #ECEDEF;
+  --ink: #0B0D12;
+  --hair: rgba(184, 192, 216, 0.2);
+  --hair-strong: rgba(184, 192, 216, 0.38);
+  --serif: "Lora", Georgia, serif;
+  --sans: "Instrument Sans", system-ui, sans-serif;
+  --out: cubic-bezier(0.23, 1, 0.32, 1);
+  --gutter: clamp(20px, 5vw, 80px);
+}
+* { box-sizing: border-box; margin: 0; }
+html { background: var(--bg); color: var(--paper); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+body { overflow-x: hidden; }
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50; opacity: .07;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+a { color: inherit; }
+p, h1, h2 { text-wrap: pretty; }
+:focus-visible { outline: 2px solid var(--paper); outline-offset: 3px; }
+
+/* Chrome */
+.nav { position: absolute; top: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 24px var(--gutter); font-size: 13px; }
+.wordmark { font-family: var(--serif); font-size: 15px; letter-spacing: .14em; text-decoration: none; }
+.nav-links { display: flex; gap: 28px; color: var(--mist); }
+.nav-links a { text-decoration: none; transition: color 150ms ease-out; }
+.nav-links a:hover { color: var(--paper); }
+.label { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--mist); line-height: 1.6; }
+.cta { display: inline-flex; align-items: center; gap: 12px; height: 52px; padding: 0 26px 0 20px; border: 0; border-radius: 999px; background: var(--cobalt); color: #fff; font: 500 16px/1 var(--sans); cursor: pointer; transition: transform 160ms var(--out), background-color 160ms ease-out; }
+.cta:hover { background: #4469ff; }
+.cta:active { transform: scale(0.97); }
+.cta .tri { width: 0; height: 0; border-left: 9px solid #fff; border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
+.dock { position: fixed; right: var(--gutter); bottom: 24px; z-index: 40; height: 44px; font-size: 14px; padding: 0 20px 0 16px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 200ms ease-out, transform 200ms var(--out), background-color 160ms ease-out; }
+.dock[data-show] { opacity: 1; transform: none; pointer-events: auto; }
+.glow { position: absolute; pointer-events: none; border-radius: 50%; background: radial-gradient(closest-side, rgba(47, 91, 255, .55), rgba(47, 91, 255, 0)); filter: blur(30px); }
+
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes away { to { opacity: 0; transform: scale(.985); visibility: hidden; } }
+.rise { animation: rise 700ms var(--out) both; animation-delay: var(--d, 0ms); }
+
+/* Hero: Prologue */
+.hero { position: relative; min-height: 100svh; overflow: hidden; padding: 0 var(--gutter); }
+.hero .glow { width: 1300px; height: 520px; left: -200px; bottom: -330px; animation: fade 1600ms ease-out 3.2s both; }
+.open { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 22px; animation: away 500ms ease-out 3s both; }
+.open .num { font: 500 clamp(56px, 11vw, 168px)/1 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -.035em; }
+.open .num span { color: var(--mist); }
+.hero-main { position: relative; min-height: 100svh; display: grid; grid-template-rows: 1fr auto; padding: 120px 0 56px; }
+.hero h1 { align-self: center; font: 500 clamp(44px, 7.6vw, 124px)/.98 var(--serif); text-transform: uppercase; letter-spacing: -.015em; max-width: 14ch; }
+.hero h1 i { font-style: italic; text-transform: none; color: var(--mist); }
+.recap { position: absolute; top: 84px; left: 0; max-width: 680px; font-size: 14px; line-height: 1.5; color: var(--mist); }
+.recap b { color: var(--paper); font-weight: 500; }
+.hero-bottom { display: flex; justify-content: space-between; align-items: end; gap: 40px; flex-wrap: wrap; }
+.hero-bottom p { max-width: 520px; font-size: 18px; line-height: 1.55; color: var(--mist); margin-bottom: 22px; }
+.hero-bottom .label { text-align: right; }
+.skip { position: absolute; right: var(--gutter); bottom: 28px; z-index: 5; background: none; border: 0; color: var(--mist); font: 12px var(--sans); letter-spacing: .14em; text-transform: uppercase; cursor: pointer; animation: away 300ms ease-out 3s both; }
+.skip:hover { color: var(--paper); }
+/* Skipped, or already seen this session: show the end state at once */
+.hero[data-skip] .open, .hero[data-skip] .skip { display: none; }
+.hero[data-skip] .rise, .hero[data-skip] .glow { animation-delay: 0ms !important; animation-duration: 400ms; }
+
+/* Scenes: one big thing each */
+.scene { position: relative; min-height: 100svh; display: grid; align-content: center; gap: 28px; padding: 120px var(--gutter); }
+.scene.center { justify-items: center; text-align: center; }
+.scene + .scene { border-top: 1px solid var(--hair); }
+.scene .big { font: 500 clamp(80px, 15vw, 220px)/.92 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+.scene .big span { color: var(--mist); }
+.scene h2 { font: 500 clamp(40px, 6.4vw, 104px)/1 var(--serif); text-transform: uppercase; letter-spacing: -.012em; max-width: 15ch; }
+.scene h2 i { font-style: italic; text-transform: none; color: var(--mist); }
+.scene .lede { max-width: 580px; font-size: 18px; line-height: 1.6; color: var(--mist); }
+.scene .lede b { color: var(--paper); font-weight: 500; }
+.scene .kicker { margin-bottom: -8px; }
+.reveal > * { opacity: 0; transform: translateY(12px); transition: opacity 700ms var(--out), transform 700ms var(--out); }
+.reveal.in > * { opacity: 1; transform: none; }
+.reveal.in > :nth-child(2) { transition-delay: 120ms; }
+.reveal.in > :nth-child(3) { transition-delay: 240ms; }
+.reveal.in > :nth-child(4) { transition-delay: 360ms; }
+
+/* The one object: the vault */
+.vault-scene { grid-template-columns: auto 1fr; align-items: center; column-gap: clamp(32px, 8vw, 140px); }
+.vault { position: relative; width: clamp(120px, 13vw, 190px); height: clamp(280px, 62svh, 560px); border: 1px solid var(--hair-strong); overflow: hidden; }
+.water { position: absolute; inset: 0; background: linear-gradient(180deg, #3a64ff 0%, #2448d8 100%); transform-origin: bottom; transform: scaleY(0); transition: transform 1600ms var(--out); }
+.water::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: rgba(255, 255, 255, .6); }
+.in .water { transform: scaleY(1); animation: breathe 7s ease-in-out 2s infinite; }
+@keyframes breathe { 0%, 55%, 100% { transform: scaleY(1); } 25% { transform: scaleY(.98); } }
+.tick { position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(242, 243, 245, .6); }
+.tick small { position: absolute; left: calc(100% + 12px); top: -8px; white-space: nowrap; font-size: 12px; color: var(--mist); }
+.vault-wrap { position: relative; padding-right: 110px; }
+.freeze { display: grid; grid-template-columns: repeat(3, auto); gap: 8px 36px; justify-content: start; margin-top: 8px; }
+.freeze b { font: 500 32px var(--sans); font-variant-numeric: tabular-nums; }
+.freeze span { font-size: 13px; color: var(--mist); }
+
+/* Light scene */
+.scene.light { background: var(--light); color: var(--ink); border: 0; }
+.scene.light .label { color: #5a6072; }
+.scene.light h2 i { color: var(--cobalt); }
+.scene.light .lede { color: #4a5063; }
+.scene.light .lede b { color: var(--ink); }
+.scene.light .big span { color: #8a90a3; }
+.scene.light + .scene { border-top: 0; }
+.steps { list-style: none; padding: 0; display: grid; gap: clamp(18px, 3vh, 36px); }
+.steps li { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.steps strong { font: 500 clamp(40px, 6.4vw, 104px)/1 var(--serif); text-transform: uppercase; letter-spacing: -.012em; }
+.steps span { font-size: 17px; color: var(--mist); max-width: 560px; line-height: 1.5; }
+
+/* Quote */
+blockquote { font: 500 clamp(32px, 4.4vw, 68px)/1.12 var(--serif); max-width: 20ch; }
+blockquote i { color: var(--mist); }
+.slot { color: var(--mist); font-style: italic; }
+
+/* FAQ */
+.faq { max-width: 860px; width: 100%; justify-self: center; }
+.faq h2 { margin-bottom: 36px; }
+details { border-top: 1px solid var(--hair); }
+details:last-child { border-bottom: 1px solid var(--hair); }
+summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; gap: 24px; padding: 22px 0; font-size: 20px; font-weight: 500; transition: color 150ms ease-out; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: "+"; color: var(--mist); font-weight: 400; transition: transform 200ms var(--out); }
+details[open] summary::after { transform: rotate(45deg); }
+summary:hover { color: var(--mist); }
+details p { padding: 0 0 24px; max-width: 680px; color: var(--mist); font-size: 17px; line-height: 1.6; }
+
+/* Final + footer */
+.final { overflow: hidden; }
+.light.final .glow { opacity: .35; }
+.final .glow { width: 1100px; height: 520px; left: 50%; bottom: -360px; transform: translateX(-50%); }
+footer { background: var(--light); color: #4a5063; display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; padding: 28px var(--gutter) 32px; border-top: 1px solid rgba(11, 13, 18, .12); font-size: 13px; }
+footer nav { display: flex; gap: 24px; }
+
+dialog { border: 1px solid var(--hair-strong); background: #0b0d12; color: var(--paper); padding: 0; width: min(960px, 92vw); }
+dialog::backdrop { background: rgba(0, 0, 0, .8); }
+dialog[open] { animation: rise 220ms var(--out); }
+.player { aspect-ratio: 16 / 9; display: grid; place-content: center; text-align: center; gap: 10px; border-bottom: 1px solid var(--hair); padding: 24px; }
+.player strong { font: 500 18px var(--sans); }
+.dialog-foot { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; font-size: 13px; color: var(--mist); }
+.dialog-foot button { background: none; border: 1px solid var(--hair-strong); color: var(--paper); border-radius: 999px; height: 32px; padding: 0 14px; font: inherit; cursor: pointer; }
+
+@media (max-width: 720px) {
+  .recap { position: static; margin-bottom: 24px; }
+  .hero-main { padding-top: 92px; grid-template-rows: auto 1fr auto; }
+  .hero-bottom .label { text-align: left; }
+  .vault-scene { grid-template-columns: 1fr; row-gap: 40px; }
+  .vault { height: 300px; }
+  .freeze { grid-template-columns: repeat(3, 1fr); gap: 6px 16px; }
+  .freeze b { font-size: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  .open, .skip { display: none; }
+}
+</style>
+</head>
+<body>
+
+<section class="hero" id="top">
+  <header class="nav">
+    <a class="wordmark" href="#top">[ BULKHEAD ]</a>
+    <nav class="nav-links" aria-label="Site"><a href="https://github.com/shuv-amp/bulkhead-temp">Code</a><a href="https://github.com/shuv-amp/bulkhead-temp/tree/main/docs">Docs</a></nav>
+  </header>
+  <div class="glow"></div>
+  <div class="open" aria-hidden="true">
+    <div class="label rise" style="--d:200ms">Drift · 1 April 2026</div>
+    <div class="num rise" style="--d:350ms">$285,000,000</div>
+    <div class="num rise" style="--d:1100ms"><span>12 minutes</span></div>
+    <div class="label rise" style="--d:1500ms">reported · Chainalysis, BlockSec</div>
+  </div>
+  <button class="skip" type="button">Skip</button>
+  <div class="hero-main">
+    <p class="recap rise" style="--d:3300ms"><b>Drift lost $285M in about 12 minutes.</b> It had withdrawal limits. The attacker got admin power and raised them.</p>
+    <h1 class="rise" style="--d:3450ms">A circuit breaker <i>the admin</i> can't turn off.</h1>
+    <div class="hero-bottom rise" style="--d:3700ms">
+      <div>
+        <p>Your own deposit always comes back instantly. Everything else leaves at most 2% an hour and 5% a day. Loosening any limit waits 72 hours.</p>
+        <button class="cta" type="button" data-play><span class="tri"></span>Watch the 3-minute demo</button>
+      </div>
+      <div class="label">Open source · live on Solana devnet · unaudited</div>
+    </div>
+  </div>
+</section>
+
+<main>
+  <!-- Problem -->
+  <section class="scene center reveal">
+    <span class="label">measured · solgov census, 26 Sep 2026 · tracked protocols</span>
+    <div class="big">37 <span>of</span> 54</div>
+    <p class="lede">multisigs governing tracked Solana protocols have <b>no timelock</b>. The longest is 24 hours. None waits 72. A limit the admin controls doesn't protect you from the admin.</p>
+  </section>
+
+  <section class="scene center reveal">
+    <span class="label">reported · Zhou et al., IEEE S&amp;P 2023 · 183 incidents, mostly Ethereum and BSC</span>
+    <div class="big">1 <span>of</span> 87</div>
+    <p class="lede">hacked protocols with a pause button pressed it within the first hour. <b>44% of attacks finish inside a single transaction.</b> The brake has to sit in the path of the money.</p>
+  </section>
+
+  <!-- Idea -->
+  <section class="scene light reveal">
+    <span class="label">How Bulkhead works</span>
+    <h2>The protocol decides who gets paid. <i>Bulkhead</i> decides how fast.</h2>
+    <p class="lede">Every token movement goes through one small, immutable program. Paying an owner back what their own ledger supports is never throttled. Everything else is rate-limited.</p>
+  </section>
+
+  <!-- Guarantees -->
+  <section class="scene center reveal">
+    <span class="label">G2 · the backed lane</span>
+    <div class="big">Instant</div>
+    <p class="lede"><b>Your own deposit always comes back.</b> Withdrawing what you put in never touches the limit, needs no price feed and can't be frozen.</p>
+  </section>
+
+  <section class="scene vault-scene reveal" aria-label="The unbacked lane">
+    <div class="vault-wrap">
+      <div class="vault" role="img" aria-label="A vault with lines at 2% per hour and 5% per day">
+        <div class="water"></div>
+      </div>
+      <div class="tick" style="top:2%;right:110px"><small>−2% · 1 hour</small></div>
+      <div class="tick" style="top:5%;right:110px;opacity:.6"><small style="top:2px">−5% · 1 day</small></div>
+    </div>
+    <div style="display:grid;gap:26px">
+      <span class="label">G1 · the unbacked lane</span>
+      <h2>2% an hour.<br><i>5% a day.</i></h2>
+      <p class="lede">A compromised admin gets a budget, not the vault. Unbacked money leaves no faster, even with the admin and upgrade keys stolen. The rest becomes a public ticket that waits at least 6 hours.</p>
+      <div>
+        <span class="label">model · if a guardian freezes within</span>
+        <div class="freeze">
+          <b>~2%</b><b>4%</b><b>10%</b>
+          <span>2 minutes</span><span>1 hour</span><span>24 hours</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="scene center light reveal">
+    <span class="label">G4 · a constant in the code</span>
+    <div class="big">72 <span>hours</span></div>
+    <p class="lede"><b>Tighten now, loosen later.</b> Tightening applies instantly. Loosening any limit waits at least 72 hours, in public, and any guardian can veto it. Drift's attacker would have waited three days in plain sight.</p>
+  </section>
+
+  <section class="scene reveal">
+    <span class="label">G5 · guardians</span>
+    <h2>Stop. <i>Never steal.</i></h2>
+    <p class="lede">Guardians can freeze, cancel, extend, veto and abort. No guardian instruction can move tokens or choose a recipient.</p>
+  </section>
+
+  <!-- Floor -->
+  <section class="scene center reveal">
+    <span class="label">Floor · for programs not ready to move their vaults</span>
+    <div class="big">1 <span>transaction</span></div>
+    <p class="lede">Point your program's upgrade authority at Floor, with no code changes. <b>Every upgrade then waits at least 72 hours in public</b>, and any single guardian can stop the program in one transaction. Funds and accounts stay where they are.</p>
+  </section>
+
+  <!-- How it works -->
+  <section class="scene reveal">
+    <span class="label">Integration</span>
+    <ol class="steps">
+      <li><strong>Hand over custody.</strong><span>Move vault token accounts under Bulkhead, or start with Floor: one transaction, no custody.</span></li>
+      <li><strong>Route every move.</strong><span>About 40 lines of CPI. The protocol keeps all of its business logic.</span></li>
+      <li><strong>Seal.</strong><span>From then on, the limits belong to the program, not the admin.</span></li>
+    </ol>
+  </section>
+
+  <!-- Proof -->
+  <section class="scene center reveal">
+    <span class="label">model · Drift's reported losses, Bulkhead defaults, 2-minute freeze · assumes $550M TVL</span>
+    <div class="big">$11.4M <span>of $285M</span></div>
+    <p class="lede">Modeled, not a claim that Drift would have been saved. The full replay, one attack transaction against both protocols with devnet signatures, is in the demo.</p>
+  </section>
+
+  <section class="scene center reveal">
+    <span class="label">measured · scripts/check.sh</span>
+    <div class="big">6.9M</div>
+    <p class="lede">random cases where the Rust core and an independent Python model agree exactly. <b>Every rule is written three times</b>: Rust, Python and property tests. The harness found a real bug in our own code: <span class="slot">{one line on the bug}</span>.</p>
+  </section>
+
+  <section class="scene reveal">
+    <span class="label">Shuvam · program engineer · author of an official BIP-352 test vector</span>
+    <blockquote>Every bug I found had already shipped. <i>Bulkhead is for the one nobody finds.</i></blockquote>
+  </section>
+
+  <!-- The one line -->
+  <section class="scene reveal">
+    <span class="label">Live from devnet · display prices only, never used on-chain</span>
+    <h2 style="max-width:18ch">Worst case right now: <span class="slot">${X}</span> instantly, then <span class="slot">${Y}</span> an hour.</h2>
+    <p class="lede">At most <span class="slot">${Z}</span> a day, until a guardian freezes. Every Bulkhead vault publishes this line.</p>
+  </section>
+
+  <!-- FAQ -->
+  <section class="scene reveal">
+    <div class="faq">
+      <h2>Questions</h2>
+      <details><summary>Isn't this just a rate limiter?</summary><p>Drift had a rate limiter; the admin controlled it. Bulkhead's limit sits outside the admin's reach. It also tells the difference between returning your own deposit, which is never limited, and paying out someone else's money, which is.</p></details>
+      <details><summary>Why not just pause?</summary><p>In the largest study of DeFi hacks, one of 87 protocols with a pause button used it within the first hour. 44% of attacks are a single transaction. Bulkhead includes a stop button, but the limit is what works inside the transaction.</p></details>
+      <details><summary>Does it slow normal users down?</summary><p>No. Deposits, withdrawals of your own funds and ordinary borrows never touch the limiter.</p></details>
+      <details><summary>What if a guardian is malicious?</summary><p>A guardian can delay unbacked payouts by freezing for up to 24 hours per call. It can't move funds, choose a recipient or block anyone's own deposit. Only live guardians count, and unfreezing needs a live quorum.</p></details>
+      <details><summary>What about a slow drain under the limit?</summary><p>That's what the daily cap is for. With nobody watching for a full day, 10% leaves, not everything. Half a vault takes nine days. Guardians and alerts handle the rest.</p></details>
+      <details><summary>What if Bulkhead itself has a bug?</summary><p>That's the biggest risk, and the reason every rule is stated three ways and checked on millions of cases. Before mainnet: audits, TVL caps, then burning Bulkhead's own upgrade key.</p></details>
+      <details><summary>Why would a large protocol move custody?</summary><p>It probably won't move first. Floor needs no custody move: one transaction puts a 72-hour floor under the upgrade key. Vault starts with new launches and relaunches, where migration costs nothing.</p></details>
+      <details><summary>What can't it do?</summary><p>It doesn't detect attacks, protect user wallets, protect AMM pools or run an oracle. It buys time; people still have to use that time.</p></details>
+      <details><summary>Is it audited?</summary><p>Not yet. It runs on devnet, the code is open source under Apache-2.0, and SECURITY.md says plainly what is unaudited.</p></details>
+      <details><summary>How does it make money?</summary><p>The core is free and immutable. Protocols pay for Bulkhead Cloud: a hosted guardian that freezes within minutes, calibration on their own flows, a public worst-case attestation and STRIDE evidence ($2.5k–$10k a month).</p></details>
+    </div>
+  </section>
+
+  <!-- Final -->
+  <section class="scene center light final reveal">
+    <div class="glow"></div>
+    <h2>Three minutes. One transaction. <i>Two outcomes.</i></h2>
+    <button class="cta" type="button" data-play><span class="tri"></span>Watch the 3-minute demo</button>
+    <p class="lede">Everything in it can be checked: open source, devnet signatures, one command to rerun the math. <a href="https://github.com/shuv-amp/bulkhead-temp">Read the code →</a></p>
+  </section>
+</main>
+
+<footer>
+  <span>[ BULKHEAD ] · Apache-2.0 · Solana devnet · unaudited</span>
+  <nav aria-label="Footer"><a href="https://github.com/shuv-amp/bulkhead-temp">Code</a><a href="https://github.com/shuv-amp/bulkhead-temp/blob/main/SECURITY.md">Security</a></nav>
+</footer>
+
+<button class="cta dock" type="button" data-play><span class="tri"></span>Watch the demo</button>
+
+<dialog id="demo" aria-label="Bulkhead demo">
+  <div class="player">
+    <span class="label">Demo video · 3:00 · captioned</span>
+    <strong>[ Demo not recorded yet: S8, S1, S4/S9, S7/S10, status line ]</strong>
+  </div>
+  <div class="dialog-foot"><span>Esc to close</span><button type="button" data-close>Close</button></div>
+</dialog>
+
+<script>
+const dialog = document.getElementById('demo');
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-play]')) dialog.showModal();
+  if (e.target.closest('[data-close]')) dialog.close();
+});
+
+// Prologue: skip on request, and only play once per session
+const hero = document.querySelector('.hero');
+const skip = () => { hero.setAttribute('data-skip', ''); try { sessionStorage.setItem('bh-prologue', '1'); } catch {} };
+try { if (sessionStorage.getItem('bh-prologue')) hero.setAttribute('data-skip', ''); } catch {}
+hero.querySelector('.skip').addEventListener('click', skip);
+setTimeout(() => { try { sessionStorage.setItem('bh-prologue', '1'); } catch {} }, 3500);
+
+// Fixed demo button once the hero is gone
+const dock = document.querySelector('.dock');
+// ...and hidden again once the final call to action is on screen
+const finalScene = document.querySelector('.final');
+addEventListener('scroll', () => {
+  const finalTop = finalScene.getBoundingClientRect().top;
+  dock.toggleAttribute('data-show', scrollY > innerHeight * 0.85 && finalTop > innerHeight * 0.6);
+}, { passive: true });
+
+// Each scene arrives once
+const io = new IntersectionObserver((entries) => entries.forEach((en) => {
+  if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+}), { threshold: 0.35 });
+document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+</script>
+</body>
+</html>
