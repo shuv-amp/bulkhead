@@ -48,6 +48,7 @@ pub mod err {
     pub const SNAPSHOT_MISMATCH: u32 = 7023;
     pub const NO_VALID_SNAPSHOT: u32 = 7024;
     pub const PROPOSAL_PENDING: u32 = 7025;
+    pub const NO_PROPOSAL: u32 = 7026;
     pub const NOT_EXECUTABLE: u32 = 7028;
     pub const VETOED: u32 = 7029;
     pub const EXPIRED: u32 = 7030;
@@ -465,8 +466,16 @@ impl Floor {
     }
 
     pub fn veto(&self, guardian: &Address) -> Instruction {
+        self.veto_id(guardian, None)
+    }
+
+    pub fn veto_id(&self, guardian: &Address, id: Option<u64>) -> Instruction {
+        let mut d = vec![5];
+        if let Some(id) = id {
+            d.extend_from_slice(&id.to_le_bytes());
+        }
         self.ix(
-            vec![5],
+            d,
             vec![
                 AccountMeta::new(self.config, false),
                 AccountMeta::new_readonly(*guardian, true),

@@ -171,7 +171,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
             return what === "drop";
           }
         }
-        ixs = [fc.veto(guardian.publicKey)];
+        ixs = [fc.veto(guardian.publicKey, action.proposalId)];
         break;
       }
       default:

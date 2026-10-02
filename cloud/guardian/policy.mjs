@@ -236,9 +236,9 @@ export function queueFailedVeto(pending, action) {
 
 /**
  * What a *retry* should do with a veto. The first send follows the event.
- * A retry has to look again: Floor's veto instruction names no proposal, so it
- * vetoes whatever is pending now, and a change that already executed or was
- * vetoed must not be sent forever.
+ * A retry has to look again. Floor refuses a veto whose id is not the one
+ * still pending, and a change that already executed or was vetoed must not
+ * be sent forever.
  * `chain` null means the account could not be read.
  * Returns "send", "drop", or "keep".
  */
