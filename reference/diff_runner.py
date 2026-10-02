@@ -259,9 +259,38 @@ def generate(seed: int, cases: int) -> list:
     return lines
 
 
-def run_worker(lines: list) -> list:
+def newest_source() -> tuple:
+    """(mtime, path) of the newest input the worker is built from."""
+    newest = (0.0, "")
+    for top in ("crates/bulkhead-core", "crates/bulkhead-diff"):
+        for d, _, files in os.walk(os.path.join(ROOT, top)):
+            for f in files:
+                if f.endswith(".rs") or f == "Cargo.toml":
+                    p = os.path.join(d, f)
+                    newest = max(newest, (os.path.getmtime(p), p))
+    # The toolchain pin is an input too: a compiler bump rebuilds the worker.
+    for f in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
+        p = os.path.join(ROOT, f)
+        if os.path.exists(p):
+            newest = max(newest, (os.path.getmtime(p), p))
+    return newest
+
+
+def check_worker() -> None:
+    """A worker older than the core it was built from compares the reference
+    with yesterday's Rust: it reports mismatches that aren't there (and writes
+    them as fixtures) or hides ones that are. Switching branches is enough to
+    cause it, so refuse rather than run."""
+    build = "cargo build --release -p bulkhead-diff"
     if not os.path.exists(WORKER):
-        sys.exit(f"worker not built: run `cargo build --release -p bulkhead-diff` first ({WORKER})")
+        sys.exit(f"worker not built: run `{build}` first ({WORKER})")
+    mtime, path = newest_source()
+    if mtime > os.path.getmtime(WORKER):
+        sys.exit(f"worker is older than {os.path.relpath(path, ROOT)}: run `{build}` first ({WORKER})")
+
+
+def run_worker(lines: list) -> list:
+    check_worker()
     p = subprocess.run([WORKER], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
     return p.stdout.splitlines()
 
