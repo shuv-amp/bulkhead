@@ -170,6 +170,17 @@ test("a later outflow is not treated as already inside an earlier window", () =>
   assert.equal(s.outflows.length, 2);
 });
 
+test("an empty window does not freeze when the worst case is zero", () => {
+  const s = newState();
+  const future = released({ queued: 400n, ticketId: 1n });
+  future.at = 5_000;
+  assert.deepEqual(assess(s, future, { worst1h: 0n, worst24h: 0n, now: 1_000 }), []);
+  assert.equal(breach(s, mint, { worst1h: 0n, worst24h: 0n, now: 1_000 }), null);
+  assert.equal(breach(s, mint, { worst1h: 0n, worst24h: 0n, now: 5_000 }).type, "freeze");
+  const live = newState();
+  assert.equal(assess(live, released({ instant: 1n }), { worst1h: 0n, worst24h: 0n, now: 1 })[0].type, "freeze");
+});
+
 test("a recovered ticket is stamped when it was created and judged now", () => {
   const s = newState();
   const e = released({ queued: 250_000n * USDC, ticketId: 4n });

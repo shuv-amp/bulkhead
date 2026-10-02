@@ -304,10 +304,12 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       state.outflows.push({ t: e.at ?? ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
       const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
       const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
-      if (act && !frozen && lastHour >= limit) {
+      // An empty sum is not a breach. A future-dated outflow is kept but not
+      // counted yet, and `0 ≥ 0` would freeze whenever the worst case is 0.
+      if (act && !frozen && lastHour > 0n && lastHour >= limit) {
         state.freezing = true;
         actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last hour: ${lastHour} ≥ ${limit} (${policy.freezeFractionOfWorst1h} × worst_1h)` });
-      } else if (act && !frozen && limit24h !== null && lastDay >= limit24h) {
+      } else if (act && !frozen && lastDay > 0n && limit24h !== null && lastDay >= limit24h) {
         state.freezing = true;
         actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)` });
       }

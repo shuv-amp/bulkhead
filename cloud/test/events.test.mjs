@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLogs, parseEvents, decodeTicket, concat, key, u64le, i64le, b58encode } from "../lib/solana.mjs";
-import { activeTickets, vaultOutflows, ticketRelease } from "../guardian/chain.mjs";
+import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease } from "../guardian/chain.mjs";
 import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket } from "../guardian/policy.mjs";
 
 const VAULT = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
@@ -82,6 +82,43 @@ test("a truncated transaction's outflow comes from the vault's own token balance
   // A deposit (the balance went up) is not an outflow.
   const inflow = { ...tx, meta: { preTokenBalances: tx.meta.postTokenBalances, postTokenBalances: tx.meta.preTokenBalances } };
   assert.equal(vaultOutflows(inflow, new Map([[vaultTokens, "USDC"]])).size, 0);
+});
+
+test("a truncated settlement is not a second outflow for a ticket already in the window", () => {
+  const vaultProgram = "Va1t111111111111111111111111111111111111111";
+  const ticket = "Tick111111111111111111111111111111111111111";
+  const vaultTokens = "VauLtTokens11111111111111111111111111111111";
+  const settle = {
+    transaction: {
+      message: {
+        accountKeys: [vaultProgram, ticket, vaultTokens],
+        instructions: [{ programIdIndex: 0, accounts: [0, 0, 2, 0, 1], data: b58encode(Uint8Array.of(9)) }],
+      },
+    },
+    meta: {
+      preTokenBalances: [{ accountIndex: 2, uiTokenAmount: { amount: "1000" } }],
+      postTokenBalances: [{ accountIndex: 2, uiTokenAmount: { amount: "600" } }],
+      innerInstructions: [{
+        index: 0,
+        instructions: [{ programIdIndex: 0, accounts: [0, 0, 2, 0, 1], data: b58encode(Uint8Array.of(8)) }],
+      }],
+    },
+  };
+  const settling = settledTicketAccounts(settle, vaultProgram);
+  assert.deepEqual([...settling], [ticket]);
+  const drop = vaultOutflows(settle, new Map([[vaultTokens, "USDC"]])).get("USDC");
+  assert.equal(freshVaultOutflow(drop, settling, [{ ticket, amount: 400n }]), 0n);
+  assert.equal(freshVaultOutflow(drop, settling, [{ ticket, amount: 400n }, { ticket: "other", amount: 50n }]), 0n);
+  // The same drop with an extra 100 that is not a known settlement still counts.
+  const mixed = structuredClone(settle);
+  mixed.meta.postTokenBalances[0].uiTokenAmount.amount = "500";
+  const mixedDrop = vaultOutflows(mixed, new Map([[vaultTokens, "USDC"]])).get("USDC");
+  assert.equal(freshVaultOutflow(mixedDrop, settling, [{ ticket, amount: 400n }]), 100n);
+  // A release (tag 8), even as an inner instruction, is not a settlement.
+  const releaseOnly = structuredClone(settle);
+  releaseOnly.transaction.message.instructions[0].data = b58encode(Uint8Array.of(8));
+  assert.equal(settledTicketAccounts(releaseOnly, vaultProgram).size, 0);
+  assert.equal(freshVaultOutflow(drop, settledTicketAccounts(releaseOnly, vaultProgram), [{ ticket, amount: 400n }]), drop);
 });
 
 test("a ticket read from the chain counts once, even when its event arrives too", () => {

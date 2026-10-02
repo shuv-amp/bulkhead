@@ -34,7 +34,7 @@ import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
-import { activeTickets, vaultOutflows, ticketRelease } from "./chain.mjs";
+import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
@@ -290,8 +290,16 @@ async function ingest(sigs, act, checkpoint = () => {}) {
       // Events past the log cap are gone; the balances are not. Every decrease
       // of a watched vault in this transaction counts as unbacked outflow.
       if (act) log({ level: "warn", msg: "log truncated: outflow taken from token balances", signature: s.signature });
+      const settling = settledTicketAccounts(tx, cfg.vaultProgram);
       for (const [mint, amount] of vaultOutflows(tx, tokenMints)) {
-        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
+        const windowed = [];
+        for (const o of state.outflows) {
+          if (o.mint !== mint || o.ticketId == null) continue;
+          windowed.push({ ticket: b58encode(await vc.ticketAddress(o.ticketId)), amount: o.amount });
+        }
+        const fresh = freshVaultOutflow(amount, settling, windowed);
+        if (fresh === 0n) continue;
+        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: fresh, queued: 0n, ticketId: 0n, etaS: 0 };
         await consider(e, s.signature, now, act);
       }
     }

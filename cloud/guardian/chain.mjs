@@ -1,7 +1,10 @@
 // Facts the guardian takes from the chain instead of from log text. Pure
 // functions over RPC results, so every rule is unit-tested (cloud/test).
 
-import { b58encode, decodeTicket, key } from "../lib/solana.mjs";
+import { b58decode, b58encode, decodeTicket, key } from "../lib/solana.mjs";
+
+/** Vault `settle_ticket`. A settlement moves tokens already counted when queued. */
+const SETTLE_TICKET = 9;
 
 /** All account keys of a `getTransaction` result, in index order (v0 lookups included). */
 export function accountKeys(tx) {
@@ -30,6 +33,50 @@ export function vaultOutflows(tx, tokenMints) {
     out.set(mint, (out.get(mint) ?? 0n) + (before - after));
   }
   return out;
+}
+
+function instructionData(data) {
+  if (typeof data === "string") return b58decode(data);
+  return data ?? new Uint8Array();
+}
+
+function compiledAccounts(ix, keys) {
+  if (!Array.isArray(ix.accounts)) return [];
+  if (typeof ix.accounts[0] === "number") return ix.accounts.map((i) => keys[i]);
+  return ix.accounts;
+}
+
+/**
+ * Ticket accounts this transaction settles. The instruction list is still
+ * complete when the log is truncated, so a settlement can be told apart from
+ * a new release. Account 4 of `settle_ticket` is the ticket.
+ */
+export function settledTicketAccounts(tx, vaultProgram) {
+  const keys = accountKeys(tx);
+  const outer = tx?.transaction?.message?.instructions ?? [];
+  const inner = (tx?.meta?.innerInstructions ?? []).flatMap((g) => g.instructions ?? []);
+  const out = new Set();
+  for (const ix of [...outer, ...inner]) {
+    const program = typeof ix.programIdIndex === "number" ? keys[ix.programIdIndex] : ix.programId;
+    if (program !== vaultProgram) continue;
+    if (instructionData(ix.data)[0] !== SETTLE_TICKET) continue;
+    const ticket = compiledAccounts(ix, keys)[4];
+    if (ticket) out.add(ticket);
+  }
+  return out;
+}
+
+/**
+ * How much of a truncated balance drop was not already counted. `windowed`
+ * is `{ ticket, amount }` for queued outflows of this mint still in the
+ * window; settling one of them is the same money leaving, not a new release.
+ */
+export function freshVaultOutflow(drop, settling, windowed) {
+  let already = 0n;
+  for (const row of windowed) {
+    if (row.ticket && settling.has(row.ticket)) already += row.amount;
+  }
+  return already >= drop ? 0n : drop - already;
 }
 
 /**
