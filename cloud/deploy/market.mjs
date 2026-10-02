@@ -12,8 +12,10 @@
 // and the mint and token accounts. Setup resumes after a failure: run it again
 // with the same <dir>. Keys are saved before they are used, each step records
 // its signature in progress.json, and a step whose effect is already on chain
-// is skipped. The seal is proposed at most once (proposing again would restart
-// its 72h clock). world.json is written last, when every step has landed.
+// is skipped. A recorded step is redone when this cluster does not have it,
+// so a copied progress.json cannot write world.json for a market that was
+// never created. The seal is proposed at most once (proposing again would
+// restart its 72h clock). world.json is written last, when every step has landed.
 // Zero dependencies: only this repository's cloud/lib and Node's standard library.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -154,13 +156,27 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
   const progress = existsSync(progressPath) ? JSON.parse(readFileSync(progressPath, "utf8")) : {};
   // An account; null if it doesn't exist, undefined if the endpoint can't read accounts.
   const read = (addr) => rpc.account(addr).catch(() => undefined);
-  const exists = (addr) => async () => !!(await read(addr));
-  // Runs a step unless progress.json records it or `landed` sees its effect on chain.
+  const exists = (addr) => async () => {
+    const a = await read(addr);
+    if (a === undefined) return undefined;
+    return !!a;
+  };
+  // `landed` is true, false, or undefined when the account could not be read.
+  // A progress.json entry is not proof: the file may be from another cluster.
   async function once(name, landed, run) {
-    if (progress[name]) return console.log(`   ${name}: done earlier (${progress[name]})`);
     const found = await landed();
-    if (found) console.log(`   ${name}: already on chain`);
-    progress[name] = found ? "found on chain" : await run();
+    const what = stepDisposition(progress[name], found);
+    if (what === "unreadable") throw new Error(`${name}: can't read the cluster to see whether this step already landed`);
+    if (what === "skip") {
+      console.log(progress[name] ? `   ${name}: done earlier (${progress[name]})` : `   ${name}: already on chain`);
+      if (!progress[name]) {
+        progress[name] = "found on chain";
+        writeFileSync(progressPath, JSON.stringify(progress, null, 2) + "\n");
+      }
+      return;
+    }
+    if (what === "redo") console.log(`   ${name}: recorded as done, but it is not on this cluster; doing it`);
+    progress[name] = await run();
     writeFileSync(progressPath, JSON.stringify(progress, null, 2) + "\n");
   }
 
@@ -176,7 +192,11 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
 
   step("funding the admin, guardians and whale (fees and rent)");
   for (const [name, kp] of [["admin", k.admin], ...k.guardians.map((g, i) => [`guardian${i}`, g]), ["whale", k.whale]]) {
-    await once(`fund ${name}`, async () => BigInt((await read(kp.publicKey))?.lamports ?? 0) >= FEES, () => fund(rpc, payer, kp.publicKey, FEES));
+    await once(`fund ${name}`, async () => {
+      const a = await read(kp.publicKey);
+      if (a === undefined) return undefined;
+      return BigInt(a?.lamports ?? 0) >= FEES;
+    }, () => fund(rpc, payer, kp.publicKey, FEES));
   }
 
   step("creating a test USDC mint (6 decimals, no freeze authority)");
@@ -189,6 +209,7 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
   let registeredNow = false;
   await once("register", async () => {
     const a = await read(protocol);
+    if (a === undefined) return undefined;
     if (!a) return false;
     // Harbor lets anyone register it: the protocol must be ours.
     const { admin } = decodeProtocol(a.bytes);
@@ -210,8 +231,11 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
   step("minting 10,000,000 test USDC to the whale and depositing it through Harbor");
   await once("whale token account", exists(whaleTokens), () => newTokenAccount(rpc, payer, k.whaleTokens, mint.publicKey, k.whale.publicKey));
   await once("mint to whale", async () => {
-    if (await read(backing)) return true; // already deposited
+    const deposited = await read(backing);
+    if (deposited === undefined) return undefined;
+    if (deposited) return true; // already deposited
     const a = await read(whaleTokens);
+    if (a === undefined) return undefined;
     return !!a && tokenAmount(a) >= TVL;
   }, () => sendTx(rpc, payer, [mintTo(mint.publicKey, whaleTokens, k.mintAuthority.publicKey, TVL)], [k.mintAuthority]));
   await once("deposit", exists(backing), () => sendTx(rpc, payer, [harborIx(m, 1, u64le(TVL), [s(k.whale.publicKey)], [
@@ -225,6 +249,8 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
   step("proposing the seal: it can execute after the 72h loosen delay");
   await once("seal proposal", async () => {
     const a = await read(protocol);
+    if (a === undefined && !registeredNow) throw new Error("can't read the protocol to rule out an earlier seal proposal (proposing again restarts its 72h clock); run setup again once getAccountInfo works");
+    if (a === undefined) return false;
     if (a) return decodeProtocol(a.bytes).sealExecutableS !== 0;
     if (registeredNow) return false; // registered in this run: no earlier proposal exists
     throw new Error("can't read the protocol to rule out an earlier seal proposal (proposing again restarts its 72h clock); run setup again once getAccountInfo works");
@@ -294,6 +320,52 @@ async function caps(url, dir, payerPath) {
   console.log(`caps set: ${fmt(CAPS.short)} per 1h, ${fmt(CAPS.long)} per 24h (a tightening, applied at once): ${sig}`);
 }
 
+/**
+ * What to do with one setup step. `found` is true or false from a successful
+ * read, and anything else means the read failed. A recorded step still has to
+ * be on this cluster.
+ */
+export function stepDisposition(recorded, found) {
+  if (found !== true && found !== false) return "unreadable";
+  if (found) return "skip";
+  return recorded ? "redo" : "run";
+}
+
+/**
+ * Why world.json must not be treated as a finished market, or null when the
+ * directory matches this vault, this Harbor, and the protocol account.
+ * `protocolAccount` is null when the account is absent and undefined when it
+ * could not be read.
+ */
+export function marketDirProblem(world, vaultProgram, harbor, protocolAccount) {
+  if (!world || world.vaultProgram !== vaultProgram || world.harbor !== harbor) {
+    return `world.json is for vault ${world?.vaultProgram} and harbor ${world?.harbor}, not ${vaultProgram} and ${harbor}`;
+  }
+  if (protocolAccount === undefined) return "can't read the protocol account named in world.json";
+  if (protocolAccount === null) return `protocol ${world.protocol} from world.json is not on this cluster`;
+  let decoded;
+  try {
+    decoded = decodeProtocol(protocolAccount.bytes ?? protocolAccount);
+  } catch {
+    return "the protocol account named in world.json is not a Bulkhead protocol";
+  }
+  if (decoded.protocolProgram !== harbor) return "the protocol on chain was not registered by this Harbor";
+  return null;
+}
+
+async function confirm(url, dir, vaultProgram, harbor) {
+  const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
+  const rpc = new Rpc(url);
+  let account;
+  try {
+    account = await rpc.account(world.protocol);
+  } catch {
+    account = undefined;
+  }
+  const problem = marketDirProblem(world, vaultProgram, harbor, account);
+  if (problem) throw new Error(problem);
+}
+
 // The builders above are shared with cloud/deploy/vault-check.mjs; the commands
 // run only when this file is invoked directly.
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -301,8 +373,9 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   if (cmd === "setup" && args.length === 5) await setup(...args);
   else if (cmd === "seal" && args.length === 3) await seal(...args);
   else if (cmd === "caps" && args.length === 3) await caps(...args);
+  else if (cmd === "confirm" && args.length === 4) await confirm(...args);
   else {
-    console.error("usage: market.mjs setup <rpc> <dir> <payer.json> <vaultProgram> <harborProgram> | seal <rpc> <dir> <payer.json> | caps <rpc> <dir> <payer.json>");
+    console.error("usage: market.mjs setup <rpc> <dir> <payer.json> <vaultProgram> <harborProgram> | confirm <rpc> <dir> <vaultProgram> <harborProgram> | seal <rpc> <dir> <payer.json> | caps <rpc> <dir> <payer.json>");
     process.exit(2);
   }
 }
