@@ -268,7 +268,8 @@ def newest_source() -> tuple:
                 if f.endswith(".rs") or f == "Cargo.toml":
                     p = os.path.join(d, f)
                     newest = max(newest, (os.path.getmtime(p), p))
-    for f in ("Cargo.toml", "Cargo.lock"):
+    # The toolchain pin is an input too: a compiler bump rebuilds the worker.
+    for f in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
         p = os.path.join(ROOT, f)
         if os.path.exists(p):
             newest = max(newest, (os.path.getmtime(p), p))
