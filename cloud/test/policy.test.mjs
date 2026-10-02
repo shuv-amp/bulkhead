@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, decisionTime, floorAlerts, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingFreezeAfterSync, queueFailedVeto, rememberTicket, retirePendingFreeze, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -182,4 +182,38 @@ test("a freeze already on chain retires a failed local freeze", () => {
   assert.equal(retirePendingFreeze(pending, 90_000, 1_000), null);
   assert.equal(retirePendingFreeze(pending, 0, 1_000), pending);
   assert.equal(retirePendingFreeze(null, 90_000, 1_000), null);
+  assert.equal(pendingFreezeAfterSync(pending, 90_000, 1_000), null);
+  assert.equal(pendingFreezeAfterSync(pending, 0, 1_000), pending);
+});
+
+test("startup judges a breach at the chain time when the wall clock is behind", () => {
+  const s = newState();
+  assess(s, released({ instant: 250_000n * USDC }), { worst1h, now: 9_800 }, DEFAULT_POLICY, false);
+  assert.equal(breach(s, mint, { worst1h, now: 9_000 }), null);
+  const now = decisionTime(9_000, s.outflows);
+  assert.equal(now, 9_800);
+  assert.match(breach(s, mint, { worst1h, now }).reason, /last hour/);
+});
+
+test("a missing ticket account stays cancellable", () => {
+  const s = newState();
+  rememberTicket(s, { ticketId: 7n, mint, vault: "vault-address", owner });
+  assert.equal(pendingCancels(s).length, 1);
+  noteMissingTicket(s, 7n);
+  assert.equal(pendingCancels(s).length, 1);
+  assert.equal(pendingCancels(s).length, 0);
+});
+
+test("a failed veto is queued once and can be sent again", () => {
+  const action = { type: "veto_change", changeId: 3n, reason: "loosening 3" };
+  const queued = queueFailedVeto([], action);
+  assert.deepEqual(queueFailedVeto(queued, action), queued);
+  assert.equal(queued[0].changeId, 3n);
+  const floor = { type: "floor_veto", program: "prog", proposalId: 4n };
+  assert.equal(queueFailedVeto(queued, floor).length, 2);
+});
+
+test("a failed heartbeat is retried shortly, and a success waits out the interval", () => {
+  assert.equal(nextHeartbeatAt(false, 1_000, 86_400_000, 15_000), 16_000);
+  assert.equal(nextHeartbeatAt(true, 1_000, 86_400_000, 15_000), 86_401_000);
 });

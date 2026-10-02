@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { activeTickets, vaultOutflows, ticketRelease } from "./chain.mjs";
 
@@ -62,6 +62,12 @@ const worst1h = new Map();
 const worst24h = new Map();
 const warned = new Set();
 let pendingFreeze = null;
+let pendingVetoes = [];
+let vetoNotBefore = 0;
+const cancelRetryAt = new Map();
+const CANCEL_RETRY_MS = 15_000;
+const VETO_RETRY_MS = 15_000;
+const HEARTBEAT_RETRY_MS = 15_000;
 let nextTicketScanAt = 0;
 let sweptFreezeUntil = 0;
 
@@ -121,12 +127,20 @@ async function execute(action, event, eventTime) {
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       case "cancel": {
+        if ((cancelRetryAt.get(action.ticketId) ?? 0) > Date.now()) {
+          noteMissingTicket(state, action.ticketId);
+          return false;
+        }
         const vault = action.vault ?? (await vc.vault(action.mint ?? event.mint)).vault;
         const ticket = await vc.ticketAddress(action.ticketId);
         const acc = await rpc.account(ticket);
         if (!acc) {
-          log({ action: "cancel", skipped: "ticket already settled or cancelled", ticketId: action.ticketId });
-          return true;
+          // A lagging read is not proof the ticket settled. Retry; leaving it
+          // marked cancelled would let it pay out when the freeze ends.
+          log({ action: "cancel", skipped: "ticket account missing; will retry", ticketId: action.ticketId });
+          noteMissingTicket(state, action.ticketId);
+          cancelRetryAt.set(action.ticketId, Date.now() + CANCEL_RETRY_MS);
+          return false;
         }
         const payer = acc.bytes.slice(136, 168); // Ticket: disc, protocol, vault, recipient, recipient_owner, payer
         ixs = [vc.cancelTicket(vault, ticket, guardian.publicKey, payer)];
@@ -186,6 +200,10 @@ async function applyActions(actions, event, eventTime) {
     if (action.type === "cancel") {
       if (ok) state.pendingTickets.delete(action.ticketId);
       else state.cancelled.delete(action.ticketId);
+    }
+    if (action.type === "veto_change" || action.type === "floor_veto") {
+      if (!ok) pendingVetoes = queueFailedVeto(pendingVetoes, action);
+      continue;
     }
     if (action.type !== "freeze") continue;
     freezeOk = ok;
@@ -354,7 +372,14 @@ async function freezeIfWindowStillOpen(now) {
 async function main() {
   log({ msg: "guardian started", guardian: guardian.address, protocol: b58encode(vc.protocol), policy });
   await refreshWorstCase();
-  await heartbeat().catch((e) => log({ level: "warn", msg: `heartbeat failed: ${e.message}` }));
+  let heartbeatAt = 0;
+  try {
+    await heartbeat();
+    heartbeatAt = nextHeartbeatAt(true, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
+  } catch (e) {
+    log({ level: "warn", msg: `heartbeat failed: ${e.message}` });
+    heartbeatAt = nextHeartbeatAt(false, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
+  }
   const oldest = wallNow() - DAY_S;
   const history = await signatures(undefined, oldest);
   const until = history[0]?.signature;
@@ -364,27 +389,35 @@ async function main() {
   // release is outside the rolling outflow window. Current chain state is live,
   // so an already-active freeze must sweep tickets at startup too.
   await syncFromChain(true, { startup: true });
-  await freezeIfWindowStillOpen(wallNow());
+  await freezeIfWindowStillOpen(decisionTime(wallNow(), state.outflows));
   log({ msg: "caught up", signatures: inWindow.length });
   await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
-  let lastHeartbeat = Date.now();
   let lastAttest = Date.now();
   let lastFloorCheck = Date.now();
   for (;;) {
     try {
-      if (pendingFreeze && wallNow() >= state.frozenUntil) {
-        const { event, eventTime } = pendingFreeze;
-        const ok = await execute(pendingFreeze.action, event, eventTime);
-        if (ok) {
-          state.freezing = true;
-          pendingFreeze = null;
-          await sweepCancels(event, eventTime);
-        }
-      }
       const sigs = await signatures(cursor, null);
       await ingest(sigs, true, (signature) => { cursor = signature; });
       await syncFromChain(true);
+      const now = wallNow();
+      const retry = pendingFreezeAfterSync(pendingFreeze, state.frozenUntil, now);
+      if (retry) {
+        const ok = await execute(retry.action, retry.event, retry.eventTime);
+        if (ok) {
+          state.freezing = true;
+          pendingFreeze = null;
+          await sweepCancels(retry.event, retry.eventTime);
+        }
+      }
+      if (pendingVetoes.length && Date.now() >= vetoNotBefore) {
+        const still = [];
+        for (const action of pendingVetoes) {
+          if (!(await execute(action, { reason: action.reason }, now))) still.push(action);
+        }
+        pendingVetoes = still;
+        if (still.length) vetoNotBefore = Date.now() + VETO_RETRY_MS;
+      }
       if (Date.now() - lastAttest > 10_000) {
         await refreshWorstCase();
         lastAttest = Date.now();
@@ -393,9 +426,14 @@ async function main() {
         lastFloorCheck = Date.now();
         await checkFloor();
       }
-      if (Date.now() - lastHeartbeat > policy.heartbeatEveryS * 1000) {
-        await heartbeat();
-        lastHeartbeat = Date.now();
+      if (Date.now() >= heartbeatAt) {
+        try {
+          await heartbeat();
+          heartbeatAt = nextHeartbeatAt(true, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
+        } catch (e) {
+          log({ level: "warn", msg: `heartbeat failed: ${e.message}` });
+          heartbeatAt = nextHeartbeatAt(false, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
+        }
       }
     } catch (e) {
       log({ level: "warn", msg: e.message });

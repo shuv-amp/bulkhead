@@ -193,6 +193,56 @@ export function retirePendingFreeze(pending, chainFrozenUntil, now) {
   return pending && chainFrozenUntil > now ? null : pending;
 }
 
+/**
+ * Whether a failed freeze is still worth sending, after this cycle's chain
+ * read. The retry has to see that read: `frozenUntil` still 0 locally while
+ * the freeze already landed, and a second freeze extends the lockout
+ * (`freeze_until` takes the later deadline).
+ */
+export function pendingFreezeAfterSync(pending, chainFrozenUntil, now) {
+  const still = retirePendingFreeze(pending, chainFrozenUntil, now);
+  if (!still || now < chainFrozenUntil) return null;
+  return still;
+}
+
+/** Judge the startup window at the later of the wall clock and the newest outflow. */
+export function decisionTime(wall, outflows) {
+  let now = wall;
+  for (const o of outflows) if (o.t > now) now = o.t;
+  return now;
+}
+
+/**
+ * One null account read is not proof the ticket is gone. Dropping it from
+ * the cancellation set lets the next sweep try again.
+ */
+export function noteMissingTicket(state, ticketId) {
+  state.cancelled.delete(ticketId);
+}
+
+export function vetoKey(action) {
+  if (action.type === "veto_change") return `c${action.changeId}`;
+  if (action.type === "floor_veto") return `f${action.program}:${action.proposalId}`;
+  return null;
+}
+
+/** Keep one retry for a veto whose send failed. The event is not seen again. */
+export function queueFailedVeto(pending, action) {
+  const key = vetoKey(action);
+  if (!key) return pending;
+  if (pending.some((a) => vetoKey(a) === key)) return pending;
+  return [...pending, action];
+}
+
+/**
+ * When the next heartbeat may be sent. A success waits out the interval.
+ * A failure is retried on the short delay: treating it as a success schedules
+ * the next one a full interval later, and a dead guardian cannot revive itself.
+ */
+export function nextHeartbeatAt(succeeded, now, everyMs, retryMs) {
+  return now + (succeeded ? everyMs : retryMs);
+}
+
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
 export function observeProtocolFreeze(state, until, now, policy = DEFAULT_POLICY, act = true) {
   state.frozenUntil = Math.max(state.frozenUntil, until);
@@ -260,7 +310,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       if (!act) break;
       if (e.proposalKind === 1 && !policy.approvedUpgradeBuffers.includes(e.target) && !state.vetoed.has(`f${e.program}:${e.id}`)) {
         state.vetoed.add(`f${e.program}:${e.id}`);
-        actions.push({ type: "floor_veto", program: e.program, reason: `upgrade to unapproved buffer ${e.target}` });
+        actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: `upgrade to unapproved buffer ${e.target}` });
       }
       break;
   }
