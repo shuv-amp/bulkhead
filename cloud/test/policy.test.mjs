@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, floorAlerts, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -121,6 +121,21 @@ test("after a late freeze, every recorded ticket is swept up once, with its own 
   assert.deepEqual(sweep.map((x) => [x.ticketId, x.mint]), [[3n, mint], [4n, other]]);
   assert.deepEqual(pendingCancels(s), [], "each ticket once");
   assert.deepEqual(pendingCancels(newState(), { ...DEFAULT_POLICY, cancelTicketsWhenFrozen: false }), []);
+});
+
+test("an externally observed chain freeze cancels tracked tickets", () => {
+  const s = newState();
+  rememberTicket(s, { ticketId: 301n, mint, vault: "vault-address", owner });
+  const actions = observeProtocolFreeze(s, 100_000, 90_000);
+  assert.deepEqual(actions.map((a) => [a.type, a.ticketId, a.vault]), [["cancel", 301n, "vault-address"]]);
+});
+
+test("settlement and cancellation events remove tickets from the cancellation set", () => {
+  const s = newState();
+  rememberTicket(s, { ticketId: 9n, mint, owner });
+  const ev = decode({ name: "vault:settled", fields: [u64le(9), u64le(50)] });
+  assess(s, ev, { now: 1 });
+  assert.deepEqual(pendingCancels(s), []);
 });
 
 test("floor readiness: an unarmed stop button and an unpinned snapshot are reported (A5)", () => {

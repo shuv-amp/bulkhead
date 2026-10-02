@@ -65,7 +65,20 @@ export function floorAlerts(fl) {
 }
 
 export function newState() {
-  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), freezing: false };
+  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false };
+}
+
+/** Keep ticket cancellation state outside the rolling outflow windows. */
+export function rememberTicket(state, ticket) {
+  const id = BigInt(ticket.ticketId ?? ticket.id);
+  state.tickets.add(id);
+  const old = state.pendingTickets.get(id) ?? {};
+  state.pendingTickets.set(id, {
+    ticketId: id,
+    mint: ticket.mint ?? old.mint ?? null,
+    vault: ticket.vault ?? old.vault ?? null,
+    owner: ticket.owner ?? ticket.recipientOwner ?? old.owner ?? "(unknown)",
+  });
 }
 
 /**
@@ -101,6 +114,9 @@ export function decode(ev) {
       return { kind: "change_proposed", id: u64(f[0]), changeKind: f[1][0], target: b58encode(f[2]) };
     case "floor:proposed":
       return { kind: "floor_proposed", program: b58encode(f[0]), proposalKind: f[1][0], id: u64(f[2]), target: b58encode(f[3]) };
+    case "vault:settled":
+    case "vault:ticket_cancelled":
+      return { kind: "ticket_closed", ticketId: u64(f[0]) };
     default:
       return { kind: "other", name: ev.name };
   }
@@ -149,13 +165,27 @@ export function breach(state, mint, ctx, policy = DEFAULT_POLICY) {
 export function pendingCancels(state, policy = DEFAULT_POLICY) {
   if (!policy.cancelTicketsWhenFrozen) return [];
   const actions = [];
-  for (const o of state.outflows) {
-    if (o.ticketId !== null && !state.cancelled.has(o.ticketId)) {
-      state.cancelled.add(o.ticketId);
-      actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
+  for (const ticket of state.pendingTickets.values()) {
+    if (policy.allowlistedOwners.includes(ticket.owner)) continue;
+    if (!state.cancelled.has(ticket.ticketId)) {
+      state.cancelled.add(ticket.ticketId);
+      actions.push({
+        type: "cancel",
+        ticketId: ticket.ticketId,
+        mint: ticket.mint,
+        vault: ticket.vault,
+        reason: `incident: ticket to ${ticket.owner}`,
+      });
     }
   }
   return actions;
+}
+
+/** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
+export function observeProtocolFreeze(state, until, now, policy = DEFAULT_POLICY, act = true) {
+  state.frozenUntil = Math.max(state.frozenUntil, until);
+  state.freezing = false;
+  return act && now < state.frozenUntil ? pendingCancels(state, policy) : [];
 }
 
 /**
@@ -175,7 +205,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       // for tickets whose event was missed): its queued amount counts once.
       const ticket = e.queued > 0n ? e.ticketId : null;
       const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
-      if (ticket !== null) state.tickets.add(ticket);
+      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner });
       const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       state.outflows.push({ t: ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
@@ -189,26 +219,22 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
         actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)` });
       }
       if (act && (frozen || state.freezing) && policy.cancelTicketsWhenFrozen) {
-        for (const o of state.outflows) {
-          if (o.ticketId !== null && !state.cancelled.has(o.ticketId)) {
-            state.cancelled.add(o.ticketId);
-            // The ticket's own mint: the freeze is protocol-wide, so this loop
-            // also cancels other vaults' tickets, and cancel_ticket needs that vault.
-            actions.push({ type: "cancel", ticketId: o.ticketId, mint: o.mint, reason: `incident: ticket to ${o.owner}` });
-          }
-        }
+        actions.push(...pendingCancels(state, policy));
       }
       break;
     }
     case "frozen":
       if ((e.scope ?? 0) !== 0) break; // one vault frozen: the protocol is not
-      state.frozenUntil = Math.max(state.frozenUntil, e.until);
-      state.freezing = false;
+      actions.push(...observeProtocolFreeze(state, e.until, ctx.now, policy, act));
       break;
     case "unfrozen":
       if ((e.scope ?? 0) !== 0) break;
       state.frozenUntil = 0;
       state.freezing = false;
+      break;
+    case "ticket_closed":
+      state.pendingTickets.delete(e.ticketId);
+      state.cancelled.delete(e.ticketId);
       break;
     case "change_proposed":
       if (!act) break;

@@ -46,3 +46,24 @@ test("one signed transaction goes to every endpoint, with the budget first", asy
   const bytes = Buffer.from(sent[0][1], "base64");
   assert.ok(bytes.includes(Buffer.from(COMPUTE_BUDGET)), "the compute-budget program is in the message");
 });
+
+test("a hanging backup send cannot delay primary confirmation", async () => {
+  const primary = {
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async (method) => {
+      if (method === "sendTransaction") return "sig";
+      if (method === "getSignatureStatuses") return { value: [{ confirmationStatus: "confirmed" }] };
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const backup = { call: async () => new Promise(() => {}) };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("primary confirmation was delayed")), 1_000); });
+  try {
+    assert.equal(await Promise.race([send(primary, payer, [ix], [], { rpcs: [backup] }), timeout]), "sig");
+  } finally {
+    clearTimeout(timer);
+  }
+});

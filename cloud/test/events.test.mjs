@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLogs, parseEvents, decodeTicket, concat, key, u64le, i64le, b58encode } from "../lib/solana.mjs";
-import { vaultOutflows, ticketRelease } from "../guardian/chain.mjs";
-import { assess, decode, newState } from "../guardian/policy.mjs";
+import { activeTickets, vaultOutflows, ticketRelease } from "../guardian/chain.mjs";
+import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket } from "../guardian/policy.mjs";
 
 const VAULT = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
 const HARBOR = "6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh";
@@ -97,4 +97,50 @@ test("a ticket read from the chain counts once, even when its event arrives too"
   assess(s, { ...event, mint: "USDC" }, { ...ctx, now: 11 });
   const amounts = s.outflows.map((o) => [o.amount, o.ticketId]);
   assert.deepEqual(amounts, [[50n, 3n], [7n, null]], "the event adds only its instant part");
+});
+
+test("a recent chain-only ticket contributes its queued amount before cancellation tracking", () => {
+  const vault = "VauLt111111111111111111111111111111111111111";
+  const ticket = { vault, recipientOwner: OTHER, id: 12n, amount: 50n, createdS: 100, etaS: 700 };
+  const fromChain = ticketRelease(ticket, new Map([[vault, "USDC"]]));
+  const state = newState();
+  const ctx = { worst1h: 1_000_000n, worst24h: 2_500_000n, now: 100 };
+  assess(state, fromChain, ctx, undefined, false);
+  rememberTicket(state, ticket);
+  assess(state, fromChain, { ...ctx, now: 101 }, undefined, false);
+  assert.deepEqual(state.outflows.map((o) => [o.amount, o.ticketId]), [[50n, 12n]]);
+});
+
+test("active ticket scan returns every protocol ticket, including old ids beyond 256", async () => {
+  const protocol = key(VAULT);
+  const accounts = Array.from({ length: 300 }, (_, i) => {
+    const bytes = concat(
+      Buffer.from("BHTICKT1"), protocol, key(HARBOR), key(OTHER), key(TOKEN), key(VAULT),
+      u64le(BigInt(i + 1)), u64le(50n), i64le(1_000), i64le(700_000), i64le(0), Uint8Array.of(254), new Uint8Array(7),
+    );
+    return { pubkey: `ticket-${i + 1}`, account: { data: [Buffer.from(bytes).toString("base64"), "base64"] } };
+  });
+  let request;
+  const rpc = { call: async (...args) => { request = args; return accounts; } };
+  const tickets = await activeTickets(rpc, VAULT, protocol);
+  assert.equal(request[0], "getProgramAccounts");
+  assert.equal(request[1][1].filters[0].memcmp.offset, 0);
+  assert.equal(request[1][1].filters[1].memcmp.offset, 8);
+  assert.equal(tickets.length, 300);
+  assert.deepEqual([tickets[0].id, tickets.at(-1).id], [1n, 300n]);
+  assert.equal(tickets[0].createdS, 1_000, "old outstanding accounts are not filtered by age");
+  const state = newState();
+  for (const ticket of tickets) rememberTicket(state, ticket);
+  const cancels = observeProtocolFreeze(state, 100_000, 90_000);
+  assert.equal(cancels.length, 300, "an observed freeze sweeps ids beyond the former 256-ticket window");
+  assert.equal(cancels.at(-1).ticketId, 300n);
+});
+
+test("tickets stay cancellable after their outflow ages out of the 24-hour window", () => {
+  const state = newState();
+  rememberTicket(state, { ticketId: 7n, mint: "USDC", vault: HARBOR, owner: OTHER });
+  const ctx = { worst1h: 1_000_000n, worst24h: 2_500_000n, now: 90_000 };
+  assess(state, { kind: "released", mint: "USDC", owner: OTHER, backed: 0n, instant: 1n, queued: 0n, ticketId: 0n, etaS: 0 }, ctx);
+  assert.equal(state.outflows.length, 1, "the rolling window discarded the old outflow");
+  assert.deepEqual(pendingCancels(state).map((a) => [a.ticketId, a.vault]), [[7n, HARBOR]]);
 });
