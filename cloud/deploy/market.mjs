@@ -202,8 +202,8 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
     return sig;
   });
 
-  step("creating the USDC vault with the default limits (2%/h, 5%/day)");
-  await once("vault", exists(vault), () => sendTx(rpc, payer, [vaultIx(m, 1, defaultLimits(), [
+  step("creating the USDC vault with the demo limits and calibrated caps (2%/h, 5%/day)");
+  await once("vault", exists(vault), () => sendTx(rpc, payer, [vaultIx(m, 1, limitsWithCaps(CAPS.short, CAPS.long), [
     s(payer.publicKey, true), s(k.admin.publicKey), w(protocol), w(vault), w(vaultTokens), r(mint.publicKey), r(IDS.token), r(IDS.system),
   ])], [k.admin]));
 
@@ -263,7 +263,8 @@ async function seal(url, dir, payerPath) {
   const payer = Keypair.load(payerPath);
   const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
   const m = { vaultProgram: key(world.vaultProgram) };
-  const sig = await sendTx(rpc, payer, [vaultIx(m, 5, new Uint8Array(0), [w(world.protocol), r(world.vault), r(world.vaultTokens)])]);
+  const [lifeboat] = await findPda(["lifeboat-tokens", key(world.protocol), key(world.mint)], m.vaultProgram);
+  const sig = await sendTx(rpc, payer, [vaultIx(m, 5, new Uint8Array(0), [w(world.protocol), r(world.vault), r(world.vaultTokens), r(lifeboat)])]);
   console.log(`sealed: ${sig}`);
 }
 

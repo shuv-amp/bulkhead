@@ -92,11 +92,9 @@ const L = v.limits;
 check("limits: 2% per 1h, 5% per 24h, 6h queue delay, no floors",
   L.shortBps === 200 && L.shortWindowS === 3_600 && L.longBps === 500 && L.longWindowS === DAY && L.minQueueDelayS === 6 * 3_600 &&
   L.shortFloor === 0n && L.longFloor === 0n);
-// Either none (as set up) or the calibrated caps (market.mjs caps): anything else is wrong.
-const noCaps = L.shortCap === 0n && L.longCap === 0n;
 const calibrated = L.shortCap === CAPS.short && L.longCap === CAPS.long;
-check(noCaps ? "absolute caps: none" : "absolute caps: 2% and 5% of the 10M (docs/07 §4)", noCaps || calibrated,
-  noCaps ? "" : `${(Number(L.shortCap) / 1e6).toLocaleString("en-US")} per 1h, ${(Number(L.longCap) / 1e6).toLocaleString("en-US")} per 24h`);
+check("absolute caps: 2% and 5% of the 10M (docs/07 §4)", calibrated,
+  `${(Number(L.shortCap) / 1e6).toLocaleString("en-US")} per 1h, ${(Number(L.longCap) / 1e6).toLocaleString("en-US")} per 24h`);
 if (p.sealed) {
   console.log(`   (sealed: balance ${(Number(balance) / 1e6).toLocaleString("en-US")} test USDC, pending tickets ${v.pendingTickets})`);
 } else {
@@ -116,7 +114,8 @@ console.log("\n3. forbidden actions (simulated; nothing is sent)");
 if (!p.sealed) {
   await expect("S1 before the seal: the admin pays the attacker 100,000", [await harborRelease(3, admin.publicKey, wld.attackerTokens, wld.attacker, 100_000n * 1_000_000n, p)], "NotSealed");
   await expect("the whale withdraws its own deposit before the seal", [await harborRelease(2, whale.publicKey, wld.whaleTokens, whale.publicKey, 1_000_000n, p)], "NotSealed");
-  await expect("executing the seal before 72h", [vaultIx(m, 5, new Uint8Array(0), [w(m.protocol), r(wld.vault), r(wld.vaultTokens)])], "SealNotExecutable");
+  const [lifeboat] = await findPda(["lifeboat-tokens", key(wld.protocol), key(wld.mint)], m.vaultProgram);
+  await expect("executing the seal before 72h", [vaultIx(m, 5, new Uint8Array(0), [w(m.protocol), r(wld.vault), r(wld.vaultTokens), r(lifeboat)])], "SealNotExecutable");
 }
 await expect("a stranger proposing the seal", [vaultIx(m, 4, new Uint8Array(0), [w(m.protocol), s(stranger.publicKey)])], "NotAdmin");
 await expect("a stranger vetoing the seal", [vaultIx(m, 6, new Uint8Array(0), [w(m.protocol), s(stranger.publicKey)])], "NotGuardian");

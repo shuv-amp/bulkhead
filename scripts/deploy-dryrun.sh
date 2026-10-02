@@ -6,10 +6,11 @@
 # target program). LOADER=js SKIP_PREFLIGHT=1 rehearses the path that needs no
 # account reads.
 # Nothing leaves this machine. Requires the Agave CLI v4.3.0 and Node 20+.
+# BULKHEAD_DRYRUN_DIR selects where the disposable validator ledger and keys go.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-D=target/dryrun
+D="${BULKHEAD_DRYRUN_DIR:-target/dryrun}"
 PORT="${PORT:-18999}"
 RPC="http://127.0.0.1:$PORT"
 rm -rf "$D"
@@ -77,9 +78,12 @@ node cloud/deploy/vault-check.mjs "$RPC" "$D/market" | grep -E "absolute caps|at
 
 echo "== the deployed programs must run exactly the local build"
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
-# A fresh Vault keypair is not the devnet Vault, so the deployed Harbor is the
-# side build. The canonical target/deploy binary stays bound to the devnet Vault.
+# A non-devnet Vault gets a side-built Harbor in the market directory. When the
+# configured Vault id is the devnet id, deploy.sh uses the canonical binary.
 HARBOR_SO="$D/market/bulkhead_harbor.so"
+if [ ! -f "$HARBOR_SO" ]; then
+  HARBOR_SO="target/deploy/bulkhead_harbor.so"
+fi
 SKIP_BUILD=1 scripts/verify-deployed.sh "$RPC" "$(id bulkhead_floor)=bulkhead_floor" "$(id bulkhead_vault)=bulkhead_vault" "$(id bulkhead_harbor)=$HARBOR_SO"
 echo "== the same check without account reads (cloud/deploy/loader.mjs, getProgramAccounts only)"
 node cloud/deploy/loader.mjs verify "$RPC" "$(solana-keygen pubkey "$D/deployer.json")" \

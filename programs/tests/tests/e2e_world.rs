@@ -61,7 +61,8 @@ fn save_key(dir: &str, name: &str, k: &Keypair) {
 #[test]
 #[ignore]
 fn build_world() {
-    let dir = format!("{}/../../target/e2e", env!("CARGO_MANIFEST_DIR"));
+    let dir = std::env::var("BULKHEAD_E2E_DIR")
+        .unwrap_or_else(|_| format!("{}/../../target/e2e", env!("CARGO_MANIFEST_DIR")));
     fs::create_dir_all(format!("{dir}/accounts")).unwrap();
     fs::create_dir_all(format!("{dir}/keys")).unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
