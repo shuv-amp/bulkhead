@@ -789,7 +789,9 @@ fn veto(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> Prog
         return Err(FloorError::NoProposal.into());
     }
     if !args.is_empty() {
-        let id: [u8; 8] = args.try_into().map_err(|_| FloorError::InvalidInstruction)?;
+        let id: [u8; 8] = args
+            .try_into()
+            .map_err(|_| FloorError::InvalidInstruction)?;
         if u64::from_le_bytes(id) != c.pending_id {
             return Err(FloorError::NoProposal.into());
         }
