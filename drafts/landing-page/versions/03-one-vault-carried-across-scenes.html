@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulkhead: a circuit breaker your admin can't turn off</title>
+<meta name="description" content="Bulkhead keeps Solana protocol vaults under an immutable program: own deposits return instantly, other outflow is capped at 2%/hour, loosening waits 72h.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Lora:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
+<script>
+  document.documentElement.classList.add('js');
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) document.documentElement.classList.add('still');
+</script>
+<style>
+/* Tokens: Bulkhead Pitch Deck v2 */
+:root {
+  --bg: #050608;
+  --paper: #F2F3F5;
+  --mist: #B8C0D8;
+  --cobalt: #2F5BFF;
+  --light: #ECEDEF;
+  --ink: #0B0D12;
+  --ink-soft: #4a5063;
+  --hair: rgba(184, 192, 216, 0.2);
+  --hair-strong: rgba(184, 192, 216, 0.38);
+  --serif: "Lora", Georgia, serif;
+  --sans: "Instrument Sans", system-ui, sans-serif;
+  --out: cubic-bezier(0.23, 1, 0.32, 1);
+  --gutter: clamp(20px, 5vw, 80px);
+}
+* { box-sizing: border-box; margin: 0; }
+html { background: var(--bg); color: var(--paper); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+html.lenis, html.lenis body { height: auto; }
+.lenis.lenis-smooth { scroll-behavior: auto !important; }
+body { overflow-x: clip; }
+/* Film grain, drifting a few frames a second */
+body::after {
+  content: ""; position: fixed; inset: -10%; pointer-events: none; z-index: 50; opacity: .07;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
+  animation: grain 1s steps(4) infinite;
+}
+@keyframes grain { 0% { transform: translate(0, 0); } 25% { transform: translate(-3%, 2%); } 50% { transform: translate(2%, -3%); } 75% { transform: translate(-2%, -1%); } 100% { transform: translate(0, 0); } }
+a { color: inherit; }
+p, h1, h2 { text-wrap: pretty; }
+:focus-visible { outline: 2px solid var(--paper); outline-offset: 3px; }
+
+/* Chrome */
+.nav { position: absolute; top: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 24px var(--gutter); font-size: 13px; }
+.wordmark { font-family: var(--serif); font-size: 15px; letter-spacing: .14em; text-decoration: none; }
+.nav-links { display: flex; gap: 28px; color: var(--mist); }
+.nav-links a { text-decoration: none; transition: color 150ms ease-out; }
+.nav-links a:hover { color: var(--paper); }
+.label { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--mist); line-height: 1.6; }
+.cta { display: inline-flex; align-items: center; gap: 12px; height: 52px; padding: 0 26px 0 20px; border: 0; border-radius: 999px; background: var(--cobalt); color: #fff; font: 500 16px/1 var(--sans); cursor: pointer; transition: transform 160ms var(--out), background-color 160ms ease-out; }
+.cta:hover { background: #4469ff; }
+.cta:active { transform: scale(0.97); }
+.cta .tri { width: 0; height: 0; border-left: 9px solid #fff; border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
+.dock { position: fixed; right: var(--gutter); bottom: 24px; z-index: 40; height: 44px; font-size: 14px; padding: 0 20px 0 16px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 200ms ease-out, transform 200ms var(--out), background-color 160ms ease-out; }
+.dock[data-show] { opacity: 1; transform: none; pointer-events: auto; }
+.glow { position: absolute; pointer-events: none; border-radius: 50%; background: radial-gradient(closest-side, rgba(47, 91, 255, .55), rgba(47, 91, 255, 0)); filter: blur(30px); }
+
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes away { to { opacity: 0; transform: scale(.985); visibility: hidden; } }
+@keyframes breathe { from { transform: scale(1); opacity: 1; } to { transform: scale(1.08); opacity: .8; } }
+.rise { animation: rise 700ms var(--out) both; animation-delay: var(--d, 0ms); }
+
+/* ---------- The stage: scenes share one fixed frame and dissolve into each other ---------- */
+main { position: relative; z-index: 2; }
+.stage { position: relative; }
+.frame { position: sticky; top: 0; height: 100svh; overflow: hidden; }
+.scene { position: absolute; inset: 0; display: grid; align-content: center; padding: 96px var(--gutter); opacity: 0; }
+.scene.center { justify-items: center; text-align: center; }
+.content { position: relative; display: grid; gap: 28px; justify-items: inherit; will-change: transform; }
+.js [data-in], .js [data-scale] { opacity: 0; }
+.js [data-wipe] { clip-path: inset(0 0 100% 0); }
+
+/* Fixed layers behind the scenes: the light, and the vault */
+.sun { position: fixed; inset: 0; z-index: 0; background: var(--light); opacity: 0; pointer-events: none; will-change: opacity; }
+
+/* Hero: Prologue */
+.hero { padding: 0 var(--gutter); align-content: stretch; opacity: 1; }
+.hero .glow { width: 1300px; height: 520px; left: -200px; bottom: -330px; animation: fade 1600ms ease-out 3.2s both, breathe 9s ease-in-out 5s infinite alternate; }
+.open { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 22px; animation: away 500ms ease-out 3s both; }
+.open .num { font: 500 clamp(56px, 11vw, 168px)/1 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -.035em; }
+.open .num span { color: var(--mist); }
+.hero-main { position: relative; min-height: 100svh; display: grid; grid-template-rows: 1fr auto; padding: 120px 0 56px; }
+.hero h1 { align-self: center; font: 500 clamp(44px, 7.6vw, 124px)/.98 var(--serif); text-transform: uppercase; letter-spacing: -.015em; max-width: 14ch; }
+.hero h1 i { font-style: italic; text-transform: none; color: var(--mist); }
+.recap { position: absolute; top: 84px; left: 0; max-width: 680px; font-size: 14px; line-height: 1.5; color: var(--mist); }
+.recap b { color: var(--paper); font-weight: 500; }
+.hero-bottom { display: flex; justify-content: space-between; align-items: end; gap: 40px; flex-wrap: wrap; }
+.hero-bottom p { max-width: 520px; font-size: 18px; line-height: 1.55; color: var(--mist); margin-bottom: 22px; }
+.hero-bottom .label { text-align: right; }
+.skip { position: absolute; right: var(--gutter); bottom: 28px; z-index: 5; background: none; border: 0; color: var(--mist); font: 12px var(--sans); letter-spacing: .14em; text-transform: uppercase; cursor: pointer; animation: away 300ms ease-out 3s both; }
+.skip:hover { color: var(--paper); }
+.hero[data-skip] .open, .hero[data-skip] .skip { display: none; }
+.hero[data-skip] .rise, .hero[data-skip] .glow { animation-delay: 0ms !important; animation-duration: 400ms; }
+
+/* Type */
+.big { font: 500 clamp(80px, 15vw, 220px)/.92 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+.big .dim { color: var(--mist); }
+.big .line { display: block; font-size: .42em; letter-spacing: -.02em; margin-top: .25em; }
+h2 { font: 500 clamp(40px, 6.4vw, 104px)/1 var(--serif); text-transform: uppercase; letter-spacing: -.012em; max-width: 15ch; }
+h2 i { font-style: italic; text-transform: none; color: var(--mist); }
+h2 .part { display: block; padding-bottom: .06em; }
+.lede { max-width: 560px; font-size: 18px; line-height: 1.6; color: var(--mist); }
+.lede b { color: var(--paper); font-weight: 500; }
+.slot { color: var(--mist); font-style: italic; }
+.narrow { max-width: 52vw; }
+
+/* Light scenes */
+.light { color: var(--ink); }
+.light .label { color: #5a6072; }
+.light h2 i { color: var(--cobalt); }
+.light .lede { color: var(--ink-soft); }
+.light .lede b { color: var(--ink); }
+.light .big .dim { color: #8a90a3; }
+
+.vault-scene .content { padding-left: 46vw; justify-items: start; }
+.freeze { display: grid; grid-template-columns: repeat(3, auto); gap: 6px 36px; justify-content: start; margin-top: 8px; }
+.freeze b { font: 500 30px var(--sans); font-variant-numeric: tabular-nums; }
+.freeze span { font-size: 13px; color: var(--mist); }
+.steps { list-style: none; padding: 0; display: grid; gap: clamp(16px, 2.6vh, 32px); }
+.steps li { display: grid; gap: 6px; }
+.steps strong { font: 500 clamp(36px, 5vw, 80px)/1 var(--serif); text-transform: uppercase; letter-spacing: -.012em; }
+.steps span { font-size: 17px; color: var(--mist); max-width: 520px; line-height: 1.5; }
+blockquote { font: 500 clamp(32px, 4.4vw, 68px)/1.12 var(--serif); max-width: 20ch; }
+blockquote i { color: var(--mist); }
+.w { display: inline-block; }
+
+/* ---------- The vault: one object for the whole film ---------- */
+.vessel { position: fixed; left: 50%; top: 50%; z-index: 1; width: 160px; height: 420px; margin: -210px 0 0 -80px; pointer-events: none; opacity: 0; will-change: transform, opacity;
+  --line: rgba(184, 192, 216, .5); --txt: #B8C0D8; --strong: #F2F3F5; }
+.tank { position: absolute; inset: 0; border: 1px solid var(--line); overflow: hidden; }
+.comp { position: absolute; top: 0; bottom: 0; width: 50%; overflow: hidden; }
+.comp.l { left: 0; } .comp.r { right: 0; }
+.fill { position: absolute; inset: 0; background: linear-gradient(180deg, #3a64ff 0%, #2448d8 100%); will-change: transform; }
+.wave { position: absolute; left: 0; top: -9px; width: 640px; height: 10px; fill: #3a64ff; animation: wave 6s linear infinite; }
+.comp.r .wave { animation-duration: 7.5s; margin-left: -60px; }
+@keyframes wave { to { transform: translateX(-320px); } }
+.frozen .wave { animation-play-state: paused; }
+.wall { position: absolute; left: 50%; bottom: 0; width: 2px; height: 100%; margin-left: -1px; background: var(--strong); transform-origin: bottom; transform: scaleY(0); will-change: transform; }
+.limit { position: absolute; left: 50%; right: -10px; top: 5%; border-top: 1px dashed var(--strong); opacity: 0; }
+.lid { position: absolute; left: -8px; right: -8px; top: -7px; height: 6px; background: var(--strong); opacity: 0; will-change: transform, opacity; }
+.frost { position: absolute; inset: 0; background: repeating-linear-gradient(135deg, rgba(184, 192, 216, .22) 0 2px, transparent 2px 9px); opacity: 0; display: grid; place-content: center; }
+.frost span { font-size: 11px; letter-spacing: .2em; color: #fff; background: rgba(5, 6, 8, .75); padding: 6px 8px; }
+.lanes { position: absolute; left: 0; right: 0; top: -30px; display: flex; font-size: 10px; letter-spacing: .14em; color: var(--txt); opacity: 0; }
+.lanes span { flex: 1; text-align: center; }
+.tix { position: absolute; left: calc(100% + 18px); bottom: 0; width: 132px; display: grid; gap: 6px; }
+.tk { display: flex; justify-content: space-between; border: 1px solid var(--line); padding: 6px 8px; font-size: 10px; letter-spacing: .08em; color: var(--txt); opacity: 0; }
+.tk b { color: var(--strong); font-weight: 500; }
+.meters { position: absolute; left: 0; top: calc(100% + 20px); width: 340px; display: flex; gap: 32px; opacity: 0; }
+.meters .label { color: var(--txt); }
+.meters b { display: block; font: 500 28px var(--sans); font-variant-numeric: tabular-nums; color: var(--strong); }
+.meters .paid b { color: #6f8cff; }
+.lock { position: absolute; left: 50%; top: -96px; width: 64px; height: 64px; margin-left: -32px; opacity: 0; }
+.lock circle { fill: none; stroke-width: 2; }
+.lock .track-c { stroke: var(--line); }
+.lock .arc { stroke: var(--strong); stroke-dasharray: 182.2; stroke-dashoffset: 182.2; transform: rotate(-90deg); transform-origin: 32px 32px; }
+.lock text { fill: var(--strong); font: 500 13px var(--sans); text-anchor: middle; }
+
+/* FAQ is for reading: normal flow, no pin */
+.faq-scene { position: relative; padding: 140px var(--gutter); background: var(--bg); }
+.faq { max-width: 860px; margin: 0 auto; }
+.faq h2 { margin-bottom: 36px; }
+details { border-top: 1px solid var(--hair); }
+details:last-child { border-bottom: 1px solid var(--hair); }
+summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; gap: 24px; padding: 22px 0; font-size: 20px; font-weight: 500; transition: color 150ms ease-out; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: "+"; color: var(--mist); font-weight: 400; transition: transform 200ms var(--out); }
+details[open] summary::after { transform: rotate(45deg); }
+@media (hover: hover) and (pointer: fine) { summary:hover { color: var(--mist); } }
+details p { padding: 0 0 24px; max-width: 680px; color: var(--mist); font-size: 17px; line-height: 1.6; }
+.js .reveal { opacity: 0; transform: translateY(16px); transition: opacity 700ms var(--out), transform 700ms var(--out); }
+.js .reveal.in { opacity: 1; transform: none; }
+
+.final .content { margin-top: 20svh; }
+.final .glow { width: 1100px; height: 520px; left: 50%; bottom: -360px; margin-left: -550px; opacity: .35; }
+footer { position: relative; z-index: 2; background: var(--light); color: var(--ink-soft); display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; padding: 28px var(--gutter) 32px; border-top: 1px solid rgba(11, 13, 18, .12); font-size: 13px; }
+footer nav { display: flex; gap: 24px; }
+
+dialog { border: 1px solid var(--hair-strong); background: #0b0d12; color: var(--paper); padding: 0; width: min(960px, 92vw); }
+dialog::backdrop { background: rgba(0, 0, 0, .8); }
+dialog[open] { animation: rise 220ms var(--out); }
+.player { aspect-ratio: 16 / 9; display: grid; place-content: center; text-align: center; gap: 10px; border-bottom: 1px solid var(--hair); padding: 24px; }
+.player strong { font: 500 18px var(--sans); }
+.dialog-foot { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; font-size: 13px; color: var(--mist); }
+.dialog-foot button { background: none; border: 1px solid var(--hair-strong); color: var(--paper); border-radius: 999px; height: 32px; padding: 0 14px; font: inherit; cursor: pointer; }
+
+@media (max-width: 720px) {
+  .recap { position: static; margin-bottom: 24px; }
+  .hero-main { padding-top: 92px; grid-template-rows: auto 1fr auto; }
+  .hero-bottom .label { text-align: left; }
+  .scene:not(.hero) { align-content: start; padding: 13svh var(--gutter) 40px; }
+  .narrow { max-width: none; }
+  .vault-scene .content { padding-left: 0; padding-top: 44svh; gap: 16px; }
+  .vault-scene .lede { font-size: 15px; }
+  .freeze { gap: 4px 18px; }
+  .freeze b { font-size: 22px; }
+  .final .content { margin-top: 26svh; }
+}
+
+/* Reduced motion: no pinning, no travelling vault, every scene finished and in order */
+.still .stage { height: auto !important; }
+.still .frame { position: relative; height: auto; overflow: visible; }
+.still .scene { position: relative; min-height: 100svh; opacity: 1; }
+.still .scene.light { background: var(--light); }
+.still .vessel, .still .sun { display: none; }
+.still .vault-scene .content, .still .final .content { padding: 0; margin: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .rise, .hero .glow, dialog[open] { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; }
+  body::after, .wave { animation: none; }
+  .open, .skip { display: none; }
+  .js .reveal { transform: none; transition: opacity 300ms ease; }
+}
+</style>
+</head>
+<body>
+
+<div class="sun" aria-hidden="true"></div>
+
+<div class="vessel" aria-hidden="true">
+  <svg class="lock" viewBox="0 0 64 64"><circle class="track-c" cx="32" cy="32" r="29"/><circle class="arc" cx="32" cy="32" r="29"/><text x="32" y="37" data-lock-text>0h</text></svg>
+  <div class="lanes"><span>BACKED</span><span>UNBACKED</span></div>
+  <div class="tank">
+    <div class="comp l"><div class="fill"><svg class="wave" viewBox="0 0 640 10" preserveAspectRatio="none"><path d="M0 5 Q 40 0 80 5 T 160 5 T 240 5 T 320 5 T 400 5 T 480 5 T 560 5 T 640 5 V10 H0Z"/></svg></div></div>
+    <div class="comp r"><div class="fill"><svg class="wave" viewBox="0 0 640 10" preserveAspectRatio="none"><path d="M0 5 Q 40 0 80 5 T 160 5 T 240 5 T 320 5 T 400 5 T 480 5 T 560 5 T 640 5 V10 H0Z"/></svg></div></div>
+    <div class="wall"></div>
+    <div class="limit"></div>
+    <div class="frost"><span>FROZEN</span></div>
+  </div>
+  <div class="lid"></div>
+  <div class="tix">
+    <div class="tk"><span>TICKET</span><b>queued</b></div><div class="tk"><span>TICKET</span><b>queued</b></div><div class="tk"><span>TICKET</span><b>queued</b></div>
+    <div class="tk"><span>TICKET</span><b>queued</b></div><div class="tk"><span>TICKET</span><b>queued</b></div><div class="tk"><span>TICKET</span><b>queued</b></div>
+  </div>
+  <div class="meters">
+    <div><span class="label">Attacker requests</span><b data-requested>0%</b></div>
+    <div class="paid"><span class="label">Paid out this hour</span><b data-paid>0%</b></div>
+  </div>
+</div>
+
+<main>
+<section class="stage" data-stage>
+  <div class="frame">
+
+    <!-- 0 · Prologue -->
+    <div class="scene hero" id="top" data-len="1.2">
+      <header class="nav">
+        <a class="wordmark" href="#top">[ BULKHEAD ]</a>
+        <nav class="nav-links" aria-label="Site"><a href="https://github.com/shuv-amp/bulkhead-temp">Code</a><a href="https://github.com/shuv-amp/bulkhead-temp/tree/main/docs">Docs</a></nav>
+      </header>
+      <div class="glow"></div>
+      <div class="open" aria-hidden="true">
+        <div class="label rise" style="--d:200ms">Drift · 1 April 2026</div>
+        <div class="num rise" style="--d:350ms">$285,000,000</div>
+        <div class="num rise" style="--d:1100ms"><span>12 minutes</span></div>
+        <div class="label rise" style="--d:1500ms">reported · Chainalysis, BlockSec</div>
+      </div>
+      <button class="skip" type="button">Skip</button>
+      <div class="hero-main content">
+        <p class="recap rise" style="--d:3300ms"><b>Drift lost $285M in about 12 minutes.</b> It had withdrawal limits. The attacker got admin power and raised them.</p>
+        <h1 class="rise" style="--d:3450ms">A circuit breaker <i>the admin</i> can't turn off.</h1>
+        <div class="hero-bottom rise" style="--d:3700ms">
+          <div>
+            <p>Your own deposit always comes back instantly. Everything else leaves at most 2% an hour and 5% a day. Loosening any limit waits 72 hours.</p>
+            <button class="cta" type="button" data-play><span class="tri"></span>Watch the 3-minute demo</button>
+          </div>
+          <div class="label">Open source · live on Solana devnet · unaudited</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1 · the count climbs; a vault waits at the edge -->
+    <div class="scene center" data-len="1.6" data-vault="census">
+      <div class="content">
+        <span class="label" data-in=".04,.18">measured · solgov census, 26 Sep 2026 · tracked protocols</span>
+        <div class="big" data-scale=".06,.26" aria-label="37 of 54"><span data-count="37" data-at=".1,.5" aria-hidden="true">37</span> <span class="dim" aria-hidden="true">of 54</span></div>
+        <p class="lede" data-in=".46,.62">multisigs governing tracked Solana protocols have <b>no timelock</b>. The longest is 24 hours. None waits 72. A limit the admin controls doesn't protect you from the admin.</p>
+      </div>
+    </div>
+
+    <!-- 2 · "of 87" waits for its one, while the vault leaks -->
+    <div class="scene center" data-len="1.6" data-vault="leak">
+      <div class="content">
+        <span class="label" data-in=".04,.18">reported · Zhou et al., IEEE S&amp;P 2023 · 183 incidents, mostly Ethereum and BSC</span>
+        <div class="big" aria-label="1 of 87"><span data-scale=".32,.44" aria-hidden="true">1</span> <span class="dim" data-in=".06,.2" aria-hidden="true">of 87</span></div>
+        <p class="lede" data-in=".48,.64">hacked protocols with a pause button pressed it within the first hour. <b>44% of attacks finish inside a single transaction.</b> The brake has to sit in the path of the money.</p>
+      </div>
+    </div>
+
+    <!-- 3 · LIGHT: the bulkhead rises inside the vault -->
+    <div class="scene light" data-len="2" data-vault="split">
+      <div class="content narrow">
+        <span class="label" data-in=".16,.28">How Bulkhead works</span>
+        <h2><span class="part" data-wipe=".2,.38">The protocol decides who gets paid.</span> <span class="part" data-wipe=".44,.62"><i>Bulkhead</i> decides how fast.</span></h2>
+        <p class="lede" data-in=".6,.74">Every token movement goes through one small, immutable program. Paying an owner back what their own ledger supports is never throttled. Everything else is rate-limited.</p>
+      </div>
+    </div>
+
+    <!-- 4 · the backed lane pays at once -->
+    <div class="scene" data-len="1.4" data-vault="instant">
+      <div class="content narrow">
+        <span class="label" data-in=".04,.18">G2 · the backed lane</span>
+        <div class="big" data-in=".3,.31">Instant</div>
+        <p class="lede" data-in=".38,.54"><b>Your own deposit always comes back.</b> Withdrawing what you put in never touches the limit, needs no price feed and can't be frozen.</p>
+      </div>
+    </div>
+
+    <!-- 5 · the attack: 100% requested, 2% paid, the rest queued -->
+    <div class="scene vault-scene" data-len="2.6" data-vault="attack">
+      <div class="content">
+        <span class="label" data-in=".04,.14">G1 · the unbacked lane</span>
+        <h2 style="font-size:clamp(36px,5vw,80px)"><span class="part" data-wipe=".06,.18">2% an hour.</span><span class="part" data-wipe=".12,.24"><i>5% a day.</i></span></h2>
+        <p class="lede" data-in=".18,.3">A compromised admin gets a budget, not the vault. Unbacked money leaves no faster, even with the admin and upgrade keys stolen. The rest becomes a public ticket that waits at least 6 hours.</p>
+        <div data-in=".7,.8">
+          <span class="label">model · if a guardian freezes within</span>
+          <div class="freeze"><b>~2%</b><b>4%</b><b>10%</b><span>2 minutes</span><span>1 hour</span><span>24 hours</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6 · LIGHT: the 72-hour lock -->
+    <div class="scene center light" data-len="1.8" data-vault="lock">
+      <div class="content narrow">
+        <span class="label" data-in=".16,.28">G4 · a constant in the code</span>
+        <div class="big" data-scale=".18,.34" aria-label="72 hours"><span data-count="72" data-at=".22,.62" aria-hidden="true">72</span> <span class="dim" aria-hidden="true">hours</span></div>
+        <p class="lede" data-in=".6,.74"><b>Tighten now, loosen later.</b> Tightening applies instantly. Loosening any limit waits at least 72 hours, in public, and any guardian can veto it. Drift's attacker would have waited three days in plain sight.</p>
+      </div>
+    </div>
+
+    <!-- 7 · Stop: the vault freezes -->
+    <div class="scene" data-len="1.6" data-vault="freeze">
+      <div class="content narrow">
+        <span class="label" data-in=".04,.18">G5 · guardians</span>
+        <h2><span class="part" data-wipe=".08,.24">Stop.</span> <span class="part" data-wipe=".36,.52"><i>Never steal.</i></span></h2>
+        <p class="lede" data-in=".52,.66">Guardians can freeze, cancel, extend, veto and abort. No guardian instruction can move tokens or choose a recipient.</p>
+      </div>
+    </div>
+
+    <!-- 8 · Floor (no vault: Floor guards the upgrade key, not withdrawals) -->
+    <div class="scene center" data-len="1.6" data-vault="away">
+      <div class="content">
+        <span class="label" data-in=".04,.18">Floor · for programs not ready to move their vaults</span>
+        <div class="big"><span data-scale=".1,.26">1</span> <span class="dim" data-in=".24,.4">transaction</span></div>
+        <p class="lede" data-in=".44,.6">Point your program's upgrade authority at Floor, with no code changes. <b>Every upgrade then waits at least 72 hours in public</b>, and any single guardian can stop the program in one transaction. Funds and accounts stay where they are.</p>
+      </div>
+    </div>
+
+    <!-- 9 · Integration: the last step seals the vault -->
+    <div class="scene" data-len="2" data-vault="seal">
+      <div class="content narrow">
+        <span class="label" data-in=".04,.16">Integration</span>
+        <ol class="steps">
+          <li data-in=".08,.24"><strong>Hand over custody.</strong><span>Move vault token accounts under Bulkhead, or start with Floor: one transaction, no custody.</span></li>
+          <li data-in=".3,.46"><strong>Route every move.</strong><span>About 40 lines of CPI. The protocol keeps all of its business logic.</span></li>
+          <li data-in=".52,.68"><strong>Seal.</strong><span>From then on, the limits belong to the program, not the admin.</span></li>
+        </ol>
+      </div>
+    </div>
+
+    <!-- 10 · Proof: the loss shrinks to the modeled number -->
+    <div class="scene center" data-len="1.6" data-vault="away">
+      <div class="content">
+        <span class="label" data-in=".02,.14">model · Drift's reported losses, Bulkhead defaults, 2-minute freeze · assumes $550M TVL</span>
+        <div class="big" data-scale=".04,.18" aria-label="$11.4M of $285M"><span data-count="11.4" data-from="285" data-decimals="1" data-prefix="$" data-suffix="M" data-at=".14,.52" aria-hidden="true">$11.4M</span><span class="dim line" data-in=".5,.62" aria-hidden="true">of $285M</span></div>
+        <p class="lede" data-in=".56,.7">Modeled, not a claim that Drift would have been saved. The full replay, one attack transaction against both protocols with devnet signatures, is in the demo.</p>
+      </div>
+    </div>
+
+    <!-- 11 -->
+    <div class="scene center" data-len="1.6" data-vault="away">
+      <div class="content">
+        <span class="label" data-in=".02,.14">measured · scripts/check.sh</span>
+        <div class="big" data-scale=".04,.18" aria-label="6.9 million"><span data-count="6.9" data-decimals="1" data-suffix="M" data-at=".08,.48" aria-hidden="true">6.9M</span></div>
+        <p class="lede" data-in=".44,.6">random cases where the Rust core and an independent Python model agree exactly. <b>Every rule is written three times</b>: Rust, Python and property tests. The harness found a real bug in our own code: <span class="slot">{one line on the bug}</span>.</p>
+      </div>
+    </div>
+
+    <!-- 12 -->
+    <div class="scene" data-len="1.4" data-vault="away">
+      <div class="content">
+        <span class="label" data-in=".04,.18">Shuvam · program engineer · author of an official BIP-352 test vector</span>
+        <blockquote data-words=".12,.62">Every bug I found had already shipped. <i>Bulkhead is for the one nobody finds.</i></blockquote>
+      </div>
+    </div>
+
+    <!-- 13 · the live line, beside a sealed vault -->
+    <div class="scene" data-len="1.4" data-vault="calm" data-end>
+      <div class="content narrow">
+        <span class="label" data-in=".04,.18">Live from devnet · display prices only, never used on-chain</span>
+        <h2 style="font-size:clamp(36px,5vw,80px)"><span class="part" data-wipe=".1,.3">Worst case right now: <span class="slot">${X}</span> instantly, then <span class="slot">${Y}</span> an hour.</span></h2>
+        <p class="lede" data-in=".3,.46">At most <span class="slot">${Z}</span> a day, until a guardian freezes. Every Bulkhead vault publishes this line.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="faq-scene">
+  <div class="faq reveal">
+    <h2>Questions</h2>
+    <details><summary>Isn't this just a rate limiter?</summary><p>Drift had a rate limiter; the admin controlled it. Bulkhead's limit sits outside the admin's reach. It also tells the difference between returning your own deposit, which is never limited, and paying out someone else's money, which is.</p></details>
+    <details><summary>Why not just pause?</summary><p>In the largest study of DeFi hacks, one of 87 protocols with a pause button used it within the first hour. 44% of attacks are a single transaction. Bulkhead includes a stop button, but the limit is what works inside the transaction.</p></details>
+    <details><summary>Does it slow normal users down?</summary><p>No. Deposits, withdrawals of your own funds and ordinary borrows never touch the limiter.</p></details>
+    <details><summary>What if a guardian is malicious?</summary><p>A guardian can delay unbacked payouts by freezing for up to 24 hours per call. It can't move funds, choose a recipient or block anyone's own deposit. Only live guardians count, and unfreezing needs a live quorum.</p></details>
+    <details><summary>What about a slow drain under the limit?</summary><p>That's what the daily cap is for. With nobody watching for a full day, 10% leaves, not everything. Half a vault takes nine days. Guardians and alerts handle the rest.</p></details>
+    <details><summary>What if Bulkhead itself has a bug?</summary><p>That's the biggest risk, and the reason every rule is stated three ways and checked on millions of cases. Before mainnet: audits, TVL caps, then burning Bulkhead's own upgrade key.</p></details>
+    <details><summary>Why would a large protocol move custody?</summary><p>It probably won't move first. Floor needs no custody move: one transaction puts a 72-hour floor under the upgrade key. Vault starts with new launches and relaunches, where migration costs nothing.</p></details>
+    <details><summary>What can't it do?</summary><p>It doesn't detect attacks, protect user wallets, protect AMM pools or run an oracle. It buys time; people still have to use that time.</p></details>
+    <details><summary>Is it audited?</summary><p>Not yet. It runs on devnet, the code is open source under Apache-2.0, and SECURITY.md says plainly what is unaudited.</p></details>
+    <details><summary>How does it make money?</summary><p>The core is free and immutable. Protocols pay for Bulkhead Cloud: a hosted guardian that freezes within minutes, calibration on their own flows, a public worst-case attestation and STRIDE evidence ($2.5k–$10k a month).</p></details>
+  </div>
+</section>
+
+<section class="stage" data-stage>
+  <div class="frame">
+    <!-- 14 · LIGHT: the finale; the page stays in the light -->
+    <div class="scene center light final" data-len="1.4" data-vault="rest" data-stay>
+      <div class="glow" data-in=".3,.6"></div>
+      <div class="content">
+        <h2><span class="part" data-wipe=".2,.36">Three minutes. One transaction.</span> <span class="part" data-wipe=".3,.46"><i>Two outcomes.</i></span></h2>
+        <div data-in=".4,.52"><button class="cta" type="button" data-play><span class="tri"></span>Watch the 3-minute demo</button></div>
+        <p class="lede" data-in=".46,.58">Everything in it can be checked: open source, devnet signatures, one command to rerun the math. <a href="https://github.com/shuv-amp/bulkhead-temp">Read the code →</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <span>[ BULKHEAD ] · Apache-2.0 · Solana devnet · unaudited</span>
+  <nav aria-label="Footer"><a href="https://github.com/shuv-amp/bulkhead-temp">Code</a><a href="https://github.com/shuv-amp/bulkhead-temp/blob/main/SECURITY.md">Security</a></nav>
+</footer>
+
+<button class="cta dock" type="button" data-play><span class="tri"></span>Watch the demo</button>
+
+<dialog id="demo" aria-label="Bulkhead demo">
+  <div class="player">
+    <span class="label">Demo video · 3:00 · captioned</span>
+    <strong>[ Demo not recorded yet: S8, S1, S4/S9, S7/S10, status line ]</strong>
+  </div>
+  <div class="dialog-foot"><span>Esc to close</span><button type="button" data-close>Close</button></div>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/lenis@1.1.13/dist/lenis.min.js"></script>
+<script>
+const dialog = document.getElementById('demo');
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-play]')) dialog.showModal();
+  if (e.target.closest('[data-close]')) dialog.close();
+});
+
+// Prologue: skip on request, and only play once per session
+const hero = document.querySelector('.hero');
+try { if (sessionStorage.getItem('bh-prologue')) hero.setAttribute('data-skip', ''); } catch {}
+hero.querySelector('.skip').addEventListener('click', () => hero.setAttribute('data-skip', ''));
+setTimeout(() => { try { sessionStorage.setItem('bh-prologue', '1'); } catch {} }, 3500);
+
+const still = document.documentElement.classList.contains('still');
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const seg = (p, a, b) => clamp((p - a) / (b - a));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const range = (s) => s.split(',').map(Number);
+const FADE = 0.25; // scene units (1 unit = one screen of scroll) spent dissolving in or out
+
+/* Quote words arrive one by one */
+document.querySelectorAll('[data-words]').forEach((el) => {
+  const walk = (node) => [...node.childNodes].forEach((n) => {
+    if (n.nodeType === 3) {
+      const frag = document.createDocumentFragment();
+      n.textContent.split(/(\s+)/).forEach((w) => {
+        if (!w.trim()) { frag.append(w); return; }
+        const s = document.createElement('span'); s.className = 'w'; s.textContent = w; frag.append(s);
+      });
+      n.replaceWith(frag);
+    } else walk(n);
+  });
+  walk(el);
+});
+
+/* ---------- Scenes ---------- */
+const stages = [...document.querySelectorAll('[data-stage]')].map((el) => {
+  let at = 0;
+  const scenes = [...el.querySelectorAll('.scene')].map((s) => {
+    const len = +s.dataset.len;
+    const sc = {
+      el: s, start: at, len, end: at + len, vault: s.dataset.vault || 'away',
+      light: s.classList.contains('light'), stay: s.hasAttribute('data-stay'), isHero: s.classList.contains('hero'),
+      content: s.querySelector('.content'),
+      ins: [...s.querySelectorAll('[data-in]')].map((e) => ({ e, r: range(e.dataset.in) })),
+      scales: [...s.querySelectorAll('[data-scale]')].map((e) => ({ e, r: range(e.dataset.scale) })),
+      wipes: [...s.querySelectorAll('[data-wipe]')].map((e) => ({ e, r: range(e.dataset.wipe) })),
+      words: [...s.querySelectorAll('[data-words]')].map((e) => ({ r: range(e.dataset.words), ws: [...e.querySelectorAll('.w')] })),
+      counts: [...s.querySelectorAll('[data-count]')].map((e) => ({
+        e, r: range(e.dataset.at), to: +e.dataset.count, from: +(e.dataset.from || 0),
+        dec: +(e.dataset.decimals || 0), pre: e.dataset.prefix || '', suf: e.dataset.suffix || '',
+      })),
+    };
+    at += len;
+    return sc;
+  });
+  if (!still) el.style.height = `calc(${at} * 100svh + 100svh)`;
+  return { el, scenes, total: at };
+});
+
+function paintScene(sc, p, vis) {
+  sc.el.style.opacity = vis;
+  sc.el.style.visibility = vis > 0.001 ? 'visible' : 'hidden';
+  sc.el.style.pointerEvents = vis > 0.5 ? 'auto' : 'none';
+  if (sc.isHero) return;
+  // The whole scene drifts upward slowly while it plays: the camera never fully stops
+  if (sc.content) sc.content.style.transform = still ? '' : `translateY(${(0.5 - p) * 40}px)`;
+  for (const { e, r } of sc.ins) {
+    const k = easeOut(seg(p, r[0], r[1]));
+    e.style.opacity = k;
+    e.style.transform = k < 1 ? `translateY(${(1 - k) * 18}px)` : '';
+  }
+  for (const { e, r } of sc.scales) {
+    const k = easeOut(seg(p, r[0], r[1]));
+    e.style.opacity = k;
+    e.style.transform = k < 1 ? `scale(${1.1 - 0.1 * k})` : '';
+    e.style.display = 'inline-block';
+  }
+  for (const { e, r } of sc.wipes) {
+    const k = easeOut(seg(p, r[0], r[1]));
+    e.style.clipPath = k < 1 ? `inset(0 0 ${(1 - k) * 100}% 0)` : 'none';
+    e.style.transform = k < 1 ? `translateY(${(1 - k) * 0.35}em)` : '';
+  }
+  for (const { r, ws } of sc.words) ws.forEach((w, i) => {
+    const a = lerp(r[0], r[1], i / ws.length);
+    const k = easeOut(seg(p, a, a + 0.08));
+    w.style.opacity = k;
+    w.style.transform = k < 1 ? `translateY(${(1 - k) * 0.3}em)` : '';
+  });
+  for (const c of sc.counts) {
+    const v = c.from + (c.to - c.from) * easeOut(seg(p, c.r[0], c.r[1]));
+    c.e.textContent = c.pre + v.toFixed(c.dec) + c.suf;
+  }
+}
+
+/* ---------- The vault's state in each scene, as a function of scene progress ---------- */
+const BASE = { x: 34, y: 0, s: 0.5, o: 0, L: 1, R: 1, wall: 0, lanes: 0, limit: 0, tickets: 0, meters: 0, req: 0, lock: 0, lockOn: 0, frost: 0, lid: 0 };
+const VAULT = {
+  away:    () => ({ x: 40, y: 6, s: 0.4, o: 0 }),
+  census:  () => ({ x: 37, y: 4, s: 0.42, o: 0.55 }),
+  leak:    (p) => { const w = 1 - 0.52 * easeOut(seg(p, 0.3, 0.85)); return { x: 37, y: 4, s: 0.42, o: 0.55, L: w, R: w }; },
+  split:   (p) => ({ x: 27, y: 2, s: 0.95, o: 1, wall: easeOut(seg(p, 0.46, 0.64)), lanes: seg(p, 0.58, 0.7) }),
+  instant: (p) => ({ x: 27, y: 2, s: 0.9, o: 1, wall: 1, lanes: 1, L: p < 0.3 ? 1 : 0.55 }),
+  attack:  (p) => {
+    const req = 100 * seg(p, 0.16, 0.66);
+    return { x: -27, y: -4, s: 1, o: 1, wall: 1, lanes: 1, L: 1, R: 1 - Math.min(req, 2) / 100, limit: 1, meters: seg(p, 0.06, 0.14), req, tickets: seg(req, 4, 100) * 6 };
+  },
+  lock:    (p) => ({ x: 36, y: 6, s: 0.6, o: 1, wall: 1, lanes: 0, lockOn: seg(p, 0.14, 0.24), lock: easeOut(seg(p, 0.22, 0.62)) }),
+  freeze:  (p) => ({ x: 28, y: 2, s: 0.85, o: 1, wall: 1, frost: easeOut(seg(p, 0.1, 0.26)) }),
+  seal:    (p) => ({ x: 30, y: 2, s: 0.85, o: 1, wall: 1, lid: easeOut(seg(p, 0.54, 0.68)) }),
+  calm:    () => ({ x: 30, y: 2, s: 0.8, o: 1, wall: 1, lid: 1 }),
+  rest:    () => ({ x: 0, y: -27, s: 0.36, o: 1, wall: 1, lid: 1 }),
+};
+const narrowScreen = () => innerWidth < 720;
+function vaultAt(sc, p) {
+  const v = { ...BASE, ...VAULT[sc.vault](p) };
+  v.y -= (p - 0.5) * 3; // slow drift, so the camera keeps moving inside a scene
+  if (narrowScreen()) {
+    if (sc.vault === 'attack') Object.assign(v, { x: -14, y: -22, s: 0.5 });
+    else if (sc.vault === 'rest') Object.assign(v, { x: 0, y: -30, s: 0.3 });
+    else Object.assign(v, { x: 0, y: 30, s: Math.min(v.s, 0.42) });
+  }
+  return v;
+}
+const mix = (a, b, t) => { const o = {}; for (const k in a) o[k] = lerp(a[k], b[k], t); return o; };
+
+const vessel = document.querySelector('.vessel');
+const V = {
+  fillL: vessel.querySelector('.comp.l .fill'), fillR: vessel.querySelector('.comp.r .fill'),
+  wall: vessel.querySelector('.wall'), lanes: vessel.querySelector('.lanes'), limit: vessel.querySelector('.limit'),
+  tks: [...vessel.querySelectorAll('.tk')], meters: vessel.querySelector('.meters'),
+  req: vessel.querySelector('[data-requested]'), paid: vessel.querySelector('[data-paid]'),
+  lock: vessel.querySelector('.lock'), arc: vessel.querySelector('.arc'), lockText: vessel.querySelector('[data-lock-text]'),
+  frost: vessel.querySelector('.frost'), lid: vessel.querySelector('.lid'),
+};
+function paintVault(v, sun) {
+  vessel.style.opacity = v.o;
+  vessel.style.transform = `translate(${v.x}vw, ${v.y}vh) scale(${v.s})`;
+  // Outline and text follow the light: pale on dark, ink on light
+  const c = (d, l) => Math.round(lerp(d, l, sun));
+  vessel.style.setProperty('--line', `rgba(${c(184, 11)}, ${c(192, 13)}, ${c(216, 18)}, .5)`);
+  vessel.style.setProperty('--txt', `rgb(${c(184, 74)}, ${c(192, 80)}, ${c(216, 99)})`);
+  vessel.style.setProperty('--strong', `rgb(${c(242, 11)}, ${c(243, 13)}, ${c(245, 18)})`);
+  V.fillL.style.transform = `translateY(${(1 - v.L * 0.97) * 100}%)`;
+  V.fillR.style.transform = `translateY(${(1 - v.R * 0.97) * 100}%)`;
+  V.wall.style.transform = `scaleY(${v.wall})`;
+  V.lanes.style.opacity = v.lanes;
+  V.limit.style.opacity = v.limit;
+  V.tks.forEach((tk, i) => {
+    const k = easeOut(clamp(v.tickets - i));
+    tk.style.opacity = k;
+    tk.style.transform = k < 1 ? `translateY(${(1 - k) * 10}px)` : '';
+  });
+  V.meters.style.opacity = v.meters;
+  V.req.textContent = Math.round(v.req) + '%';
+  const paid = Math.min(v.req, 2);
+  V.paid.textContent = (paid < 2 ? paid.toFixed(1) : '2') + '%';
+  V.lock.style.opacity = v.lockOn;
+  V.arc.style.strokeDashoffset = 182.2 * (1 - v.lock);
+  V.lockText.textContent = Math.round(72 * v.lock) + 'h';
+  V.frost.style.opacity = v.frost;
+  vessel.classList.toggle('frozen', v.frost > 0.5);
+  V.lid.style.opacity = v.lid;
+  V.lid.style.transform = `translateY(${-(1 - v.lid) * 60}px)`;
+}
+
+const sun = document.querySelector('.sun');
+const dock = document.querySelector('.dock');
+
+function frame() {
+  const vh = innerHeight;
+  let vault = null, sunO = 0, inFinale = false, inStage = false;
+
+  for (const st of stages) {
+    const top = st.el.getBoundingClientRect().top;
+    const u = clamp(-top / vh, 0, st.total);
+    const live = top <= vh && top > -(st.total + 1) * vh;
+    st.scenes.forEach((sc, i) => {
+      const p = clamp((u - sc.start) / sc.len);
+      const fin = i === 0 ? 1 : seg(u, sc.start, sc.start + FADE);
+      const fout = sc.stay ? 1 : 1 - seg(u, sc.end - FADE, sc.end);
+      const vis = fin * fout;
+      paintScene(sc, p, vis);
+      if (sc.light) sunO = Math.max(sunO, live ? vis : 0);
+    });
+    if (!live || top > 0.5 * vh) continue;
+    inStage = true;
+    if (st === stages[stages.length - 1]) inFinale = true;
+
+    // Which scene owns the vault, and are we dissolving towards the next one?
+    const i = Math.min(st.scenes.length - 1, st.scenes.findIndex((s) => u < s.end) === -1 ? st.scenes.length - 1 : st.scenes.findIndex((s) => u < s.end));
+    const sc = st.scenes[i];
+    const p = clamp((u - sc.start) / sc.len);
+    const next = st.scenes[i + 1], prev = st.scenes[i - 1];
+    if (next && u > sc.end - FADE) {
+      vault = mix(vaultAt(sc, 1), vaultAt(next, 0), easeInOut(seg(u, sc.end - FADE, sc.end + FADE)));
+    } else if (prev && u < sc.start + FADE) {
+      vault = mix(vaultAt(prev, 1), vaultAt(sc, 0), easeInOut(seg(u, sc.start - FADE, sc.start + FADE)));
+    } else {
+      vault = vaultAt(sc, p);
+    }
+    // Leaving the stage entirely: the vault fades with the last scene
+    if (!next && !sc.stay) vault.o *= 1 - seg(u, sc.end - FADE, sc.end);
+  }
+
+  sun.style.opacity = sunO;
+  if (vault) paintVault(vault, sunO); else vessel.style.opacity = 0;
+  dock.toggleAttribute('data-show', inStage && !inFinale && scrollY > vh * 0.9);
+}
+
+if (still) {
+  stages.forEach((st) => st.scenes.forEach((sc) => paintScene(sc, 0.85, 1)));
+} else {
+  let lenis = null;
+  try { lenis = new Lenis({ lerp: 0.085, wheelMultiplier: 0.9 }); } catch {}
+  const loop = (t) => { if (lenis) lenis.raf(t); frame(); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+}
+
+// The FAQ arrives once, then stays put for reading
+const io = new IntersectionObserver((entries) => entries.forEach((en) => {
+  if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+}), { threshold: 0.1 });
+document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+</script>
+</body>
+</html>
