@@ -81,10 +81,11 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
   });
   const tx = Buffer.from(serializeTransaction(message, sigs)).toString("base64");
   const opts = { encoding: "base64", skipPreflight, preflightCommitment: "confirmed" };
-  // Every endpoint at once; the extras are best effort, the primary decides.
-  const extras = Promise.allSettled(rpcs.map((r) => r.call("sendTransaction", [tx, { ...opts, skipPreflight: true }])));
+  // Backups go out first and are never awaited: they still carry the
+  // transaction when the primary's send fails, and a hanging one cannot delay
+  // confirmation. The primary decides.
+  void Promise.allSettled(rpcs.map(async (r) => r.call("sendTransaction", [tx, { ...opts, skipPreflight: true }])));
   const signature = await rpc.call("sendTransaction", [tx, opts]);
-  await extras;
   for (let i = 0; i < 120; i++) {
     const st = (await rpc.call("getSignatureStatuses", [[signature]])).value[0];
     if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);

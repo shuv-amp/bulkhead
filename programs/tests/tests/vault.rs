@@ -53,6 +53,21 @@ impl World {
         w
     }
 
+    fn with_transfer_fee_mint() -> World {
+        let mut env = Env::new();
+        let m = Market::new(&mut env);
+        let (mint, mint_authority) = env.create_fee_mint(6, 1_000, 1_000_000 * USDC);
+        let usdc = m.create_vault_for(&mut env, mint, mint_authority, 6, Limits::default_limits(), USDC_FEED, token_2022());
+        let sol = m.create_vault(&mut env, 9, Limits::default_limits(), SOL_FEED, None);
+        let ix = m.upsert_asset_ix(&env, &usdc, &usdc_cfg());
+        env.ok(&[ix], &[&m.admin]);
+        let ix = m.upsert_asset_ix(&env, &sol, &sol_cfg());
+        env.ok(&[ix], &[&m.admin]);
+        let mut w = World { env, m, usdc, sol };
+        w.refresh_prices();
+        w
+    }
+
     /// USDC $1.00 ± 0.0002; SOL $150.00 ± 0.075 with EMA $151.00 (golden G-10).
     fn refresh_prices(&mut self) {
         let t = self.env.time;
@@ -554,6 +569,66 @@ fn imported_backing_must_be_covered_by_the_balance_at_seal() {
     assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
 }
 
+/// A pre-seal deposit covers `imported` by itself, so the old seal check
+/// (imported ≤ balance) passed while total backing claims were twice the tokens.
+#[test]
+fn pre_seal_deposits_cannot_hide_an_uncovered_import() {
+    let mut w = World::new();
+    let u = w.user();
+    w.deposit("usdc", &u, 1_000 * USDC);
+    let owner = Keypair::new().pubkey();
+    let import = w.m.vault_ix(
+        3,
+        &(1_000 * USDC).to_le_bytes(),
+        vec![
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.m.backing(&owner), false),
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    w.env.ok(&[import], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE, "2,000 of claims, 1,000 of tokens");
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    w.env.ok(&[ix], &[]);
+}
+
+#[test]
+fn harbor_will_not_sign_for_a_different_vault_program() {
+    let mut env = Env::new();
+    let harbor = Address::new_unique();
+    let wrong = Address::new_unique();
+    env.svm.add_program(wrong, &so("bulkhead_vault")).unwrap();
+    env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let caller = pda(&[b"bulkhead-caller"], &harbor);
+    let ix = solana_instruction::Instruction {
+        program_id: harbor,
+        accounts: vec![
+            AccountMeta::new_readonly(wrong, false),
+            AccountMeta::new_readonly(caller, false),
+        ],
+        data: vec![2], // withdraw; rejected before any Vault account is touched
+    };
+    match env.send(&[ix], &[]) {
+        Ok(m) => panic!("expected IncorrectProgramId, succeeded\n{}", m.logs.join("\n")),
+        Err(e) => {
+            let text = format!("{:?}", e.err);
+            assert!(
+                text.contains("IncorrectProgramId"),
+                "{text}\n{}",
+                e.meta.logs.join("\n")
+            );
+        }
+    }
+}
+
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
@@ -603,6 +678,88 @@ fn a_mint_with_a_permanent_delegate_cannot_become_a_vault() {
         ],
     );
     assert_eq!(env.fails(&[ix], &[&m.admin]), verr::EXTENSION_NOT_ALLOWED);
+}
+
+/// MintCloseAuthority with a real authority can close the mint at supply 0 and
+/// reopen the address with an extension this policy refuses. No authority is fine.
+#[test]
+fn a_mint_close_authority_is_refused_unless_it_is_unset() {
+    fn mint_with_close_authority(env: &mut Env, authority: Option<&Address>) -> (Keypair, Address) {
+        let mint = Keypair::new();
+        let mint_authority = Keypair::new();
+        let size = 165 + 1 + 4 + 32;
+        let lamports = env.svm.minimum_balance_for_rent_exemption(size);
+        let t22 = token_2022();
+        let create = solana_system_interface::instruction::create_account(
+            &env.payer.pubkey(),
+            &mint.pubkey(),
+            lamports,
+            size as u64,
+            &t22,
+        );
+        let mut d = vec![25u8]; // InitializeMintCloseAuthority, COption<Pubkey>
+        match authority {
+            Some(k) => {
+                d.extend_from_slice(&1u32.to_le_bytes());
+                d.extend_from_slice(k.as_ref());
+            }
+            None => d.extend_from_slice(&0u32.to_le_bytes()),
+        }
+        let init_close = solana_instruction::Instruction {
+            program_id: t22,
+            accounts: vec![AccountMeta::new(mint.pubkey(), false)],
+            data: d,
+        };
+        let mut d = vec![20u8, 6]; // InitializeMint2
+        d.extend_from_slice(mint_authority.pubkey().as_ref());
+        d.push(0);
+        let init_mint = solana_instruction::Instruction {
+            program_id: t22,
+            accounts: vec![AccountMeta::new(mint.pubkey(), false)],
+            data: d,
+        };
+        env.ok(&[create, init_close, init_mint], &[&mint]);
+        (mint, t22)
+    }
+    let mut env = Env::new();
+    let m = Market::new(&mut env);
+    let authority = Keypair::new();
+    let (mint, t22) = mint_with_close_authority(&mut env, Some(&authority.pubkey()));
+    let vault = pda(&[b"vault", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let ix = m.vault_ix(
+        1,
+        &Limits::default_limits().bytes(),
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new_readonly(m.admin.pubkey(), true),
+            AccountMeta::new(m.protocol, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(vault_tokens, false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new_readonly(t22, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    assert_eq!(env.fails(&[ix], &[&m.admin]), verr::EXTENSION_NOT_ALLOWED);
+    let (mint, t22) = mint_with_close_authority(&mut env, None);
+    let vault = pda(&[b"vault", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", m.protocol.as_ref(), mint.pubkey().as_ref()], &m.vault_program);
+    let ix = m.vault_ix(
+        1,
+        &Limits::default_limits().bytes(),
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new_readonly(m.admin.pubkey(), true),
+            AccountMeta::new(m.protocol, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(vault_tokens, false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new_readonly(t22, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    env.ok(&[ix], &[&m.admin]);
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +881,19 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     let zero = Address::default();
     let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(DAY).to_le_bytes(), None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_BELOW_MINIMUM);
+    let too_long = (31 * DAY).to_le_bytes();
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &too_long, None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_ABOVE_MAXIMUM);
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(30 * DAY).to_le_bytes(), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let d = w.env.account(&w.m.protocol).data;
+    assert_eq!(i64::from_le_bytes(d[436..444].try_into().unwrap()), 30 * DAY, "raised at once, to the cap");
+    let harbor = Address::new_unique();
+    w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let ix = w.m.register_ix(&w.env, harbor, 30 * DAY + 1);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DELAY_ABOVE_MAXIMUM);
+    let ix = w.m.register_ix(&w.env, harbor, 30 * DAY);
+    w.env.ok(&[ix], &[]);
     let abdicate = |w: &World, kind: u8, guardians: &[Address]| {
         let mut a = vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.admin.pubkey(), true)];
         a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
@@ -773,6 +943,55 @@ fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
     looser.short_bps = 300;
     let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+}
+
+/// A floor above the balance must not make attest promise more than the vault holds.
+#[test]
+fn attest_never_reports_more_than_the_balance() {
+    let mut w = World::new();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    let vault = w.usdc.vault;
+    let mut floors = Limits::default_limits();
+    floors.short_floor = 1_000_000 * USDC;
+    floors.long_floor = 1_000_000 * USDC;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &floors.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.seal();
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!(a.balance, 1_000 * USDC);
+    assert_eq!(a.available_now, 1_000 * USDC, "the balance, not the 1,000,000 floor");
+}
+
+/// Byte 165 of a 355-byte multisig is a signer byte. It must not be read as an account type.
+#[test]
+fn a_token_multisig_is_not_a_token_account() {
+    let mut w = World::new();
+    let u = w.user();
+    let _acc = w.deposit("usdc", &u, 1_000 * USDC);
+    w.seal();
+    let fake = Address::new_unique();
+    let mut data = vec![0u8; 355];
+    data[..32].copy_from_slice(w.usdc.mint.as_ref());
+    data[32..64].copy_from_slice(u.pubkey().as_ref());
+    data[108] = 1;
+    data[165] = 2;
+    let lamports = w.env.svm.minimum_balance_for_rent_exemption(data.len());
+    w.env
+        .svm
+        .set_account(
+            fake,
+            solana_account::Account {
+                lamports,
+                data,
+                owner: token_2022(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &fake, 1, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[ix], &[&u]), verr::WRONG_ACCOUNT_TYPE);
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +1059,35 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     let right = exit(dest);
     w.env.ok(&[right], &[]);
     assert_eq!(w.env.balance(&dest), 4_000_000 * USDC);
+}
+
+#[test]
+fn sealing_counts_the_spendable_lifeboat_balance_after_token_2022_fees() {
+    let mut w = World::with_transfer_fee_mint();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 900 * USDC);
+
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let mv = w.m.vault_ix(24, &(900 * USDC).to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.usdc.vault_tokens, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    w.env.ok(&[mv], &[&w.m.admin]);
+    assert_eq!(w.env.balance(&lifeboat), 810 * USDC);
+
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[seal], &[]), verr::IMPORT_EXCEEDS_BALANCE,
+        "the seal must reject 900 in backing claims against 810 spendable tokens");
 }
 
 #[test]

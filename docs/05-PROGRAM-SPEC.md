@@ -6,7 +6,7 @@ This is the contract between the program, its integrators, the tests and auditor
 - moves tokens;
 - emits events.
 
-Status: built (Pinocchio 0.11, one dependency: `bulkhead-core`), sBPF v3. Tested with 24 scenario and negative tests plus a 12,000-step program-vs-model differential on the real runtime (`09 §7`), and exercised end-to-end on `solana-test-validator` (`cloud/e2e`). Deployed on devnet on 28 Sep 2026 (`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`), byte-identical to this checkout's build (`08`, `SECURITY.md`). Unaudited.
+Status: built (Pinocchio 0.11, one dependency: `bulkhead-core`), sBPF v3. Tested with scenario and negative tests plus a program-vs-model differential on the real runtime (`09 §7`), and exercised end-to-end on `solana-test-validator` (`cloud/e2e`). Deployed on devnet on 28 Sep 2026 (`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`); the bytes on devnet are the 29 Sep upgrade, not this tree (`08`, `SECURITY.md`). Unaudited.
 
 Conventions:
 - `now` = `Clock::unix_timestamp` (seconds); limiter math uses `now_ms = now × 1000`.
@@ -20,6 +20,7 @@ Conventions:
 | Name | Value | Meaning |
 |---|---|---|
 | `MIN_LOOSEN_DELAY_S` | 259 200 | 72h floor for any loosening, including the seal |
+| `MAX_LOOSEN_DELAY_S` | 2 592 000 | 30-day cap. A raise applies at once, so an uncapped delay could push later governance out of reach. Floor's upgrade delay uses the same cap |
 | `MAX_FREEZE_S` | 86 400 | Longest single freeze (re-freezable) |
 | `MAX_TICKET_EXTENSION_S` / `_TOTAL_S` | 86 400 / 604 800 | Guardian extension limits |
 | `QUEUE_HORIZON_S` | 604 800 | Requests whose ETA would be further out are refused |
@@ -62,7 +63,7 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 | 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7) | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
 | 2 | `upsert_asset(config)` | admin | genesis only (afterwards: `propose_change`) | Creates or updates `Asset` |
 | 3 | `import_backing(amount)` | admin | genesis only | Credits `Backing[owner]`; `vault.imported += amount` |
-| 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault passed exactly once; `imported ≤ balance` for each | `sealed = true` |
+| 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault, vault token account, and lifeboat token PDA passed exactly once; `imported + total_in ≤ vault balance + actual spendable lifeboat balance` | `sealed = true` |
 | 7 | `deposit(amount)` | caller + source authority | accounts match the vault; source ≠ vault account | EMA update; `transfer_checked`; credits the amount actually **received** (transfer fees) to `Backing[source authority]`; returns `received` |
 | 8 | `release(amount)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
 | 23 | `quote_release(amount)` | none | as `release` | The same outcome as return data, no writes (for `simulateTransaction`) |
@@ -119,7 +120,8 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 | Extension | Policy | Reason |
 |---|---|---|
 | TransferFeeConfig (1) | Allowed | Deposits credit what was actually received |
-| MintCloseAuthority (3), InterestBearing (10), MetadataPointer / TokenMetadata (18, 19), group pointers and members (20–23), ScaledUiAmount (25), PermissionedBurn (28) | Allowed | No custody effect |
+| MintCloseAuthority (3) | Allowed only when the close authority is unset (32 zero bytes) | A set authority can close the mint at supply 0 and recreate the address with a refused extension |
+| InterestBearing (10), MetadataPointer / TokenMetadata (18, 19), group pointers and members (20–23), ScaledUiAmount (25), PermissionedBurn (28) | Allowed | No custody effect |
 | DefaultAccountState (6) | Allowed unless Frozen | A frozen default would trap the vault account |
 | PermanentDelegate (12) | **Refused** | The delegate could move vault tokens outside Bulkhead (tested) |
 | TransferHook (14) | **Refused** | Arbitrary code in the custody path |
@@ -131,7 +133,7 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 
 Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and the abort code:
 
-`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047).
+`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048).
 
 ## 9. The Solana attack classes (`sealevel-attacks`)
 

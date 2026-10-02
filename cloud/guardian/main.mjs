@@ -24,17 +24,17 @@
 // A failed freeze is retried; it does not stick in `state.freezing`.
 //
 // What it believes: an event counts only if the Vault (or Floor) program wrote
-// it (any program can write a "Program data:" line); the freeze state and new
-// tickets are read from the chain every cycle; and when a transaction's log was
-// truncated, that transaction's outflow is taken from the vault's token balances.
+// it (any program can write a "Program data:" line); freeze state is read from
+// chain every cycle; active tickets are scanned at startup, on a freeze, and
+// periodically; truncated logs use the vault's token balances.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, parseLogs, decodeProtocol, decodeTicket, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, pendingCancels, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
-import { pageQuery, morePages, MAX_PAGES } from "./follow.mjs";
-import { vaultOutflows, ticketRelease } from "./chain.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
+import { activeTickets, vaultOutflows, ticketRelease } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
@@ -49,7 +49,6 @@ const vaultMints = new Map(watched.map((v) => [b58encode(v.vault), v.mint]));
 const tokenMints = new Map(watched.map((v) => [b58encode(v.vaultTokens), v.mint]));
 // Only these programs' events count: any program can write "Program data:".
 const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
-let nextTicket = null; // first ticket id the chain scan hasn't looked at
 const state = newState();
 const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
 
@@ -63,6 +62,8 @@ const worst1h = new Map();
 const worst24h = new Map();
 const warned = new Set();
 let pendingFreeze = null;
+let nextTicketScanAt = 0;
+let sweptFreezeUntil = 0;
 
 function wallNow() {
   return Math.floor(Date.now() / 1000);
@@ -120,7 +121,7 @@ async function execute(action, event, eventTime) {
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       case "cancel": {
-        const { vault } = await vc.vault(action.mint ?? event.mint);
+        const vault = action.vault ?? (await vc.vault(action.mint ?? event.mint)).vault;
         const ticket = await vc.ticketAddress(action.ticketId);
         const acc = await rpc.account(ticket);
         if (!acc) {
@@ -160,10 +161,14 @@ async function execute(action, event, eventTime) {
 }
 
 /** After a freeze lands: cancel every queued ticket still outstanding. */
-async function sweepCancels(event, eventTime) {
+async function sweepCancels(event, eventTime, { refresh = true } = {}) {
+  if (refresh) {
+    await tryRefreshPendingTickets();
+  }
   for (const action of pendingCancels(state, policy)) {
     const ok = await execute(action, event, eventTime);
-    if (!ok) state.cancelled.delete(action.ticketId);
+    if (ok) state.pendingTickets.delete(action.ticketId);
+    else state.cancelled.delete(action.ticketId);
   }
 }
 
@@ -178,7 +183,10 @@ async function applyActions(actions, event, eventTime) {
       continue;
     }
     const ok = await execute(action, event, eventTime);
-    if (action.type === "cancel" && !ok) state.cancelled.delete(action.ticketId);
+    if (action.type === "cancel") {
+      if (ok) state.pendingTickets.delete(action.ticketId);
+      else state.cancelled.delete(action.ticketId);
+    }
     if (action.type !== "freeze") continue;
     freezeOk = ok;
     if (ok) {
@@ -194,18 +202,20 @@ async function applyActions(actions, event, eventTime) {
 
 /** Newest-first. `oldestWanted` null walks until `until` (live); a number walks the startup window. */
 async function signatures(until, oldestWanted) {
-  const out = [];
-  let before;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const q = pageQuery({ before, until });
-    const got = await rpc.call("getSignaturesForAddress", [b58encode(vc.protocol), q]);
-    if (!got?.length) break;
-    out.push(...got);
-    if (!morePages(got, q.limit, oldestWanted)) break;
-    before = got[got.length - 1].signature;
-    if (page === MAX_PAGES - 1) log({ level: "error", msg: `signature walk stopped after ${MAX_PAGES} pages; the window may be incomplete` });
-  }
-  return out;
+  let lastLoggedPage = 0;
+  return signatureWalk(
+    (query) => rpc.call("getSignaturesForAddress", [b58encode(vc.protocol), query]),
+    {
+      until,
+      oldestWanted,
+      onPage: (count) => {
+        if (count % PAGE_LOG_INTERVAL === 0 && count !== lastLoggedPage) {
+          lastLoggedPage = count;
+          log({ msg: `signature recovery is still paging`, pages: count });
+        }
+      },
+    },
+  );
 }
 
 /** One fact (a release, freeze or proposal), from an event or from the chain. */
@@ -218,10 +228,10 @@ async function consider(e, signature, now, act) {
   await applyActions(actions, e, now);
 }
 
-async function ingest(sigs, act) {
-  for (const s of sigs) {
-    if (s.err) continue;
-    const tx = await rpc.call("getTransaction", [s.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
+async function ingest(sigs, act, checkpoint = () => {}) {
+  await ingestSignatures(sigs, async (s) => {
+    if (s.err) return;
+    const tx = await requireTransaction(rpc, s.signature);
     const now = s.blockTime ?? tx?.blockTime ?? wallNow();
     const { events, truncated } = parseLogs(tx?.meta?.logMessages);
     if (truncated) {
@@ -240,30 +250,77 @@ async function ingest(sigs, act) {
       if (truncated && e.kind === "released") e.instant = 0n; // counted from the balances above
       await consider(e, s.signature, now, act);
     }
+  }, checkpoint);
+}
+
+/** Rebuild active cancellation state from the Vault program's ticket accounts. */
+async function refreshPendingTickets({ recoverOutflows = false, act = false } = {}) {
+  const tickets = await activeTickets(rpc, cfg.vaultProgram, vc.protocol);
+  if (recoverOutflows) {
+    const cutoff = wallNow() - DAY_S;
+    for (const ticket of tickets) {
+      if (ticket.createdS < cutoff) continue;
+      if (state.tickets.has(ticket.id)) continue;
+      const e = ticketRelease(ticket, vaultMints);
+      if (e) {
+        e.at = ticket.createdS;
+        await consider(e, "chain:ticket", wallNow(), act);
+      }
+    }
+  }
+  // Merge positive on-chain observations. Do not discard event-derived tickets
+  // that a lagging RPC snapshot may not include yet.
+  for (const ticket of tickets) {
+    rememberTicket(state, {
+      ticketId: ticket.id,
+      mint: vaultMints.get(ticket.vault) ?? null,
+      vault: ticket.vault,
+      owner: ticket.recipientOwner,
+    });
+  }
+  return tickets.length;
+}
+
+/** A stale or unavailable ticket scan must not block known-ticket cancellation. */
+async function tryRefreshPendingTickets(options = {}) {
+  try {
+    const count = await refreshPendingTickets(options);
+    nextTicketScanAt = Date.now() + 60_000;
+    return count;
+  } catch (e) {
+    log({ level: "warn", msg: `active ticket scan failed; retrying: ${e.message}` });
+    nextTicketScanAt = Date.now() + 5_000;
+    return null;
   }
 }
 
-/**
- * The chain's own record: the protocol's freeze (a log line can't fake it) and
- * every ticket created since the last look (an event can be missing, a ticket
- * account can't). A ticket seen through its event too counts once.
- */
-async function syncFromChain(act, scanFrom = null) {
+async function syncFromChain(act, { startup = false } = {}) {
   const acc = await rpc.account(vc.protocol);
   if (!acc) return;
   const p = decodeProtocol(acc.bytes);
+  const now = wallNow();
   state.frozenUntil = p.frozenUntil;
-  if (p.frozenUntil > wallNow()) state.freezing = false;
-  const last = BigInt(p.nextTicketId);
-  for (let id = scanFrom ?? nextTicket ?? last; id < last; id++) {
-    const t = await rpc.account(await vc.ticketAddress(id));
-    if (!t) continue; // settled or cancelled already
-    const ticket = decodeTicket(t.bytes);
-    if (ticket.createdS < wallNow() - DAY_S) continue; // outside every window
-    const e = ticketRelease(ticket, vaultMints);
-    if (e) await consider(e, "chain:ticket", ticket.createdS, act);
+  pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now);
+  if (p.frozenUntil > now) state.freezing = false;
+  const frozen = p.frozenUntil > now;
+  const newFreeze = frozen && p.frozenUntil !== sweptFreezeUntil;
+  if (frozen) {
+    const actions = observeProtocolFreeze(state, p.frozenUntil, now, policy, act);
+    if (act) await applyActions(actions, { reason: "protocol already frozen" }, now);
   }
-  nextTicket = last;
+  const periodicScan = Date.now() >= nextTicketScanAt;
+  if (startup || newFreeze || periodicScan) {
+    await tryRefreshPendingTickets({ recoverOutflows: true, act });
+  }
+  if (frozen) {
+    // Apply cancels for tickets discovered by the scan above. Tickets already
+    // scheduled before it were drained from `cancelled` on the first pass.
+    const actions = observeProtocolFreeze(state, p.frozenUntil, now, policy, act);
+    if (act) await applyActions(actions, { reason: "protocol already frozen" }, now);
+    if (newFreeze) sweptFreezeUntil = p.frozenUntil;
+  } else if (sweptFreezeUntil && sweptFreezeUntil <= now) {
+    sweptFreezeUntil = 0;
+  }
 }
 
 /** Log each Floor program's missing pieces, once per change (A5). */
@@ -302,12 +359,11 @@ async function main() {
   const history = await signatures(undefined, oldest);
   const until = history[0]?.signature;
   const inWindow = history.filter((s) => s.blockTime == null || s.blockTime >= oldest);
-  await ingest([...inWindow].reverse(), false);
-  // The freeze state, and tickets from the last day whose events the replay
-  // didn't see, from the chain (the last 256 ids at most).
-  const p0 = await rpc.account(vc.protocol);
-  const first = p0 ? BigInt(decodeProtocol(p0.bytes).nextTicketId) : 0n;
-  await syncFromChain(false, first > 256n ? first - 256n : 0n);
+  await ingest(inWindow, false);
+  // The chain scan recovers every active ticket, including older tickets whose
+  // release is outside the rolling outflow window. Current chain state is live,
+  // so an already-active freeze must sweep tickets at startup too.
+  await syncFromChain(true, { startup: true });
   await freezeIfWindowStillOpen(wallNow());
   log({ msg: "caught up", signatures: inWindow.length });
   await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
@@ -327,8 +383,7 @@ async function main() {
         }
       }
       const sigs = await signatures(cursor, null);
-      if (sigs.length) cursor = sigs[0].signature;
-      await ingest([...sigs].reverse(), true);
+      await ingest(sigs, true, (signature) => { cursor = signature; });
       await syncFromChain(true);
       if (Date.now() - lastAttest > 10_000) {
         await refreshWorstCase();

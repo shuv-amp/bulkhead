@@ -33,6 +33,13 @@ Severity is for a mainnet deployment: **High** = more value can leave than the p
 | A4 | **Medium** | No recovery path from a compromised Vault admin or Floor owner key | Design decision needed |
 | A5 | Low | Floor's stop button is unarmed after every abort until someone stages a new abort buffer; the fast-restore snapshot must be re-pinned after every upgrade | **Alerted, 30 Sep:** the status page shows both; the guardian bot warns when either is missing (`floorProtected`) |
 | A6 | Low | A borrower can pick the most favourable fully-verified Pyth update within `max_age_s` | Residual; calibrate haircuts against it |
+| A7 | **Medium** | The loosen delay has no upper bound, and raising it applies at once | **Fixed in this tree** (30-day cap). Devnet still runs the previous program until the in-place upgrade |
+| A8 | Low | `MintCloseAuthority` with an authority set is accepted at vault creation | **Fixed in this tree** (allowed only when the authority is unset) |
+| A9 | **Medium** | The backed lane trusts Pyth, and Full verification is now 3 of 5 Pyth Pro keys | Stated in `04` assumption 2. A rate limit on new backed liabilities waits for the audit build |
+| A10 | **High** | The seal checks imported backing against the balance, not deposits made before the seal | **Fixed in this tree** (`imported + total_in ≤ balance + lifeboat`) |
+| A11 | **Medium** | Harbor signs its caller PDA for whatever program the caller names | **Fixed in this tree** (Vault id baked in at build time) |
+| A12 | **Medium** | Docs said freezes use priority fees and several RPCs; the bot used one RPC and no compute budget | **Fixed** (off-chain) |
+| A13 | **Medium** | The bot trusts any `Program data:` line in a transaction that touches the protocol account, and ignores log truncation | **Fixed** (off-chain): attribute to Vault/Floor, and read accounts when the log is truncated |
 
 ### A1 — The reference balance can be inflated (High)
 
@@ -107,6 +114,46 @@ This is the same "DoS only" as A3 but reachable without abdication. Options for 
 
 Anyone can post a fully verified `PriceUpdateV2`, so a borrower can present whichever genuine update within `max_age_s` values their collateral highest. `conservative()` (min of spot and EMA, minus confidence) and haircuts cover this only if `haircut ≥` the largest move the asset makes within `max_age_s`. Add that to the calibration rule for weights (`03 §4.7`).
 
+### A7 — The loosen delay can be raised without a bound (Medium)
+
+**What happens.** `classify_delay` accepted any delay ≥ 72h, and a raise is a tightening, so it applies in the same transaction. A stolen or mistyped admin key can set the delay to a value that pushes every later loosening — including replacing the admin, the guardians and the lifeboat destination — past the point where `now + delay` overflows and the schedule aborts. Floor already capped its own delay for this reason.
+
+**Fix.** `classify_delay` returns none outside `[72h, 30 days]` (`MAX_LOOSEN_DELAY_S`). Registration and `SetLoosenDelay` refuse the same window (`DelayBelowMinimum` / `DelayAboveMaximum`). Floor's upgrade delay uses the same cap. The Python reference and golden `CD` vectors match. Tests: `delay_outside_72h_to_30d_is_rejected_and_a_raise_inside_is_a_tightening`, `a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever` (31 days), `the_delay_can_be_raised_instantly_but_lowered_only_after_the_delay` (31 days).
+
+### A8 — A mint close authority can replace the mint (Low)
+
+**What happens.** Token-2022 extension 3 was on the allowlist with no look at its authority. The close authority can close the mint once supply is zero, and the address can be created again with a permanent delegate or a transfer hook.
+
+**Fix.** Extension 3 is allowed only when its 32-byte authority is all zeros. Test: `a_mint_close_authority_is_refused_unless_it_is_unset`.
+
+### A9 — Pyth's trust root changed (Medium, stated)
+
+Since 26 Aug 2026, Full verification on Solana is 3 of the Pyth Pro set's 5 keys. The backed lane is not rate-limited, so a price those keys sign is final. Both receiver programs the Vault accepts are official Pyth programs. Assumption 2 in `04` now names the set. Bounding new backed liabilities is a separate design item for the audit build.
+
+### A10 — The seal does not cover pre-seal deposits (High)
+
+**What happens.** `execute_seal` required `imported ≤ balance`. `import_backing` credits a ledger without moving tokens. A deposit before the seal moves tokens and credits another ledger, which raises the balance the check looks at. Import 1,000 after a deposit of 1,000: imported is 1,000, the balance is 1,000, the check passes, and backing claims are 2,000. After the seal the imported owner withdraws through the backed lane, which is not rate-limited, and takes the depositor's tokens.
+
+**Fix.** The seal requires `imported + total_in ≤ balance + lifeboat_amount`, in u128. Test: `pre_seal_deposits_cannot_hide_an_uncovered_import`.
+
+### A11 — Harbor forwards its caller signature (Medium)
+
+**What happens.** Harbor's caller PDA is the signature the Vault trusts as the protocol. The first account is the program Harbor invokes, taken from the transaction. Signer privileges carry into that call, so a copied integration signs for any program a caller names.
+
+**Fix.** Harbor compares that account with `VAULT_ID`, baked in by `programs/harbor/build.rs` (`BULKHEAD_VAULT_ID`, default the devnet Vault) and returns `IncorrectProgramId` otherwise. Local deploys rebuild Harbor for their Vault keypair. The integration guide says to check the program id before signing. Test: `harbor_will_not_sign_for_a_different_vault_program`.
+
+### A12 — Guardian delivery did not match the docs (Medium)
+
+**What happens.** `cloud/lib/signer.mjs` sent one transaction to one RPC, with no Compute Budget instructions. Under congestion the freeze lands later. G1 bounds the loss by when it lands.
+
+**Fix.** Guardian transactions set a compute-unit limit and a price (`policy.computeUnits`, `policy.priorityMicroLamports`) and the signed transaction is submitted to `rpc` and every URL in `rpcs`. The Compute Budget program id is the 43-character address; the 42-character truncation is not a program, and every guardian transaction then fails simulation with `ProgramAccountNotFound`. The docs no longer say "bundle tips". Tests: `compute-budget instructions encode limit and price`, `base58 round-trips well-known ids`, `a signed transaction is broadcast to every configured rpc`.
+
+### A13 — The guardian believes any log line (Medium)
+
+**What happens.** `parseEvents` returned every `Program data:` line. `getSignaturesForAddress` lists every transaction that mentions the protocol account, so another program in that transaction can emit `vault:released` or `vault:frozen`. The runtime also truncates logs at 10 KB and the bot did not notice, which can hide a payout or invent one. Wormhole's Solana watcher had the truncation bug (wormhole#4065). The on-chain bound does not depend on the bot; the response layer does.
+
+**Fix.** A line counts only when the innermost invoked program is the Vault or Floor. A `Log truncated` line sets `truncated`, and that transaction's events are ignored. Each cycle the bot sets `frozenUntil` from the protocol account. Instant outflow missing from the logs is `unbacked_out - settled` minus what complete events already recorded (settling a ticket increases both, so it is not a second instant). Ticket ids in `(last seen, next_ticket_id)` that no event reported are loaded and judged under the same rules. A ticket whose vault is not a configured mint is counted on its own (worst case 0, so any amount freezes) and the cancel uses that ticket's vault; it is not charged to the first configured mint. Tests: `cloud/test/events.test.mjs`, `cloud/test/policy.test.mjs`.
+
 ## 3. Attacks that did not work
 
 Each was tried and found closed; listed so nobody re-spends the time.
@@ -151,14 +198,14 @@ A line-by-line pass over every program, the core, the Cloud guardian and the too
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
-| A7 | **Medium** | The Vault's loosen delay had no upper bound; raising it is a tightening, so one key could put every later loosening (admin and guardian replacement included) out of reach | Fix: a 30-day cap in the core, the Vault and Floor (on-chain PR, merged with the devnet upgrade after the S1 run) |
-| A8 | Low | The mint policy allowed `MintCloseAuthority` with an authority set; a zero-supply mint can then be closed and created again with extensions the policy refuses | Fix: extension 3 only with no close authority (on-chain PR) |
+| A7 | **Medium** | The Vault's loosen delay had no upper bound; raising it is a tightening, so one key could put every later loosening (admin and guardian replacement included) out of reach | **Fixed** 1 Oct (#8): a 30-day cap in the core, the Vault and Floor; devnet upgrade pending |
+| A8 | Low | The mint policy allowed `MintCloseAuthority` with an authority set; a zero-supply mint can then be closed and created again with extensions the policy refuses | **Fixed** 1 Oct (#8): extension 3 only with no close authority |
 | A9 | **Medium** | Pyth's trust root changed on 26 Aug 2026 (3 of the Pyth Pro set's 5 keys); backed borrowing trusts a verified price completely | Documented in `04` (assumption 2, T5); a rate limit on new backed liabilities is a design item for the audit build |
-| A10 | **Medium** | The seal compared imported backing with balances but not the backing pre-seal deposits create, so total claims could exceed the tokens held | Fix: `imported + total_in ≤ balance + lifeboat_amount` (on-chain PR) |
-| A11 | **Medium** | Harbor, the reference integration, didn't check which program it forwarded its caller-PDA signature to, and the guide didn't say to | Fix: Harbor checks a built-in Vault id; guide step added (on-chain PR) |
+| A10 | **Medium** | The seal compared imported backing with balances but not the backing pre-seal deposits create, so total claims could exceed the tokens held | **Fixed** 1 Oct (#8): `imported + total_in ≤ balance + lifeboat_amount` |
+| A11 | **Medium** | Harbor, the reference integration, didn't check which program it forwarded its caller-PDA signature to, and the guide didn't say to | **Fixed** 1 Oct (#8): Harbor checks a built-in Vault id; guide step added |
 | A12 | **Medium** | The docs said guardian freezes use priority fees and several RPCs; the code used neither | **Fixed**: compute budget with an automatic priority price, broadcast to every configured RPC |
 | A13 | **High** (response layer) | The guardian believed any `Program data:` line in any transaction touching the protocol, and didn't notice truncated logs | **Fixed**: events count only when the Vault or Floor emitted them; freeze state and tickets come from the chain; a truncated log's outflow comes from token balances |
 
 The on-chain bound (G1) was never affected by A12 or A13: they concern how fast, and on what information, the response layer acts.
 
-Hardening in the on-chain PR: the account-type byte in `token::account_info`, a checked age in `price::is_usable`, `attest` capping "available now" at the balance, and two stale comments rewritten line-for-line. Design notes recorded without change: vaults created after the seal, a queued loosening replacing a later tightening, loosenings executing during a freeze, a threshold equal to the guardian count. A4 remains open, and any fix to it inherits A7's cap.
+Hardening in the same change (#8): the account-type byte in `token::account_info`, a checked age in `price::is_usable`, `attest` capping "available now" at the balance, and two stale comments rewritten line-for-line. Design notes recorded without change: vaults created after the seal, a queued loosening replacing a later tightening, loosenings executing during a freeze, a threshold equal to the guardian count. A4 remains open, and any fix to it inherits A7's cap.

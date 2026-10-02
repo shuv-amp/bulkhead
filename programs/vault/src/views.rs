@@ -36,7 +36,7 @@ pub fn attest(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResu
     let instant = if t < frozen {
         0
     } else {
-        available_now(&v.limiter_state(), &params, now_ms)
+        available_now(&v.limiter_state(), &params, now_ms).min(balance)
     };
     let cap = |x: u128| x.min(u64::MAX as u128) as u64;
     let alive = p.alive_mask(t).count_ones() as u8;

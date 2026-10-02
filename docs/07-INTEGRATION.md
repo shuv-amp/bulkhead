@@ -16,17 +16,17 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
   2. Pin a snapshot: write your live binary to a buffer, hand its authority to Floor, and call `pin_snapshot`. Floor verifies it byte-for-byte on-chain.
 
   Anyone can do both, including the Bulkhead Cloud bot.
-- From then on your owner key *proposes* upgrades, and they execute after the delay (≥ 72h; **7 days recommended**) unless a guardian vetoes. Any live guardian can stop the program in one instruction.
+- From then on your owner key *proposes* upgrades, and they execute after the delay (72h through 30 days; **7 days recommended**) unless a guardian vetoes. Any live guardian can stop the program in one instruction.
 - Read `elf_is_v3` in the config, or run `python3 tools/floor_check.py <program-id>`. If it's false, build and test an sBPF v3 version now (`06 §8`).
 
 ## 2. Vault (Tier 1) checklist
 
-1. **Derive your caller PDA:** `["bulkhead-caller"]` under your own program id. Only your program can sign as it, so only your program can deposit and release.
+1. **Derive your caller PDA:** `["bulkhead-caller"]` under your own program id. Only your program can sign as it, so only your program can deposit and release. **Check the Vault program id before signing.** The caller PDA is the signature the Vault trusts as "this protocol", and signer privileges carry into nested calls. Harbor refuses any program id other than the one it was built for (`BULKHEAD_VAULT_ID`). Copy that check. Do not forward the signature to a program id the caller supplied.
 2. **Register** (`register_protocol`), signed by your upgrade authority or by the caller PDA through a CPI:
    - admin = your Squads vault;
    - 2–8 guardians (ops key, the Bulkhead Cloud bot, a security partner) and a threshold ≥ 2;
    - a heartbeat interval (7 days default);
-   - loosen delay ≥ 72h;
+   - loosen delay from 72h through 30 days (a raise applies at once, so a longer one is refused);
    - `lifeboat_destination` = a *different* cold multisig.
 3. **Create one vault per custody mint** (`create_vault` with your limits). The mint must pass the Token-2022 policy (`05 §7`).
 4. **Allowlist valued assets** during genesis (`upsert_asset`: Pyth feed id, haircut ≥ your max LTV + 5 points, liability weight, confidence multiple, max age, max confidence). Use feeds for deep assets only.
@@ -54,6 +54,7 @@ invoke_signed_with_bounds::<MAX, &AccountView>(&release_ix, &accounts, &[Signer:
 ```
 
 - **Your own checks come first.** Harbor's `WITHDRAW` requires the user to own the recipient token account. A real protocol also checks the user's claim, LTV and so on. Bulkhead is not your risk engine; it bounds what happens when that engine is wrong or compromised.
+- **Pin the Vault program id.** Harbor compares account 0 with a build-time constant and returns `IncorrectProgramId` otherwise. An integration that signs for whatever program the transaction names hands the caller PDA to that program.
 - **Price pairs.** For a `release`, pass `(Asset PDA, Pyth price account)` pairs for the released mint and then for every other mint in the recipient's ledger, in ledger order. For an owner who owes nothing and takes back their own deposit (G2), pass the asset PDA and any non-Pyth account as the price: no prices are needed.
 - **Liquidations:** take the liquidator's repayment first (a `deposit`, which creates backing), then `release` the seized collateral. More than the bonus is unbacked: the repayment backs collateral only at the conservative *high* price times the liability weight, and in a falling market Pyth's EMA sits above spot. In the crash scenario (`08` S11) 14–17% of every liquidation is unbacked with a 5% bonus. Size the buckets for cascades (§4, step 5).
 
@@ -64,7 +65,7 @@ Inputs: the last 90 days of the protocol's outflows per vault (from its events o
 1. Replay each historical outflow through `bulkhead-core` (the backed amount at the prices of that moment); the rest is the unbacked part.
 2. For each vault, compute the maximum unbacked sum over any 1-hour window and any 24-hour window, as a fraction of the capacity base at that time (the lower of the reference and the live balance, `03 §3`).
 3. Set `short_bps ≥ 1.5 × max hourly` and `long_bps ≥ 1.5 × max daily`, never below the defaults (2%, 5%) unless the history is flat.
-4. Set absolute caps (`short_cap`, `long_cap`, in tokens) at the same percentages of the vault's honest size, for example its 30-day median balance. Without caps, an attacker who parks their own capital in the vault raises the base while it is there (`15`, A1b). Lowering a cap is instant; raising one waits 72h, so review caps as the vault grows. The devnet demo market runs with them (`cloud/deploy/market.mjs caps`).
+4. Set absolute caps (`short_cap`, `long_cap`, in tokens) at the same percentages of the vault's honest size, for example its 30-day median balance. Without caps, an attacker who parks their own capital in the vault raises the base while it is there (`15`, A1b). Lowering a cap is instant; raising one waits 72h, so review caps as the vault grows. The demo setup creates its vault with calibrated caps; `cloud/deploy/market.mjs caps` applies them to an existing demo market.
 5. **Lending markets: size for a crash, not only for history.** A quiet 90 days says nothing about a cascade. Run `crates/bulkhead-core/tests/cascade.rs` with the market's own weights, bonus and collateral share. With the defaults, a 10-minute −20% crash that liquidates 17% of a vault already queues some liquidations for 6 hours; 4%/h and 10%/day absorb a 30% cascade (`08` S11). Looser limits also double what a thief can take, so this is a trade-off to publish, not hide.
 6. Report how many historical requests *would have queued* under the chosen values. The target is zero.
 7. Publish the report. It is the evidence that honest users never notice.

@@ -10,7 +10,7 @@ Floor is a small program (`programs/floor`, Pinocchio, one dependency: `bulkhead
 
 It is a separate program from the Vault so each has a small audit surface and its own blast radius.
 
-Status: built, 21 tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`), 56 KB. Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`), byte-identical to this checkout's build, and the full lifecycle has run there (§7). Unaudited.
+Status: built, tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`). Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`). The bytes on devnet are that deployment, not this tree (the upgrade-delay cap changed). The full lifecycle has run there (§7). Unaudited.
 
 ## 1. Why it exists
 
@@ -60,7 +60,7 @@ Each was checked in agave's source (master `f771659`, 26 Sep 2026) or on-chain; 
 | `program`, `programdata` | The protected program and its loader-v3 data account |
 | `owner` | Proposes upgrades, restores and configuration changes (e.g. a Squads vault) |
 | `guardians[≤8]`, `last_heartbeat[≤8]`, `threshold` (≥ 2), `heartbeat_interval_s` (1–30 days) | Only guardians that heart-beat within the interval can act (Lido pattern) |
-| `upgrade_delay_s` | ≥ 72h (constant floor), ≤ 365 days; **7 days recommended** (L2BEAT Stage-1 exit window) |
+| `upgrade_delay_s` | ≥ 72h (constant floor), ≤ 30 days (same cap as the Vault's loosen delay); **7 days recommended** (L2BEAT Stage-1 exit window) |
 | `status` | Live or Aborted |
 | `elf_is_v3` | Whether the live code is deployable after SIMD-0500 (updated at every install) |
 | `abort_buffer` | The staged canonical abort binary (frozen buffer) |

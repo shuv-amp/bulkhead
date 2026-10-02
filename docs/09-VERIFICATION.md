@@ -116,10 +116,10 @@ cloud/e2e/s1.sh <url> <market>                    # S1 with the guardian on any 
 | 23 | 30 Sep | Second review (`15`, A13) | The guardian read events from log text without checking which program wrote them, and didn't notice truncated logs. | Fixed: events are attributed to the emitting program and only the Vault's (or Floor's) count; freeze state and tickets come from the chain; a truncated transaction's outflow comes from token balances. Seven tests (`cloud/test/events.test.mjs`), each verified to fail without its fix. |
 | 24 | 30 Sep | Second review (`15`, A12) | The docs said guardian freezes use priority fees and several RPCs; the code used neither. | Fixed: compute-unit limit and an automatic priority price on every guardian transaction; broadcast to every configured RPC. Three tests (`cloud/test/delivery.test.mjs`). |
 | 25 | 30 Sep | Second review (`15`, A9) | Pyth's Solana trust root changed on 26 Aug 2026 (3 of 5 Pyth Pro keys); the threat model didn't name it. | Documented (`04` assumption 2, T5); bounding new backed liabilities is a design item for the audit build. |
-| 26 | 30 Sep | Second review (`15`, A7) | The loosen delay had no upper bound. | Fixed in the on-chain PR: a 30-day cap in the core, the Vault and Floor. |
-| 27 | 30 Sep | Second review (`15`, A10) | The seal didn't count backing created by pre-seal deposits. | Fixed in the on-chain PR: coverage of imports plus deposits. |
-| 28 | 30 Sep | Second review (`15`, A11) | Harbor forwarded its caller-PDA signature without checking the target program. | Fixed in the on-chain PR: a built-in Vault id; guide step. |
-| 29 | 30 Sep | Second review (`15`, A8) | The mint policy allowed a mint close authority. | Fixed in the on-chain PR: extension 3 only without an authority. |
+| 26 | 30 Sep | Second review (`15`, A7) | The loosen delay had no upper bound. | Fixed 1 Oct (on-chain; devnet upgrade pending): a 30-day cap in the core, the Vault and Floor. |
+| 27 | 30 Sep | Second review (`15`, A10) | The seal didn't count backing created by pre-seal deposits. | Fixed 1 Oct (on-chain; devnet upgrade pending): coverage of imports plus deposits. |
+| 28 | 30 Sep | Second review (`15`, A11) | Harbor forwarded its caller-PDA signature without checking the target program. | Fixed 1 Oct (on-chain; devnet upgrade pending): a built-in Vault id; guide step. |
+| 29 | 30 Sep | Second review (`15`, A8) | The mint policy allowed a mint close authority. | Fixed 1 Oct (on-chain; devnet upgrade pending): extension 3 only without an authority. |
 
 A method that finds a real bug in its own authors' code within minutes, twice, is the best argument for keeping it in CI.
 
@@ -253,7 +253,7 @@ The overflow guards stay in the code as defense in depth; the tests document why
 | **Compute** | Measured through Harbor's CPI (`05 §10`) and for Floor (`06 §7`) | Within targets |
 | **End-to-end** | A real validator booted with a sealed market; the guardian freezes on its own and cancels; the page's figures equal `attest` | Pass |
 | **On devnet** | The demo market before its seal, checked without sending anything (`cloud/deploy/vault-check.mjs`); Floor's lifecycle with real transactions on a target program (`scripts/floor-devnet.sh`) | Market: as configured, page = `attest`, 11/11 forbidden actions refused (with the Vault upgraded in place on 29 Sep: an admin abdicating without a guardian quorum is refused). Floor: stopped, restored byte-identical, 17/17 refused (`08`) |
-| **Reproducible builds** | A clean rebuild in a different directory reproduces all three binaries' sha256; `scripts/verify-deployed.sh` dumps deployed programs and requires the local build byte for byte (run inside `scripts/deploy-dryrun.sh`, and on devnet) | Deterministic; the three devnet programs are byte-identical to it (hashes in `SECURITY.md`) |
+| **Reproducible builds** | A clean rebuild reproduces the binaries' sha256; `scripts/verify-deployed.sh` dumps deployed programs and requires the local build byte for byte (run inside `scripts/deploy-dryrun.sh`) | Deterministic. The devnet programs match commit `422bd1f` (hashes in `SECURITY.md`). This tree's A7–A13 fixes change the bytes, so a devnet check fails until the next in-place upgrade |
 | **After the hackathon** | Certora (CVLR) rules for I8, I11, I12; Trident flows; registering the builds with `solana-verify` | Planned; cut from this submission (they add little a judge can check in the time) |
 
 ## 8. Road to mainnet (not claimed in the submission)

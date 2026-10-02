@@ -10,12 +10,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH="$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH"
-E=target/e2e
+E="${BULKHEAD_E2E_DIR:-target/e2e}"
+case "$E" in
+  /*) ;;
+  *) E="$(pwd)/$E" ;;
+esac
 PORT="${PORT:-18899}"
 RPC="http://127.0.0.1:$PORT"
 
 echo "== building the world (LiteSVM, the same program ids)"
-(cd programs/tests && cargo test --release --test e2e_world -- --ignored >/dev/null 2>&1)
+(cd programs/tests && BULKHEAD_E2E_DIR="$E" cargo test --release --test e2e_world -- --ignored >/dev/null 2>&1)
 field() { python3 -c "import json,sys; print(json.load(open('$E/world.json'))['$1'])"; }
 VAULT=$(field vaultProgram); HARBOR=$(field harbor)
 

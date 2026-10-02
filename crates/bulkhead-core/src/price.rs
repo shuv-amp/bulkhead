@@ -36,8 +36,28 @@ pub fn is_usable(
     max_age_s: i64,
     max_conf_bps: u32,
 ) -> bool {
-    if price <= 0 || publish_time > now || now - publish_time > max_age_s {
+    // `checked_sub` rejects a publish time that would overflow the age
+    // (for example `now = i64::MAX` and a negative publish time). A future
+    // publish time is a negative age and is unusable too.
+    let Some(age) = now.checked_sub(publish_time) else {
+        return false;
+    };
+    if price <= 0 || age < 0 || age > max_age_s {
         return false;
     }
     conf as u128 * BPS <= max_conf_bps as u128 * price as u128
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_age_that_would_overflow_is_unusable() {
+        assert!(!is_usable(1, 0, -1, i64::MAX, 10, 10_000));
+        assert!(!is_usable(1, 0, i64::MIN, 1_000, 60, 10_000));
+        assert!(!is_usable(1, 0, i64::MIN, i64::MAX, i64::MAX, 10_000));
+        assert!(!is_usable(1, 0, 100, 90, 10, 10_000));
+        assert!(is_usable(1, 0, 100, 105, 10, 10_000));
+    }
 }

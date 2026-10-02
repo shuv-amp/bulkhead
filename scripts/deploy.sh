@@ -22,6 +22,17 @@ DIR="${3:-target/market-$(date +%Y%m%d-%H%M%S)}"
 
 scripts/build-programs.sh
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }
+# Harbor signs only for the Vault it was built for. A fresh keypair is not the
+# devnet Vault, so build that Harbor beside the canonical binary. Replacing
+# target/deploy/bulkhead_harbor.so would make the next devnet check deploy a
+# program that refuses the devnet Vault.
+DEVNET_VAULT=HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b
+HARBOR_SO="target/deploy/bulkhead_harbor.so"
+if [ "$(id bulkhead_vault)" != "$DEVNET_VAULT" ]; then
+  mkdir -p "$DIR"
+  scripts/build-harbor.sh "$(id bulkhead_vault)" "$DIR"
+  HARBOR_SO="$DIR/bulkhead_harbor.so"
+fi
 # Safe to re-run after a network failure: deployed programs are skipped (and
 # checked by scripts/verify-deployed.sh), a failed deploy is retried, and the
 # market is set up only once.
@@ -32,14 +43,24 @@ deployed() {
   if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deployed "$URL" "$AUTH" "$(id "$1")"
   else solana program show --url "$URL" --keypair "$PAYER" "$(id "$1")" > /dev/null 2>&1; fi
 }
+so() { if [ "$1" = bulkhead_harbor ]; then echo "$HARBOR_SO"; else echo "target/deploy/$1.so"; fi; }
+verify_one() {
+  local pair="$(id "$1")=$(so "$1")"
+  if [ "${LOADER:-cli}" = js ]; then
+    node cloud/deploy/loader.mjs verify "$URL" "$AUTH" "$pair"
+  else
+    SKIP_BUILD=1 scripts/verify-deployed.sh "$URL" "$pair"
+  fi
+}
 deploy_one() {
-  if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deploy "$URL" "$PAYER" "target/deploy/$1-keypair.json" "target/deploy/$1.so"
+  if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deploy "$URL" "$PAYER" "target/deploy/$1-keypair.json" "$(so "$1")"
   else solana program deploy --url "$URL" --keypair "$PAYER" --upgrade-authority "$PAYER" \
-    --program-id "target/deploy/$1-keypair.json" "target/deploy/$1.so"; fi
+    --program-id "target/deploy/$1-keypair.json" "$(so "$1")"; fi
 }
 for p in bulkhead_floor bulkhead_vault bulkhead_harbor; do
   if deployed "$p"; then
     echo "== $p is already deployed as $(id "$p")"
+    verify_one "$p"
     continue
   fi
   echo "== deploying $p as $(id "$p")"
@@ -47,12 +68,14 @@ for p in bulkhead_floor bulkhead_vault bulkhead_harbor; do
     if deploy_one "$p"; then
       break
     fi
-    # A deploy that failed mid-write leaves a funded buffer: reclaim it.
-    solana program close --buffers --url "$URL" --keypair "$PAYER" > /dev/null 2>&1 || true
+    # Preserve every buffer: `close --buffers` closes all buffers under this
+    # authority, including unrelated staged upgrades owned by the same key.
+    echo "warning: preserving any buffer left by the failed deploy attempt" >&2
     [ "$attempt" = 3 ] && { echo "deploy of $p failed 3 times"; exit 1; }
     echo "== retrying $p in 10 s (attempt $((attempt + 1)) of 3)"
     sleep 10
   done
+  verify_one "$p"
 done
 mkdir -p "$DIR"
 if [ -f "$DIR/world.json" ]; then

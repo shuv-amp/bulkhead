@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, floorAlerts, newState, pendingCancels, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -123,6 +123,21 @@ test("after a late freeze, every recorded ticket is swept up once, with its own 
   assert.deepEqual(pendingCancels(newState(), { ...DEFAULT_POLICY, cancelTicketsWhenFrozen: false }), []);
 });
 
+test("an externally observed chain freeze cancels tracked tickets", () => {
+  const s = newState();
+  rememberTicket(s, { ticketId: 301n, mint, vault: "vault-address", owner });
+  const actions = observeProtocolFreeze(s, 100_000, 90_000);
+  assert.deepEqual(actions.map((a) => [a.type, a.ticketId, a.vault]), [["cancel", 301n, "vault-address"]]);
+});
+
+test("settlement and cancellation events remove tickets from the cancellation set", () => {
+  const s = newState();
+  rememberTicket(s, { ticketId: 9n, mint, owner });
+  const ev = decode({ name: "vault:settled", fields: [u64le(9), u64le(50)] });
+  assess(s, ev, { now: 1 });
+  assert.deepEqual(pendingCancels(s), []);
+});
+
 test("floor readiness: an unarmed stop button and an unpinned snapshot are reported (A5)", () => {
   const ready = { status: "live", abortStaged: true, snapshotPinned: true };
   assert.deepEqual(floorAlerts(ready), []);
@@ -143,4 +158,28 @@ test("floor readiness reads the real account layout", async () => {
   assert.deepEqual(floorAlerts(decodeFloor(d)), []);
   d[426] = 1; // STATUS_ABORTED
   assert.deepEqual(floorAlerts(decodeFloor(d)).map((a) => a.code), ["stopped"]);
+});
+
+test("a later outflow is not treated as already inside an earlier window", () => {
+  const s = newState();
+  assess(s, released({ instant: 250_000n * USDC }), { worst1h, now: 20_000 }, DEFAULT_POLICY, false);
+  const actions = assess(s, released({ instant: 1n }), { worst1h, now: 10_000 });
+  assert.deepEqual(actions, []);
+  assert.equal(s.outflows.length, 2);
+});
+
+test("a recovered ticket is stamped when it was created and judged now", () => {
+  const s = newState();
+  const e = released({ queued: 250_000n * USDC, ticketId: 4n });
+  e.at = 1_000;
+  const actions = assess(s, e, { worst1h, now: 20_000 });
+  assert.deepEqual(actions, []);
+  assert.equal(s.outflows[0].t, 1_000);
+});
+
+test("a freeze already on chain retires a failed local freeze", () => {
+  const pending = { action: { type: "freeze" } };
+  assert.equal(retirePendingFreeze(pending, 90_000, 1_000), null);
+  assert.equal(retirePendingFreeze(pending, 0, 1_000), pending);
+  assert.equal(retirePendingFreeze(null, 90_000, 1_000), null);
 });

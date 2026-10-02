@@ -54,6 +54,8 @@ pub enum VaultError {
     NothingToExit,
     ZeroAmount,
     Overflow,
+    /// Loosen or upgrade delay above `MAX_LOOSEN_DELAY_S` (30 days).
+    DelayAboveMaximum,
 }
 
 impl From<VaultError> for ProgramError {

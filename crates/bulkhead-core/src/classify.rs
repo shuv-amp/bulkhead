@@ -5,7 +5,7 @@
 //! stays equal. Anything mixed is `Loosen`. Identity, guardian, admin and
 //! lifeboat-destination changes are always `Loosen` (handled by the program).
 
-use crate::consts::MIN_LOOSEN_DELAY_S;
+use crate::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
@@ -92,9 +92,11 @@ pub fn classify_asset(old: Option<&AssetConfig>, new: &AssetConfig) -> Class {
     }
 }
 
-/// Changing the loosen delay itself. Below the constant minimum is rejected.
+/// Changing the loosen delay itself. Outside `[72h, 30 days]` is rejected.
+/// A raise inside that window is a tightening: it applies at once, which is
+/// safe only because the upper bound exists.
 pub fn classify_delay(old_s: i64, new_s: i64) -> Option<Class> {
-    if new_s < MIN_LOOSEN_DELAY_S {
+    if !(MIN_LOOSEN_DELAY_S..=MAX_LOOSEN_DELAY_S).contains(&new_s) {
         return None;
     }
     Some(if new_s >= old_s {
@@ -102,4 +104,30 @@ pub fn classify_delay(old_s: i64, new_s: i64) -> Option<Class> {
     } else {
         Class::Loosen
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delay_outside_72h_to_30d_is_rejected_and_a_raise_inside_is_a_tightening() {
+        assert_eq!(
+            classify_delay(MIN_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S - 1),
+            None
+        );
+        assert_eq!(
+            classify_delay(MIN_LOOSEN_DELAY_S, MAX_LOOSEN_DELAY_S + 1),
+            None
+        );
+        assert_eq!(classify_delay(MIN_LOOSEN_DELAY_S, i64::MAX), None);
+        assert_eq!(
+            classify_delay(MIN_LOOSEN_DELAY_S, MAX_LOOSEN_DELAY_S),
+            Some(Class::Tighten)
+        );
+        assert_eq!(
+            classify_delay(MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S),
+            Some(Class::Loosen)
+        );
+    }
 }

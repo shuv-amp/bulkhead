@@ -36,7 +36,7 @@ Floor separates stopping from upgrading. Any guardian stops, new code waits 72h,
 > - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
 > - the Cloud guardian and the status page.
 >
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet), byte-identical to this checkout's build. **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). The devnet binaries match the 29 Sep upgrade, not this tree: this tree adds the A7–A13 fixes (`15`), which change the program bytes and are not on devnet until the next in-place upgrade. **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
 
 ## Why the brake must sit in the path of the money
 
@@ -100,12 +100,12 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 48/48: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute |
 | Program vs model | 12,000 random steps on-chain, every outcome equal to the core's prediction |
 | End to end | Above |
-| On devnet (28 Sep; Vault upgraded in place 29 Sep) | All three programs byte-identical to this build. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured (with the calibrated absolute caps), the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |
+| On devnet (28 Sep; Vault upgraded in place 29 Sep) | Those binaries match commit `422bd1f`, not this tree (A7–A13 change the bytes; upgrade still pending). Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused with their exact errors. The demo market before its seal: every setting as configured (with the calibrated absolute caps), the page's figures equal to `attest`, 11/11 forbidden actions refused, no payout possible ([below](#on-devnet)) |
 | What this process found in our own code and docs | 29 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
-Deployed 28 Sep 2026; the Vault was upgraded in place on 29 Sep with the adversarial review's fixes (same id, market and seal time). Anyone can check that the deployed code is exactly this checkout's deterministic build:
+Deployed 28 Sep 2026; the Vault was upgraded in place on 29 Sep with the first adversarial review's fixes (same id, market and seal time). That deployment matches commit `422bd1f`. This tree's A7–A13 fixes are not on devnet yet, so `scripts/verify-deployed.sh` against devnet fails until the next in-place upgrade. The hashes below are the 29 Sep binaries:
 
 ```bash
 scripts/verify-deployed.sh https://api.devnet.solana.com HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E=bulkhead_floor \

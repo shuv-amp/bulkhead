@@ -20,6 +20,7 @@ BPS = 10_000
 TAU_S = 86_400
 COST_MAX_MS = 1 << 61
 MIN_LOOSEN_DELAY_S = 259_200
+MAX_LOOSEN_DELAY_S = 30 * 86_400  # same cap as the Vault and Floor programs
 MIN_UPGRADE_DELAY_S = 259_200
 MAX_SLOTS = 8
 VALUE_DECIMALS = 18
@@ -315,7 +316,7 @@ def classify_asset(old, new) -> str:
 
 
 def classify_delay(old_s: int, new_s: int) -> str:
-    if new_s < MIN_LOOSEN_DELAY_S:
+    if not MIN_LOOSEN_DELAY_S <= new_s <= MAX_LOOSEN_DELAY_S:
         return "X"                           # invalid, never accepted
     return "T" if new_s >= old_s else "L"
 

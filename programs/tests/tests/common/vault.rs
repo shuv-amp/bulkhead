@@ -22,6 +22,7 @@ pub fn pyth_receiver() -> Address {
 
 /// Vault error codes (programs/vault/src/error.rs).
 pub mod verr {
+    pub const WRONG_ACCOUNT_TYPE: u32 = 8001;
     pub const WRONG_ADDRESS: u32 = 8002;
     pub const NOT_ADMIN: u32 = 8005;
     pub const NOT_GUARDIAN: u32 = 8006;
@@ -33,6 +34,7 @@ pub mod verr {
     pub const SEAL_NOT_EXECUTABLE: u32 = 8018;
     pub const IMPORT_EXCEEDS_BALANCE: u32 = 8019;
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
+    pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;
@@ -77,10 +79,39 @@ impl Env {
         (mint.pubkey(), authority)
     }
 
+    /// Creates a Token-2022 mint with a fixed transfer fee and no update
+    /// authorities. The extension bytes match TransferFeeConfig's on-chain
+    /// layout; both schedules apply from epoch zero.
+    pub fn create_fee_mint(&mut self, decimals: u8, fee_bps: u16, max_fee: u64) -> (Address, Keypair) {
+        let mint = Keypair::new();
+        let authority = Keypair::new();
+        let mut data = vec![0u8; 278]; // Mint base + padding/type + TransferFeeConfig TLV
+        data[..4].copy_from_slice(&1u32.to_le_bytes()); // Some mint authority
+        data[4..36].copy_from_slice(authority.pubkey().as_ref());
+        data[44] = decimals;
+        data[45] = 1; // initialized
+        data[165] = 1; // AccountType::Mint
+        data[166..168].copy_from_slice(&1u16.to_le_bytes()); // TransferFeeConfig
+        data[168..170].copy_from_slice(&108u16.to_le_bytes());
+        // Both OptionalNonZeroPubkeys and withheld_amount are zero. Encode
+        // identical older/newer schedules: epoch 0, max_fee, fee_bps.
+        for at in [242usize, 260] {
+            data[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
+            data[at + 8..at + 16].copy_from_slice(&max_fee.to_le_bytes());
+            data[at + 16..at + 18].copy_from_slice(&fee_bps.to_le_bytes());
+        }
+        let lamports = self.svm.minimum_balance_for_rent_exemption(data.len());
+        self.svm.set_account(mint.pubkey(), Account {
+            lamports, data, owner: token_2022(), executable: false, rent_epoch: 0,
+        }).unwrap();
+        (mint.pubkey(), authority)
+    }
+
     pub fn token_account(&mut self, mint: &Address, owner: &Address, program: &Address) -> Address {
         let acc = Keypair::new();
-        let size = 165; // no extensions: the same base layout in both token programs
-        let _ = program;
+        // TransferFeeConfig requires the Token-2022 TransferFeeAmount account extension.
+        let mint_data = self.svm.get_account(mint).expect("mint exists").data;
+        let size = if program == &token_2022() && mint_data.len() > 165 { 178 } else { 165 };
         let lamports = self.svm.minimum_balance_for_rent_exemption(size);
         let create = solana_system_interface::instruction::create_account(
             &self.payer.pubkey(),
@@ -229,7 +260,12 @@ pub fn asset_bytes(allowlisted: bool, haircut: u32, liability: u32, conf_mult: u
 
 impl Market {
     pub fn new(env: &mut Env) -> Market {
-        Market::with_ids(env, Address::new_unique(), Address::new_unique())
+        // Harbor's binary signs only for the Vault id baked in at build time.
+        // `scripts/build-programs.sh` uses the devnet Vault unless
+        // BULKHEAD_VAULT_ID is set; the end-to-end run rebuilds Harbor for
+        // its own Vault and loads it through `with_ids`.
+        let vault = Address::from_str_const("HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b");
+        Market::with_ids(env, vault, Address::new_unique())
     }
 
     /// Like `new`, with fixed program ids (the E2E world uses the ids of the
@@ -269,6 +305,34 @@ impl Market {
         let ix = m.harbor_ix(0, &args, vec![], accounts);
         env.ok(&[ix], &[]);
         m
+    }
+
+    /// Harbor's REGISTER for a program at `harbor`, using this market's admin,
+    /// guardians and lifeboat destination, and the given loosen delay.
+    pub fn register_ix(&self, env: &Env, harbor: Address, loosen_delay: i64) -> Instruction {
+        let caller = pda(&[b"bulkhead-caller"], &harbor);
+        let protocol = pda(&[b"protocol", harbor.as_ref()], &self.vault_program);
+        let mut data = vec![0u8];
+        data.extend_from_slice(self.admin.pubkey().as_ref());
+        data.push(3);
+        for k in &self.g {
+            data.extend_from_slice(k.pubkey().as_ref());
+        }
+        data.push(2);
+        data.extend_from_slice(&(7 * DAY).to_le_bytes());
+        data.extend_from_slice(&loosen_delay.to_le_bytes());
+        data.extend_from_slice(self.destination.pubkey().as_ref());
+        let accounts = vec![
+            AccountMeta::new_readonly(self.vault_program, false),
+            AccountMeta::new_readonly(caller, false),
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(protocol, false),
+            AccountMeta::new_readonly(harbor, false),
+            AccountMeta::new_readonly(harbor, false),
+            AccountMeta::new_readonly(caller, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ];
+        Instruction { program_id: harbor, accounts, data }
     }
 
     pub fn harbor_ix(&self, tag: u8, args: &[u8], harbor_accounts: Vec<AccountMeta>, vault_accounts: Vec<AccountMeta>) -> Instruction {
@@ -409,8 +473,10 @@ impl Market {
     pub fn execute_seal_ix(&self, vaults: &[&VaultRef]) -> Instruction {
         let mut a = vec![AccountMeta::new(self.protocol, false)];
         for v in vaults {
+            let lifeboat = pda(&[b"lifeboat-tokens", self.protocol.as_ref(), v.mint.as_ref()], &self.vault_program);
             a.push(AccountMeta::new_readonly(v.vault, false));
             a.push(AccountMeta::new_readonly(v.vault_tokens, false));
+            a.push(AccountMeta::new_readonly(lifeboat, false));
         }
         self.vault_ix(5, &[], a)
     }

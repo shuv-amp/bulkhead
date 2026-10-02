@@ -24,7 +24,11 @@ pub fn is_token_program(a: &Address) -> bool {
 
 const MINT_BASE_LEN: usize = 82;
 const ACCOUNT_BASE_LEN: usize = 165;
+/// Classic and Token-2022 multisig. Byte 165 is a signer pubkey byte, not an
+/// account-type tag, so a length check alone can accept one as an account.
+const MULTISIG_LEN: usize = 355;
 const ACCOUNT_TYPE_MINT: u8 = 1;
+const ACCOUNT_TYPE_ACCOUNT: u8 = 2;
 
 /// A token account's (mint, owner, amount). Requires an initialized account
 /// owned by one of the two token programs.
@@ -33,7 +37,15 @@ pub fn account_info(a: &AccountView) -> Result<([u8; 32], [u8; 32], u64), Progra
         return Err(VaultError::WrongTokenProgram.into());
     }
     let d = a.try_borrow()?;
-    if d.len() < ACCOUNT_BASE_LEN || d[108] == 0 {
+    if d.len() < ACCOUNT_BASE_LEN || d.len() == MULTISIG_LEN || d[108] == 0 {
+        return Err(VaultError::WrongAccountType.into());
+    }
+    // A classic token account is exactly 165 bytes. Anything longer is
+    // Token-2022 and must be an Account (type 2), not a mint or a multisig:
+    // those pass a length check and then fail, or worse, get misread.
+    if d.len() > ACCOUNT_BASE_LEN
+        && (a.owner() != &TOKEN_2022 || d[ACCOUNT_BASE_LEN] != ACCOUNT_TYPE_ACCOUNT)
+    {
         return Err(VaultError::WrongAccountType.into());
     }
     let mint: [u8; 32] = d[0..32].try_into().unwrap();
@@ -49,7 +61,7 @@ pub fn balance(a: &AccountView) -> Result<u64, ProgramError> {
 /// Mint decimals, after checking the mint passes the custody policy.
 ///
 /// Allowed Token-2022 extensions (by `ExtensionType` number): TransferFeeConfig
-/// (1), MintCloseAuthority (3), DefaultAccountState (6) only if not Frozen,
+/// (1), MintCloseAuthority (3) only with no close authority, DefaultAccountState (6) only if not Frozen,
 /// InterestBearingConfig (10), MetadataPointer (18), TokenMetadata (19), group
 /// pointers and members (20–23), ScaledUiAmount (25), PermissionedBurn (28).
 /// Everything else is refused, including every type not known today:
@@ -64,7 +76,7 @@ pub fn checked_mint_decimals(
         return Err(VaultError::WrongTokenProgram.into());
     }
     let d = mint.try_borrow()?;
-    if d.len() < MINT_BASE_LEN || d[45] != 1 {
+    if d.len() < MINT_BASE_LEN || d.len() == MULTISIG_LEN || d[45] != 1 {
         return Err(VaultError::WrongMint.into());
     }
     let decimals = d[44];
@@ -83,7 +95,10 @@ pub fn checked_mint_decimals(
             let value = d.get(o + 4..o + 4 + len).ok_or(VaultError::WrongMint)?;
             let allowed = match ty {
                 0 => break, // Uninitialized: end of the extensions
-                1 | 3 | 10 | 18..=23 | 25 | 28 => true,
+                1 | 10 | 18..=23 | 25 | 28 => true,
+                // A set close authority can close the mint at supply 0 and
+                // recreate the address with extensions this policy refuses.
+                3 => value.len() == 32 && value.iter().all(|b| *b == 0),
                 6 => value.first() != Some(&2), // DefaultAccountState: not Frozen
                 _ => false,
             };

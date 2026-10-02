@@ -13,8 +13,16 @@ pub const COST_MAX_MS: i64 = 1 << 61;
 /// Minimum delay for any loosening change. A proposal can ask for more, never less.
 pub const MIN_LOOSEN_DELAY_S: i64 = 259_200;
 
+/// Maximum loosen or upgrade delay. Raising the delay applies at once, so an
+/// uncapped value lets one key push every later change (admin, guardians,
+/// lifeboat destination, upgrades) out of reach. 30 days is the self-lock bound.
+pub const MAX_LOOSEN_DELAY_S: i64 = 30 * 86_400;
+
 /// Minimum delay for a Tier 0 program upgrade (same 72 hours, same reason).
 pub const MIN_UPGRADE_DELAY_S: i64 = 259_200;
+
+/// Same cap as `MAX_LOOSEN_DELAY_S`: both tiers share one delay window.
+pub const MAX_UPGRADE_DELAY_S: i64 = MAX_LOOSEN_DELAY_S;
 
 /// Longest single freeze a guardian can apply. Guardians may re-freeze.
 pub const MAX_FREEZE_S: i64 = 86_400;

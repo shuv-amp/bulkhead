@@ -66,8 +66,9 @@ export function attestLocal(vault, protocol, balance, nowS) {
   const frozenUntil = Math.max(protocol.frozenUntil, vault.frozenUntil);
   const nowMs = BigInt(nowS) * 1000n;
   const cap = (x) => (x > U64_MAX ? U64_MAX : x);
+  const min64 = (a, b) => (a < b ? a : b);
   return {
-    availableNow: nowS < frozenUntil ? 0n : availableNow(vault.tatShortMs, vault.tatLongMs, params, nowMs),
+    availableNow: nowS < frozenUntil ? 0n : min64(availableNow(vault.tatShortMs, vault.tatLongMs, params, nowMs), live),
     worst1h: cap(maxUnbackedOver(params, 3_600_000n)),
     worst24h: cap(maxUnbackedOver(params, 86_400_000n)),
     balance: BigInt(balance),
