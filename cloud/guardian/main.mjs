@@ -118,6 +118,18 @@ async function heartbeat() {
   log({ action: "heartbeat", signature: sig });
 }
 
+/** Send a heartbeat. Returns when the next one is due: sooner after a failure. */
+async function beat() {
+  let ok = true;
+  try {
+    await heartbeat();
+  } catch (e) {
+    ok = false;
+    log({ level: "warn", msg: `heartbeat failed: ${e.message}` });
+  }
+  return nextHeartbeatAt(ok, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
+}
+
 async function execute(action, event, eventTime, { retrying = false } = {}) {
   const started = Date.now();
   try {
@@ -142,6 +154,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
           cancelRetryAt.set(action.ticketId, Date.now() + CANCEL_RETRY_MS);
           return false;
         }
+        cancelRetryAt.delete(action.ticketId);
         const payer = acc.bytes.slice(136, 168); // Ticket: disc, protocol, vault, recipient, recipient_owner, payer
         ixs = [vc.cancelTicket(vault, ticket, guardian.publicKey, payer)];
         break;
@@ -196,6 +209,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
 
 /** After a freeze lands: cancel every queued ticket still outstanding. */
 async function sweepCancels(event, eventTime, { refresh = true } = {}) {
+  for (const id of cancelRetryAt.keys()) if (!state.pendingTickets.has(id)) cancelRetryAt.delete(id);
   if (refresh) {
     await tryRefreshPendingTickets();
   }
@@ -392,14 +406,7 @@ async function freezeIfWindowStillOpen(now) {
 async function main() {
   log({ msg: "guardian started", guardian: guardian.address, protocol: b58encode(vc.protocol), policy });
   await refreshWorstCase();
-  let heartbeatAt = 0;
-  try {
-    await heartbeat();
-    heartbeatAt = nextHeartbeatAt(true, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
-  } catch (e) {
-    log({ level: "warn", msg: `heartbeat failed: ${e.message}` });
-    heartbeatAt = nextHeartbeatAt(false, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
-  }
+  let heartbeatAt = await beat();
   const oldest = wallNow() - DAY_S;
   const history = await signatures(undefined, oldest);
   const until = history[0]?.signature;
@@ -446,15 +453,7 @@ async function main() {
         lastFloorCheck = Date.now();
         await checkFloor();
       }
-      if (Date.now() >= heartbeatAt) {
-        try {
-          await heartbeat();
-          heartbeatAt = nextHeartbeatAt(true, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
-        } catch (e) {
-          log({ level: "warn", msg: `heartbeat failed: ${e.message}` });
-          heartbeatAt = nextHeartbeatAt(false, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
-        }
-      }
+      if (Date.now() >= heartbeatAt) heartbeatAt = await beat();
     } catch (e) {
       log({ level: "warn", msg: e.message });
     }
