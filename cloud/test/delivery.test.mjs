@@ -67,3 +67,16 @@ test("a hanging backup send cannot delay primary confirmation", async () => {
     clearTimeout(timer);
   }
 });
+
+test("backups still get the transaction when the primary's send fails", async () => {
+  const sent = [];
+  const primary = {
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async () => { throw new Error("primary down"); },
+  };
+  const backup = { call: async (method, params) => { sent.push([method, params[0]]); return "sig"; } };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  await assert.rejects(send(primary, payer, [ix], [], { rpcs: [backup] }), /primary down/);
+  assert.deepEqual(sent.map(([m]) => m), ["sendTransaction"]);
+});
