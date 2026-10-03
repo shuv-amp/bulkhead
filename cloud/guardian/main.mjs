@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, heartbeatEverySeconds, pendingChangeVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, heartbeatEverySeconds, heartbeatEveryAfterAccount, heartbeatRoundOk, pendingChangeVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { activeTickets, activeChanges, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist } from "./chain.mjs";
 
@@ -124,21 +124,29 @@ async function heartbeat() {
  * are heartbeated in the same round, or their vetoes die when the interval ends.
  */
 async function beat() {
-  let everyS = policy.heartbeatEveryS;
-  const floorBeats = [];
+  let chainIntervalS = null;
   try {
     const acc = await rpc.account(vc.protocol);
-    if (acc) everyS = heartbeatEverySeconds(everyS, decodeProtocol(acc.bytes).heartbeatIntervalS);
-  } catch { /* the configured period still applies */ }
+    if (acc) chainIntervalS = decodeProtocol(acc.bytes).heartbeatIntervalS;
+  } catch { /* unreadable: stay inside the shortest legal interval */ }
+  let everyS = heartbeatEveryAfterAccount(policy.heartbeatEveryS, chainIntervalS);
+  const floorBeats = [];
+  const floorReads = [];
   for (const fc of floorWatch) {
     try {
       const acc = await rpc.account(fc.config);
-      if (!acc) continue;
+      if (!acc) {
+        floorReads.push(false);
+        continue;
+      }
       const fl = decodeFloor(acc.bytes);
+      floorReads.push(true);
       if (!fl.guardians.includes(guardian.address)) continue;
       everyS = Math.min(everyS, heartbeatEverySeconds(policy.heartbeatEveryS, fl.heartbeatIntervalS));
       floorBeats.push(fc);
-    } catch { /* skip this program this round */ }
+    } catch {
+      floorReads.push(false);
+    }
   }
   let ok = true;
   try {
@@ -156,7 +164,10 @@ async function beat() {
       log({ level: "warn", msg: `floor heartbeat failed: ${e.message}` });
     }
   }
-  return nextHeartbeatAt(ok, Date.now(), everyS * 1000, HEARTBEAT_RETRY_MS);
+  if (floorReads.some((readable) => !readable)) {
+    log({ level: "warn", msg: "floor config unreadable; heartbeat will retry" });
+  }
+  return nextHeartbeatAt(heartbeatRoundOk(ok, floorReads), Date.now(), everyS * 1000, HEARTBEAT_RETRY_MS);
 }
 
 async function execute(action, event, eventTime, { retrying = false } = {}) {

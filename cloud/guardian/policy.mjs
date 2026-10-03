@@ -274,6 +274,26 @@ export function nextHeartbeatAt(succeeded, now, everyMs, retryMs) {
   return now + (succeeded ? everyMs : retryMs);
 }
 
+/**
+ * A round may wait the long interval only when the vault heartbeat was sent
+ * and every watched Floor config was readable. An unreadable config is not a
+ * success: the Floor heartbeat was skipped, and the next wait would be the
+ * long interval, past the point where a stale guardian can revive itself.
+ * An empty list means no Floor is watched. A config that was read, including
+ * one whose guardian set does not include this key, is `true`.
+ */
+export function heartbeatRoundOk(sentOk, floorConfigsReadable) {
+  return Boolean(sentOk) && floorConfigsReadable.every(Boolean);
+}
+
+/** Period after a protocol-account read. An unreadable account uses the
+ * shortest legal chain interval, so a configured period equal to that
+ * window is still pulled inside it. */
+export function heartbeatEveryAfterAccount(policyEveryS, chainIntervalS) {
+  const interval = Number(chainIntervalS);
+  return heartbeatEverySeconds(policyEveryS, interval > 0 ? interval : DAY_S);
+}
+
 /** Seconds between heartbeats. A period equal to the chain interval lands
  * after the deadline once confirmation is observed, and a stale guardian
  * cannot revive itself. Stay at least an hour, and at least a tenth of the

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, decisionTime, floorAlerts, heartbeatEverySeconds, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingFreezeAfterSync, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, decisionTime, floorAlerts, heartbeatEveryAfterAccount, heartbeatEverySeconds, heartbeatRoundOk, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingFreezeAfterSync, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -235,6 +235,18 @@ test("a heartbeat period equal to the chain interval is pulled inside the window
   assert.equal(heartbeatEverySeconds(86_400, 86_400), 77_760);
   assert.equal(heartbeatEverySeconds(86_400, 604_800), 86_400);
   assert.equal(heartbeatEverySeconds(1_000, 86_400), 1_000);
+  assert.equal(heartbeatEveryAfterAccount(86_400, null), 77_760);
+  assert.equal(heartbeatEveryAfterAccount(86_400, 604_800), 86_400);
+});
+
+test("an unreadable floor config retries soon instead of waiting out the interval", () => {
+  const sentAt = 77_760_000;
+  assert.equal(heartbeatRoundOk(true, []), true);
+  assert.equal(heartbeatRoundOk(true, [true]), true);
+  assert.equal(heartbeatRoundOk(true, [false]), false);
+  assert.equal(heartbeatRoundOk(true, [true, false]), false);
+  assert.equal(heartbeatRoundOk(false, [true]), false);
+  assert.equal(nextHeartbeatAt(heartbeatRoundOk(true, [false]), sentAt, 86_400_000, 15_000), sentAt + 15_000);
 });
 
 test("a restart vetoes a loosening that is still pending and leaves a closed one", () => {
