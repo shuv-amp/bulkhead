@@ -333,11 +333,12 @@ export function stepDisposition(recorded, found) {
 
 /**
  * Why world.json must not be treated as a finished market, or null when the
- * directory matches this vault, this Harbor, and the protocol account.
- * `protocolAccount` is null when the account is absent and undefined when it
- * could not be read.
+ * directory matches this vault program, this Harbor, a protocol that has a
+ * vault and a seal, and the vault account named in the file.
+ * An account argument is null when the account is absent and undefined when
+ * it could not be read.
  */
-export function marketDirProblem(world, vaultProgram, harbor, protocolAccount) {
+export function marketDirProblem(world, vaultProgram, harbor, protocolAccount, vaultAccount) {
   if (!world || world.vaultProgram !== vaultProgram || world.harbor !== harbor) {
     return `world.json is for vault ${world?.vaultProgram} and harbor ${world?.harbor}, not ${vaultProgram} and ${harbor}`;
   }
@@ -350,19 +351,35 @@ export function marketDirProblem(world, vaultProgram, harbor, protocolAccount) {
     return "the protocol account named in world.json is not a Bulkhead protocol";
   }
   if (decoded.protocolProgram !== harbor) return "the protocol on chain was not registered by this Harbor";
+  // world.json is written only after the vault exists and the seal is proposed.
+  // A bare register at the same address is not that market.
+  if (decoded.vaultCount < 1 || (!decoded.sealed && decoded.sealExecutableS === 0)) {
+    return "the protocol on chain has no vault and seal";
+  }
+  if (vaultAccount === undefined) return "can't read the vault account named in world.json";
+  if (vaultAccount === null) return `vault ${world.vault} from world.json is not on this cluster`;
+  let vaultDecoded;
+  try {
+    vaultDecoded = decodeVault(vaultAccount.bytes ?? vaultAccount);
+  } catch {
+    return "the vault account named in world.json is not a Bulkhead vault";
+  }
+  if (vaultDecoded.protocol !== world.protocol) return "the vault on chain belongs to another protocol";
+  if (world.mint && vaultDecoded.mint !== world.mint) return "the vault on chain is for another mint";
   return null;
 }
 
 async function confirm(url, dir, vaultProgram, harbor) {
   const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
   const rpc = new Rpc(url);
-  let account;
-  try {
-    account = await rpc.account(world.protocol);
-  } catch {
-    account = undefined;
-  }
-  const problem = marketDirProblem(world, vaultProgram, harbor, account);
+  const read = async (addr) => {
+    try {
+      return await rpc.account(addr);
+    } catch {
+      return undefined;
+    }
+  };
+  const problem = marketDirProblem(world, vaultProgram, harbor, await read(world.protocol), await read(world.vault));
   if (problem) throw new Error(problem);
 }
 
