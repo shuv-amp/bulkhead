@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLogs, parseEvents, decodeTicket, concat, key, u64le, i64le, b58encode } from "../lib/solana.mjs";
-import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease } from "../guardian/chain.mjs";
+import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist } from "../guardian/chain.mjs";
 import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket } from "../guardian/policy.mjs";
 
 const VAULT = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
@@ -119,6 +119,52 @@ test("a truncated settlement is not a second outflow for a ticket already in the
   releaseOnly.transaction.message.instructions[0].data = b58encode(Uint8Array.of(8));
   assert.equal(settledTicketAccounts(releaseOnly, vaultProgram).size, 0);
   assert.equal(freshVaultOutflow(drop, settledTicketAccounts(releaseOnly, vaultProgram), [{ ticket, amount: 400n }]), drop);
+});
+
+test("a truncated settlement of a ticket that aged out of the window is not a new outflow", () => {
+  const pending = new Map([[7n, { ticketId: 7n, mint: "USDC", amount: 400n }]]);
+  const rows = settlementRows([], pending, "USDC");
+  assert.deepEqual(rows, [{ ticketId: 7n, amount: 400n }]);
+  assert.equal(freshVaultOutflow(400n, new Set(["ticket"]), [{ ticket: "ticket", amount: rows[0].amount }]), 0n);
+  // A ticket still in the window and the same pending ticket are one credit, not two.
+  const once = settlementRows([{ mint: "USDC", ticketId: 7n, amount: 400n }], pending, "USDC");
+  assert.deepEqual(once, [{ ticketId: 7n, amount: 400n }]);
+});
+
+test("a truncated payout to an allowlisted owner is not an outflow", () => {
+  const vaultTokens = "VauLtTokens11111111111111111111111111111111";
+  const recipient = "Recip111111111111111111111111111111111111111";
+  const tx = {
+    transaction: { message: { accountKeys: [vaultTokens, recipient] } },
+    meta: {
+      preTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "1000" } },
+        { accountIndex: 1, mint: "USDC", owner: "mm", uiTokenAmount: { amount: "0" } },
+      ],
+      postTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "600" } },
+        { accountIndex: 1, mint: "USDC", owner: "mm", uiTokenAmount: { amount: "400" } },
+      ],
+    },
+  };
+  const increases = tokenIncreases(tx, new Set([vaultTokens])).filter((r) => r.mint === "USDC");
+  assert.equal(countedAfterAllowlist(400n, increases, ["mm"]), 0n);
+  assert.equal(countedAfterAllowlist(400n, increases, []), 400n);
+});
+
+test("a truncated release keeps its instant when the vault balances are missing", () => {
+  const vaultTokens = "VauLtTokens11111111111111111111111111111111";
+  const present = {
+    transaction: { message: { accountKeys: [vaultTokens] } },
+    meta: {
+      preTokenBalances: [{ accountIndex: 0, uiTokenAmount: { amount: "1000" } }],
+      postTokenBalances: [{ accountIndex: 0, uiTokenAmount: { amount: "1000" } }],
+    },
+  };
+  const missing = { transaction: present.transaction, meta: { preTokenBalances: [], postTokenBalances: [] } };
+  const mints = new Map([[vaultTokens, "USDC"]]);
+  assert.equal(vaultBalancesSeen(present, mints).has("USDC"), true);
+  assert.equal(vaultBalancesSeen(missing, mints).has("USDC"), false);
 });
 
 test("a ticket read from the chain counts once, even when its event arrives too", () => {

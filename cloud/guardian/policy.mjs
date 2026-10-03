@@ -78,6 +78,7 @@ export function rememberTicket(state, ticket) {
     mint: ticket.mint ?? old.mint ?? null,
     vault: ticket.vault ?? old.vault ?? null,
     owner: ticket.owner ?? ticket.recipientOwner ?? old.owner ?? "(unknown)",
+    amount: ticket.amount ?? old.amount ?? null,
   });
 }
 
@@ -297,7 +298,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       // for tickets whose event was missed): its queued amount counts once.
       const ticket = e.queued > 0n ? e.ticketId : null;
       const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
-      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner });
+      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued });
       const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       // `e.at` is when the outflow happened. `ctx.now` is when the decision is made.

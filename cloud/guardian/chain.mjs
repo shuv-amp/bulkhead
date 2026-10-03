@@ -67,9 +67,72 @@ export function settledTicketAccounts(tx, vaultProgram) {
 }
 
 /**
+ * Queued amounts to credit when a truncated transaction settles those tickets.
+ * The rolling window forgets a ticket after a day; the ticket is still the
+ * same money leaving, so a pending ticket's amount counts too.
+ */
+export function settlementRows(outflows, pending, mint) {
+  const byTicket = new Map();
+  for (const o of outflows) {
+    if (o.mint !== mint || o.ticketId == null) continue;
+    byTicket.set(o.ticketId, o.amount);
+  }
+  for (const t of pending.values()) {
+    if (t.mint !== mint || t.amount == null) continue;
+    byTicket.set(t.ticketId, t.amount);
+  }
+  return [...byTicket].map(([ticketId, amount]) => ({ ticketId, amount }));
+}
+
+/** Mints whose watched vault token account has both a pre and a post balance. */
+export function vaultBalancesSeen(tx, tokenMints) {
+  const keys = accountKeys(tx);
+  const present = (list) => new Set((list ?? []).map((b) => keys[b.accountIndex]));
+  const pre = present(tx?.meta?.preTokenBalances);
+  const post = present(tx?.meta?.postTokenBalances);
+  const seen = new Set();
+  for (const [address, mint] of tokenMints) {
+    if (pre.has(address) && post.has(address)) seen.add(mint);
+  }
+  return seen;
+}
+
+/**
+ * Token accounts, other than the watched vault accounts, that gained `mint`.
+ * `owner` is the wallet on the balance entry. A truncated log still has this.
+ */
+export function tokenIncreases(tx, skip) {
+  const keys = accountKeys(tx);
+  const read = (list) => new Map((list ?? []).map((b) => [keys[b.accountIndex], b]));
+  const pre = read(tx?.meta?.preTokenBalances);
+  const post = read(tx?.meta?.postTokenBalances);
+  const out = [];
+  for (const [address, after] of post) {
+    if (skip.has(address) || !after?.uiTokenAmount) continue;
+    const before = pre.get(address);
+    if (!before?.uiTokenAmount || before.mint !== after.mint) continue;
+    const gained = BigInt(after.uiTokenAmount.amount) - BigInt(before.uiTokenAmount.amount);
+    if (gained <= 0n) continue;
+    out.push({ mint: after.mint, owner: after.owner, amount: gained });
+  }
+  return out;
+}
+
+/** Drop the part of a truncated outflow that landed with an allowlisted owner. */
+export function countedAfterAllowlist(drop, increases, allowlist) {
+  let credit = 0n;
+  for (const row of increases) {
+    if (row.owner && allowlist.includes(row.owner)) credit += row.amount;
+  }
+  if (credit > drop) credit = drop;
+  return drop - credit;
+}
+
+/**
  * How much of a truncated balance drop was not already counted. `windowed`
- * is `{ ticket, amount }` for queued outflows of this mint still in the
- * window; settling one of them is the same money leaving, not a new release.
+ * is `{ ticket, amount }` for queued outflows of this mint, including tickets
+ * that have aged out of the freeze window; settling one of them is the same
+ * money leaving, not a new release.
  */
 export function freshVaultOutflow(drop, settling, windowed) {
   let already = 0n;

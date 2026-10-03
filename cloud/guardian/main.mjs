@@ -34,7 +34,7 @@ import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
-import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease } from "./chain.mjs";
+import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
@@ -286,20 +286,22 @@ async function ingest(sigs, act, checkpoint = () => {}) {
     const tx = await requireTransaction(rpc, s.signature);
     const now = s.blockTime ?? tx?.blockTime ?? wallNow();
     const { events, truncated } = parseLogs(tx?.meta?.logMessages);
+    const seenMints = truncated ? vaultBalancesSeen(tx, tokenMints) : null;
     if (truncated) {
       // Events past the log cap are gone; the balances are not. Every decrease
       // of a watched vault in this transaction counts as unbacked outflow.
       if (act) log({ level: "warn", msg: "log truncated: outflow taken from token balances", signature: s.signature });
       const settling = settledTicketAccounts(tx, cfg.vaultProgram);
+      const increases = tokenIncreases(tx, new Set(tokenMints.keys()));
       for (const [mint, amount] of vaultOutflows(tx, tokenMints)) {
         const windowed = [];
-        for (const o of state.outflows) {
-          if (o.mint !== mint || o.ticketId == null) continue;
-          windowed.push({ ticket: b58encode(await vc.ticketAddress(o.ticketId)), amount: o.amount });
+        for (const row of settlementRows(state.outflows, state.pendingTickets, mint)) {
+          windowed.push({ ticket: b58encode(await vc.ticketAddress(row.ticketId)), amount: row.amount });
         }
         const fresh = freshVaultOutflow(amount, settling, windowed);
-        if (fresh === 0n) continue;
-        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: fresh, queued: 0n, ticketId: 0n, etaS: 0 };
+        const countable = countedAfterAllowlist(fresh, increases.filter((r) => r.mint === mint), policy.allowlistedOwners);
+        if (countable === 0n) continue;
+        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: countable, queued: 0n, ticketId: 0n, etaS: 0 };
         await consider(e, s.signature, now, act);
       }
     }
@@ -307,7 +309,9 @@ async function ingest(sigs, act, checkpoint = () => {}) {
       if (!trusted.includes(raw.program)) continue; // written by another program: not an event
       const e = decode(raw);
       if (e.kind === "other") continue;
-      if (truncated && e.kind === "released") e.instant = 0n; // counted from the balances above
+      // Balances already counted the instant part. If they were missing, the
+      // surviving event is the only record of it.
+      if (truncated && e.kind === "released" && seenMints.has(e.mint)) e.instant = 0n;
       await consider(e, s.signature, now, act);
     }
   }, checkpoint);
@@ -336,6 +340,7 @@ async function refreshPendingTickets({ recoverOutflows = false, act = false } = 
       mint: vaultMints.get(ticket.vault) ?? null,
       vault: ticket.vault,
       owner: ticket.recipientOwner,
+      amount: ticket.amount,
     });
   }
   return tickets.length;
