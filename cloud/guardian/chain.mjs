@@ -2,6 +2,7 @@
 // functions over RPC results, so every rule is unit-tested (cloud/test).
 
 import { b58decode, b58encode, decodeTicket, key } from "../lib/solana.mjs";
+import { readPendingChange } from "./policy.mjs";
 
 /** Vault `settle_ticket`. A settlement moves tokens already counted when queued. */
 const SETTLE_TICKET = 9;
@@ -110,7 +111,15 @@ export function tokenIncreases(tx, skip) {
   for (const [address, after] of post) {
     if (skip.has(address) || !after?.uiTokenAmount) continue;
     const before = pre.get(address);
-    if (!before?.uiTokenAmount || before.mint !== after.mint) continue;
+    // Created in this transaction: there is no pre balance. The whole post
+    // balance arrived here, which is how a first payout to an allowlisted
+    // owner looks.
+    if (!before?.uiTokenAmount) {
+      const gained = BigInt(after.uiTokenAmount.amount);
+      if (gained > 0n && after.mint) out.push({ mint: after.mint, owner: after.owner, amount: gained });
+      continue;
+    }
+    if (before.mint !== after.mint) continue;
     const gained = BigInt(after.uiTokenAmount.amount) - BigInt(before.uiTokenAmount.amount);
     if (gained <= 0n) continue;
     out.push({ mint: after.mint, owner: after.owner, amount: gained });
@@ -182,5 +191,27 @@ export async function activeTickets(rpc, vaultProgram, protocol) {
     const ticket = decodeTicket(bytes);
     if (ticket.protocol !== protocolKey) throw new Error(`ticket account ${pubkey} belongs to another protocol`);
     return { ...ticket, address: pubkey };
+  });
+}
+
+/** Change accounts for one protocol. The caller decides which are still open. */
+export async function activeChanges(rpc, vaultProgram, protocol) {
+  const protocolKey = b58encode(key(protocol));
+  const discriminator = b58encode(new TextEncoder().encode("BHCHNG01"));
+  const accounts = await rpc.call("getProgramAccounts", [b58encode(key(vaultProgram)), {
+    encoding: "base64",
+    commitment: "confirmed",
+    filters: [
+      { memcmp: { offset: 0, bytes: discriminator } },
+      { memcmp: { offset: 8, bytes: protocolKey } },
+    ],
+  }]);
+  if (!Array.isArray(accounts)) throw new Error("getProgramAccounts returned no change account list");
+  return accounts.flatMap(({ pubkey, account }) => {
+    const encoded = account?.data?.[0];
+    if (typeof encoded !== "string") throw new Error(`change account ${pubkey} has no base64 data`);
+    const change = readPendingChange(Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)));
+    if (!change || change.protocol !== protocolKey) return [];
+    return [change];
   });
 }

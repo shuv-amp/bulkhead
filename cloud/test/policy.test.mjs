@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, decisionTime, floorAlerts, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingFreezeAfterSync, queueFailedVeto, readChangeVeto, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { assess, breach, decode, decisionTime, floorAlerts, heartbeatEverySeconds, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingFreezeAfterSync, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -229,6 +229,35 @@ test("a failed veto is queued once and can be sent again", () => {
 test("a failed heartbeat is retried shortly, and a success waits out the interval", () => {
   assert.equal(nextHeartbeatAt(false, 1_000, 86_400_000, 15_000), 16_000);
   assert.equal(nextHeartbeatAt(true, 1_000, 86_400_000, 15_000), 86_401_000);
+});
+
+test("a heartbeat period equal to the chain interval is pulled inside the window", () => {
+  assert.equal(heartbeatEverySeconds(86_400, 86_400), 77_760);
+  assert.equal(heartbeatEverySeconds(86_400, 604_800), 86_400);
+  assert.equal(heartbeatEverySeconds(1_000, 86_400), 1_000);
+});
+
+test("a restart vetoes a loosening that is still pending and leaves a closed one", () => {
+  const bytes = new Uint8Array(140);
+  bytes.set(new TextEncoder().encode("BHCHNG01"));
+  new DataView(bytes.buffer).setBigUint64(40, 9n, true);
+  bytes[48] = 4;
+  new DataView(bytes.buffer).setBigInt64(132, 5_000n, true);
+  const open = readPendingChange(bytes);
+  assert.equal(open.id, 9n);
+  assert.equal(open.kind, 4);
+  const policy = { ...DEFAULT_POLICY, approvedChangeIds: [] };
+  const veto = pendingChangeVeto(open, policy, 1_000, new Set());
+  assert.equal(veto.type, "veto_change");
+  assert.equal(veto.changeId, 9n);
+  assert.equal(pendingChangeVeto(open, policy, 1_000, new Set(["c9"])), null);
+  assert.equal(pendingChangeVeto({ ...open, vetoed: true }, policy, 1_000, new Set()), null);
+  assert.equal(pendingChangeVeto(open, policy, 5_000, new Set()), null);
+  assert.equal(pendingChangeVeto(open, { ...policy, approvedChangeIds: [9] }, 1_000, new Set()), null);
+  const floor = { program: "prog", pendingKind: 1, pendingId: 4n, pendingVetoed: false, pendingTarget: "buf" };
+  assert.equal(pendingUpgradeVeto(floor, DEFAULT_POLICY, new Set()).proposalId, 4n);
+  assert.equal(pendingUpgradeVeto(floor, { ...DEFAULT_POLICY, approvedUpgradeBuffers: ["buf"] }, new Set()), null);
+  assert.equal(pendingUpgradeVeto({ ...floor, pendingKind: 2 }, DEFAULT_POLICY, new Set()), null);
 });
 
 test("a retried floor veto is dropped when a different proposal is pending", () => {

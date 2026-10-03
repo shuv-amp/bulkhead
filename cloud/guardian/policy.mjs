@@ -274,6 +274,60 @@ export function nextHeartbeatAt(succeeded, now, everyMs, retryMs) {
   return now + (succeeded ? everyMs : retryMs);
 }
 
+/** Seconds between heartbeats. A period equal to the chain interval lands
+ * after the deadline once confirmation is observed, and a stale guardian
+ * cannot revive itself. Stay at least an hour, and at least a tenth of the
+ * interval, inside the chain window.
+ */
+export function heartbeatEverySeconds(everyS, chainIntervalS) {
+  const every = Number(everyS);
+  if (!(every > 0)) return every;
+  const interval = Number(chainIntervalS);
+  if (!(interval > 0)) return every;
+  const slack = Math.max(3_600, Math.floor(interval / 10));
+  const ceiling = interval - slack;
+  if (ceiling <= 0) return every;
+  return Math.min(every, ceiling);
+}
+
+/** A `BHCHNG01` account still waiting, or null. */
+export function readPendingChange(bytes) {
+  if (!bytes || bytes.length < 140) return null;
+  if (new TextDecoder().decode(bytes.subarray(0, 8)) !== "BHCHNG01") return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    protocol: b58encode(bytes.subarray(8, 40)),
+    id: view.getBigUint64(40, true),
+    kind: bytes[48],
+    vetoed: bytes[49] !== 0,
+    executed: bytes[50] !== 0,
+    expiresS: Number(view.getBigInt64(132, true)),
+  };
+}
+
+/** Veto a loosening that is still pending. History replay does not send
+ * actions, so a restart has to read the account. `already` is `state.vetoed`.
+ */
+export function pendingChangeVeto(change, policy, now, already) {
+  if (!policy.vetoLoosenings || !change || change.vetoed || change.executed) return null;
+  if (Number.isFinite(change.expiresS) && now >= change.expiresS) return null;
+  const id = BigInt(change.id);
+  if (already?.has(`c${id}`)) return null;
+  if ((policy.approvedChangeIds ?? []).map(BigInt).includes(id)) return null;
+  return { type: "veto_change", changeId: id, reason: `loosening ${id} (kind ${change.kind}) is still pending` };
+}
+
+/** Veto a Floor upgrade that is still pending. Same rule as a live
+ * `floor:proposed` event: only kind 1, and not a pre-approved buffer.
+ */
+export function pendingUpgradeVeto(floor, policy, already) {
+  if (!floor || floor.pendingKind !== 1 || floor.pendingVetoed) return null;
+  const id = BigInt(floor.pendingId);
+  if (already?.has(`f${floor.program}:${id}`)) return null;
+  if ((policy.approvedUpgradeBuffers ?? []).includes(floor.pendingTarget)) return null;
+  return { type: "floor_veto", program: floor.program, proposalId: id, reason: `upgrade to unapproved buffer ${floor.pendingTarget} is still pending` };
+}
+
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
 export function observeProtocolFreeze(state, until, now, policy = DEFAULT_POLICY, act = true) {
   state.frozenUntil = Math.max(state.frozenUntil, until);

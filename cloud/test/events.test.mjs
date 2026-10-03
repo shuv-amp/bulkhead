@@ -150,6 +150,21 @@ test("a truncated payout to an allowlisted owner is not an outflow", () => {
   const increases = tokenIncreases(tx, new Set([vaultTokens])).filter((r) => r.mint === "USDC");
   assert.equal(countedAfterAllowlist(400n, increases, ["mm"]), 0n);
   assert.equal(countedAfterAllowlist(400n, increases, []), 400n);
+  // The recipient account was created in this transaction, so it has no pre balance.
+  const created = {
+    transaction: { message: { accountKeys: [vaultTokens, recipient] } },
+    meta: {
+      preTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "1000" } },
+      ],
+      postTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "600" } },
+        { accountIndex: 1, mint: "USDC", owner: "mm", uiTokenAmount: { amount: "400" } },
+      ],
+    },
+  };
+  const fresh = tokenIncreases(created, new Set([vaultTokens])).filter((r) => r.mint === "USDC");
+  assert.equal(countedAfterAllowlist(400n, fresh, ["mm"]), 0n);
 });
 
 test("a truncated release keeps its instant when the vault balances are missing", () => {

@@ -32,9 +32,9 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, pendingFreezeAfterSync, decisionTime, noteMissingTicket, queueFailedVeto, nextHeartbeatAt, heartbeatEverySeconds, pendingChangeVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
-import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist } from "./chain.mjs";
+import { activeTickets, activeChanges, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
@@ -69,6 +69,7 @@ const CANCEL_RETRY_MS = 15_000;
 const VETO_RETRY_MS = 15_000;
 const HEARTBEAT_RETRY_MS = 15_000;
 let nextTicketScanAt = 0;
+let nextChangeScanAt = 0;
 let sweptFreezeUntil = 0;
 
 function wallNow() {
@@ -118,8 +119,27 @@ async function heartbeat() {
   log({ action: "heartbeat", signature: sig });
 }
 
-/** Send a heartbeat. Returns when the next one is due: sooner after a failure. */
+/** Send a heartbeat. Returns when the next one is due: sooner after a failure.
+ * The wait stays inside the on-chain interval. Floor programs this key guards
+ * are heartbeated in the same round, or their vetoes die when the interval ends.
+ */
 async function beat() {
+  let everyS = policy.heartbeatEveryS;
+  const floorBeats = [];
+  try {
+    const acc = await rpc.account(vc.protocol);
+    if (acc) everyS = heartbeatEverySeconds(everyS, decodeProtocol(acc.bytes).heartbeatIntervalS);
+  } catch { /* the configured period still applies */ }
+  for (const fc of floorWatch) {
+    try {
+      const acc = await rpc.account(fc.config);
+      if (!acc) continue;
+      const fl = decodeFloor(acc.bytes);
+      if (!fl.guardians.includes(guardian.address)) continue;
+      everyS = Math.min(everyS, heartbeatEverySeconds(policy.heartbeatEveryS, fl.heartbeatIntervalS));
+      floorBeats.push(fc);
+    } catch { /* skip this program this round */ }
+  }
   let ok = true;
   try {
     await heartbeat();
@@ -127,7 +147,16 @@ async function beat() {
     ok = false;
     log({ level: "warn", msg: `heartbeat failed: ${e.message}` });
   }
-  return nextHeartbeatAt(ok, Date.now(), policy.heartbeatEveryS * 1000, HEARTBEAT_RETRY_MS);
+  for (const fc of floorBeats) {
+    try {
+      const sig = await send(rpc, guardian, [fc.heartbeat(guardian.publicKey)], [], await sendOptions());
+      log({ action: "floor_heartbeat", program: b58encode(fc.protected), signature: sig });
+    } catch (e) {
+      ok = false;
+      log({ level: "warn", msg: `floor heartbeat failed: ${e.message}` });
+    }
+  }
+  return nextHeartbeatAt(ok, Date.now(), everyS * 1000, HEARTBEAT_RETRY_MS);
 }
 
 async function execute(action, event, eventTime, { retrying = false } = {}) {
@@ -402,6 +431,41 @@ async function checkFloor() {
   }
 }
 
+/** Veto loosenings and Floor upgrades that are still pending. Replay does not
+ * send actions, so a proposal that landed while this process was down is read
+ * from the account.
+ */
+async function vetoStillPending(now) {
+  const actions = [];
+  if (policy.vetoLoosenings) {
+    try {
+      for (const change of await activeChanges(rpc, cfg.vaultProgram, vc.protocol)) {
+        const action = pendingChangeVeto(change, policy, now, state.vetoed);
+        if (!action) continue;
+        state.vetoed.add(`c${action.changeId}`);
+        actions.push(action);
+      }
+    } catch (e) {
+      log({ level: "warn", msg: `change scan failed; retrying: ${e.message}` });
+    }
+  }
+  for (const fc of floorWatch) {
+    try {
+      const acc = await rpc.account(fc.config);
+      if (!acc) continue;
+      const fl = decodeFloor(acc.bytes);
+      const action = pendingUpgradeVeto(fl, policy, state.vetoed);
+      if (!action) continue;
+      state.vetoed.add(`f${action.program}:${action.proposalId}`);
+      actions.push(action);
+    } catch (e) {
+      log({ level: "warn", msg: `floor proposal scan failed; retrying: ${e.message}` });
+    }
+  }
+  if (actions.length) await applyActions(actions, { reason: "still pending" }, now);
+  nextChangeScanAt = Date.now() + 60_000;
+}
+
 async function freezeIfWindowStillOpen(now) {
   if (now < state.frozenUntil || state.freezing) return;
   const mints = new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
@@ -430,6 +494,7 @@ async function main() {
   // so an already-active freeze must sweep tickets at startup too.
   await syncFromChain(true, { startup: true });
   await freezeIfWindowStillOpen(decisionTime(wallNow(), state.outflows));
+  await vetoStillPending(wallNow());
   log({ msg: "caught up", signatures: inWindow.length });
   await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
@@ -461,7 +526,11 @@ async function main() {
       if (Date.now() - lastAttest > 10_000) {
         await refreshWorstCase();
         lastAttest = Date.now();
+        // A failed startup attest leaves the loaded window unjudged. Judge it
+        // once a figure exists.
+        await freezeIfWindowStillOpen(decisionTime(wallNow(), state.outflows));
       }
+      if (Date.now() >= nextChangeScanAt) await vetoStillPending(wallNow());
       if (floorWatch.length && Date.now() - lastFloorCheck > 60_000) {
         lastFloorCheck = Date.now();
         await checkFloor();
