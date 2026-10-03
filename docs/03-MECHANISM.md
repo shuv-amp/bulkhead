@@ -314,11 +314,14 @@ Examples (golden G-12):
 
 ```
 instant_now = available_now = min_k ⌊(W_k − backlog_k) · C_k / W_k⌋,   backlog_k = max(TAT_k, now) − now
-per_hour    = min_k C_k · 3 600 000 / W_k
-per_day_max = C_l · (W_l + 86 400 000) / W_l
+worst_T     = min_k C_k · (W_k + T) / W_k
+worst_1h    = worst_T at T = 3 600 000 ms
+worst_24h   = worst_T at T = 86 400 000 ms
 ```
 
-`available_now` is exact: that amount would be instant and one unit more would not. The property `available_now_is_exact` checks it.
+`available_now` is exact for the limiter: that amount would be instant and one unit more would not. The property `available_now_is_exact` checks it. The on-chain `attest` field is that amount capped at the vault token balance (or zero while frozen), because a transfer cannot pay more than the account holds.
+
+`worst_T` is the G1 bound from §2.4, starting from a full bucket, and it is the minimum of both buckets. For the 10M USDC vault, `worst_1h` is 400,000 and `worst_24h` is 1,000,000 (golden G-6). The on-chain fields are this bound. They are a property of the capacities, so a configured floor can make them larger than the tokens currently in the vault; `balance` is reported beside them.
 
 ## 8. Floor helpers
 
