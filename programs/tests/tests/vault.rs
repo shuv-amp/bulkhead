@@ -1062,6 +1062,33 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
 }
 
 #[test]
+fn a_release_cannot_pay_the_lifeboat() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let mv = w.m.vault_ix(24, &(1 * USDC).to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.usdc.vault_tokens, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    w.env.ok(&[mv], &[&w.m.admin]);
+    // The lifeboat is a vault-owned token account. Paying it through release
+    // would move tokens there without updating lifeboat_amount, so a later
+    // exit would not see them.
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &lifeboat, &w.usdc.vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
+    assert_eq!(w.env.balance(&lifeboat), 1 * USDC);
+}
+
+#[test]
 fn sealing_counts_the_spendable_lifeboat_balance_after_token_2022_fees() {
     let mut w = World::with_transfer_fee_mint();
     let depositor = w.user();

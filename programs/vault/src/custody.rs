@@ -281,7 +281,16 @@ pub fn release(
         acc(accounts, 7)?,
     );
     check_vault_accounts(&v, vault_tokens, mint, token_program)?;
-    if recipient.address() == vault_tokens.address() {
+    if recipient.address() == vault_tokens.address()
+        || expect_pda(
+            &[seeds::LIFEBOAT_TOKENS, &v.protocol, &v.mint],
+            program_id,
+            recipient,
+        )
+        .is_ok()
+    {
+        // The lifeboat is entered only by lifeboat_move, which records the
+        // balance. A release would park tokens there and leave that record short.
         return Err(VaultError::DuplicateAccount.into());
     }
     let (rmint, owner, _) = token::account_info(recipient)?;
@@ -444,6 +453,15 @@ pub fn settle_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     }
     if key(recipient) != tk.recipient || key(acc(accounts, 6)?) != tk.payer {
         return Err(VaultError::RecipientOwnerMismatch.into());
+    }
+    if expect_pda(
+        &[seeds::LIFEBOAT_TOKENS, &v.protocol, &v.mint],
+        program_id,
+        recipient,
+    )
+    .is_ok()
+    {
+        return Err(VaultError::DuplicateAccount.into());
     }
     let t = now()?;
     if t < tk.eta_s {

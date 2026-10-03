@@ -45,6 +45,7 @@ pub mod verr {
     pub const CHANGE_NOT_EXECUTABLE: u32 = 8033;
     pub const CHANGE_VETOED: u32 = 8034;
     pub const ABDICATED: u32 = 8037;
+    pub const DUPLICATE_ACCOUNT: u32 = 8041;
     pub const CANNOT_EJECT: u32 = 8042;
     pub const GENESIS_ONLY: u32 = 8043;
     pub const DESTINATION_NOT_SETTLED: u32 = 8044;
