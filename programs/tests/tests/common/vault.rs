@@ -35,6 +35,7 @@ pub mod verr {
     pub const IMPORT_EXCEEDS_BALANCE: u32 = 8019;
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
     pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
+    pub const INSUFFICIENT_BALANCE: u32 = 8049;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;

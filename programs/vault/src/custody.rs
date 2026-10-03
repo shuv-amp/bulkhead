@@ -349,6 +349,12 @@ pub fn release(
     outcome[16..24].copy_from_slice(&queued.to_le_bytes());
     outcome[24..32].copy_from_slice(&ticket_id.to_le_bytes());
     outcome[32..40].copy_from_slice(&eta_s.to_le_bytes());
+    // The lifeboat, or a floor above the live balance, can make the ledger and
+    // the limiter promise more than this token account holds. Quote and release
+    // must agree: the token program would reject the transfer.
+    if backed + instant > balance {
+        return Err(VaultError::InsufficientBalance.into());
+    }
     if dry_run {
         pinocchio::cpi::set_return_data(&outcome);
         return Ok(());
