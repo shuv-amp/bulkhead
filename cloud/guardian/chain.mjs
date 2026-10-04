@@ -152,6 +152,19 @@ export function freshVaultOutflow(drop, settling, windowed) {
 }
 
 /**
+ * Instant still to record after a truncated balance figure. `covered` is the
+ * amount already counted for this mint. A deposit in the same transaction can
+ * make that figure smaller than the release that survived in the log; the
+ * remainder is still an outflow. A figure at least as large as the instant
+ * already includes it, so the event must not add it again.
+ */
+export function releaseInstantBesideBalance(instant, covered) {
+  const have = covered > 0n ? covered : 0n;
+  if (instant <= have) return { instant: 0n, covered: have - instant };
+  return { instant: instant - have, covered: 0n };
+}
+
+/**
  * A release record for a ticket read from its account, for tickets whose
  * event the guardian never saw. `null` for a vault this guardian doesn't watch.
  */

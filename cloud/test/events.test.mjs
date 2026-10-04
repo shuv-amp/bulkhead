@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLogs, parseEvents, decodeTicket, concat, key, u64le, i64le, b58encode } from "../lib/solana.mjs";
-import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist } from "../guardian/chain.mjs";
+import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, vaultBalancesSeen, tokenIncreases, countedAfterAllowlist, releaseInstantBesideBalance } from "../guardian/chain.mjs";
 import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket } from "../guardian/policy.mjs";
 
 const VAULT = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
@@ -165,6 +165,30 @@ test("a truncated payout to an allowlisted owner is not an outflow", () => {
   };
   const fresh = tokenIncreases(created, new Set([vaultTokens])).filter((r) => r.mint === "USDC");
   assert.equal(countedAfterAllowlist(400n, fresh, ["mm"]), 0n);
+});
+
+test("a same-transaction deposit does not erase a surviving truncated release", () => {
+  const vaultTokens = "VauLtTokens11111111111111111111111111111111";
+  const tx = {
+    transaction: { message: { accountKeys: [vaultTokens] } },
+    meta: {
+      preTokenBalances: [{ accountIndex: 0, uiTokenAmount: { amount: "1000" } }],
+      postTokenBalances: [{ accountIndex: 0, uiTokenAmount: { amount: "1000" } }],
+    },
+  };
+  const mints = new Map([[vaultTokens, "USDC"]]);
+  const fromBalances = vaultOutflows(tx, mints).get("USDC") ?? 0n;
+  assert.equal(fromBalances, 0n);
+  assert.equal(vaultBalancesSeen(tx, mints).has("USDC"), true);
+  assert.equal(releaseInstantBesideBalance(500n, fromBalances).instant, 500n);
+  assert.equal(releaseInstantBesideBalance(500n, 500n).instant, 0n);
+  assert.equal(releaseInstantBesideBalance(500n, 300n).instant, 200n);
+  let covered = 500n;
+  const first = releaseInstantBesideBalance(200n, covered);
+  covered = first.covered;
+  const second = releaseInstantBesideBalance(300n, covered);
+  assert.equal(first.instant + second.instant, 0n);
+  assert.equal(releaseInstantBesideBalance(100n, 500n).instant, 0n);
 });
 
 test("a truncated release keeps its instant when the vault balances are missing", () => {
