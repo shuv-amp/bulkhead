@@ -281,19 +281,17 @@ pub fn release(
         acc(accounts, 7)?,
     );
     check_vault_accounts(&v, vault_tokens, mint, token_program)?;
-    if recipient.address() == vault_tokens.address()
-        || expect_pda(
-            &[seeds::LIFEBOAT_TOKENS, &v.protocol, &v.mint],
-            program_id,
-            recipient,
-        )
-        .is_ok()
-    {
-        // The lifeboat is entered only by lifeboat_move, which records the
-        // balance. A release would park tokens there and leave that record short.
+    if recipient.address() == vault_tokens.address() {
         return Err(VaultError::DuplicateAccount.into());
     }
     let (rmint, owner, _) = token::account_info(recipient)?;
+    if owner == key(acc(accounts, 2)?) {
+        // A token account the vault PDA owns: the lifeboat (entered only by
+        // lifeboat_move, which records the balance), or any other account
+        // someone opened for the vault PDA, which no instruction can move
+        // tokens out of. Either way a payout there is lost to the ledger.
+        return Err(VaultError::DuplicateAccount.into());
+    }
     if rmint != v.mint {
         return Err(VaultError::WrongMint.into());
     }
@@ -460,13 +458,9 @@ pub fn settle_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     if key(recipient) != tk.recipient || key(acc(accounts, 6)?) != tk.payer {
         return Err(VaultError::RecipientOwnerMismatch.into());
     }
-    if expect_pda(
-        &[seeds::LIFEBOAT_TOKENS, &v.protocol, &v.mint],
-        program_id,
-        recipient,
-    )
-    .is_ok()
-    {
+    // The owner as it is now: a token account's owner can be changed after the
+    // ticket was created. Same rule as `release`.
+    if token::account_info(recipient)?.1 == key(acc(accounts, 1)?) {
         return Err(VaultError::DuplicateAccount.into());
     }
     let t = now()?;

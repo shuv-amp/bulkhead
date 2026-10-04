@@ -1089,6 +1089,21 @@ fn a_release_cannot_pay_the_lifeboat() {
 }
 
 #[test]
+fn a_release_cannot_pay_any_account_the_vault_owns() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    // Anyone can open a token account whose owner is the vault PDA. No
+    // instruction moves tokens out of one, so a payout there is stranded.
+    let (mint, vault, program) = (w.usdc.mint, w.usdc.vault, w.usdc.token_program);
+    let stray = w.env.token_account(&mint, &vault, &program);
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
+    assert_eq!(w.env.balance(&stray), 0);
+}
+
+#[test]
 fn a_quote_cannot_promise_more_than_the_vault_holds() {
     let mut w = World::new();
     let whale = w.user();
