@@ -209,6 +209,48 @@ pub fn reset_backlog(
     Ok(())
 }
 
+/// When a vault's windows change (a new `LimitConfig`), keep each bucket's
+/// *used fraction*: the backlog becomes `ceil(backlog * W_new / W_old)`.
+///
+/// A TAT is a backlog in milliseconds, and the same backlog is a smaller
+/// fraction of a longer window. Without this, lengthening a window (a
+/// tightening, so it applies at once) would make a just-drained bucket look
+/// partly empty, and a stolen admin key could repeat it to take the burst
+/// again and again in one second (docs/09 §4, found by the program-vs-model
+/// review). With the fraction kept, a tightening never raises the instant
+/// room: `(1 - f) * C_new <= (1 - f) * C_old`. Rounding up only ever keeps
+/// more of the bucket used. A bucket with no backlog is unchanged.
+pub fn rescale_windows(
+    state: &mut LimiterState,
+    old: &LimiterParams,
+    new: &LimiterParams,
+    now_ms: i64,
+) {
+    fn one(tat: i64, old_w: i64, new_w: i64, now: i64) -> i64 {
+        // No backlog, or a window no valid config has (a defensive guard).
+        if tat <= now || old_w <= 0 || new_w <= 0 {
+            return tat;
+        }
+        // backlog < 2^63 and new_w < 2^63, so the product fits in u128.
+        let backlog = (tat - now) as u128;
+        let scaled = ceil_div_u128(backlog * new_w as u128, old_w as u128);
+        // Saturate like `cost_ms`, so a later request's TAT + cost cannot overflow.
+        now.saturating_add(scaled.min(COST_MAX_MS as u128) as i64)
+    }
+    state.tat_short_ms = one(
+        state.tat_short_ms,
+        old.short.window_ms,
+        new.short.window_ms,
+        now_ms,
+    );
+    state.tat_long_ms = one(
+        state.tat_long_ms,
+        old.long.window_ms,
+        new.long.window_ms,
+        now_ms,
+    );
+}
+
 /// Largest amount that would be paid instantly right now (ignoring freezes).
 /// This is the "worst case right now" number on the status page.
 pub fn available_now(state: &LimiterState, p: &LimiterParams, now_ms: i64) -> u64 {

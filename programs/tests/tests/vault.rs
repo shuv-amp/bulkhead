@@ -1352,3 +1352,39 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     assert_eq!(w.env.balance(&loot), 199_000 * USDC);
     assert_eq!(w.env.balance(&w.usdc.vault_tokens), 9_801_000 * USDC, "98% stays");
 }
+
+#[test]
+fn lengthening_a_window_is_a_tightening_that_grants_no_new_burst() {
+    // G1 against a stolen admin key: a window lengthening is classified as a
+    // tightening, so it applies at once. If the bucket kept its backlog in
+    // milliseconds, a drained bucket would look partly empty under the longer
+    // window, and repeating the change would pay the burst again and again.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    let thief = w.user();
+    let to = w.account("usdc", &thief.pubkey());
+    let burst = w.m.attest(&mut w.env, &w.usdc).available_now;
+    assert_eq!(burst, 200_000 * USDC);
+    let mut paid = 0;
+    let mut limits = Limits::default_limits();
+    for _ in 0..6 {
+        let now = w.m.attest(&mut w.env, &w.usdc).available_now;
+        if now > 0 {
+            let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &thief.pubkey(), now, &w.usdc_prices(true));
+            w.env.ok(&[ix], &[&w.m.admin]);
+            paid += now;
+        }
+        // "Tighten": both windows four times longer, same bps.
+        limits.short_window_s *= 4;
+        limits.long_window_s *= 4;
+        let ix = w.m.propose_change_ix(&w.env, 0, &vault, &limits.bytes(), Some(&vault));
+        w.env.ok(&[ix], &[&w.m.admin]);
+        w.env.next_slot();
+    }
+    assert_eq!(w.env.balance(&to), paid);
+    // Everything above happened in the same second: G1 at T = 0 is one burst.
+    assert!(paid <= burst, "a stolen admin key took {} USDC instantly; G1 allows {}", paid / USDC, burst / USDC);
+}

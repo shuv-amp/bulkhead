@@ -14,7 +14,7 @@ use bulkhead_core::classify::{
 };
 use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
 use bulkhead_core::governance::{can_execute, schedule, Abdications, Schedule};
-use bulkhead_core::limiter::config_is_valid;
+use bulkhead_core::limiter::{config_is_valid, params_from_config, rescale_windows};
 
 // A short-lived value on the stack; no allocator exists to box the guardian set.
 #[allow(clippy::large_enum_variant)]
@@ -82,6 +82,17 @@ fn apply(
                 return Err(VaultError::WrongVault.into());
             }
             let mut v = load_vault(program_id, &accounts[protocol_i], &accounts[target_i])?;
+            // Keep each bucket's used fraction across a window change, or a
+            // longer window (a tightening, applied at once) refills a drained
+            // bucket. Capacities don't enter: only the windows are read.
+            let mut state = v.limiter_state();
+            rescale_windows(
+                &mut state,
+                &params_from_config(&v.limits, 0),
+                &params_from_config(&l, 0),
+                t.saturating_mul(1_000),
+            );
+            v.set_limiter_state(state);
             v.limits = l;
             save(&mut accounts[target_i], |d| v.store(d))
         }

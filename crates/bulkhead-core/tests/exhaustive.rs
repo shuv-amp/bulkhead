@@ -10,7 +10,8 @@
 
 use bulkhead_core::ledger::{Ledger, Mint, Pricing};
 use bulkhead_core::limiter::{
-    capacity_from_ref, cost_ms, request, Bucket, Decision, LimiterParams, LimiterState,
+    available_now, capacity_from_ref, cost_ms, request, rescale_windows, Bucket, Decision,
+    LimiterParams, LimiterState,
 };
 use bulkhead_core::value::value_v;
 
@@ -203,4 +204,62 @@ fn g1_holds_for_every_three_request_sequence() {
     }
     // coverage: the domain exercises both outcomes
     assert!(queued > 0 && checked > 1_000_000);
+}
+
+/// Every backlog in 0..=200 ms, every old and new window in 1..=48 ms with the
+/// new one no shorter, and every capacity pair in 1..=8 with the new one no
+/// larger: a tightening applied with `rescale_windows` never raises the
+/// instant room, now or at any later time up to two windows on with no
+/// request in between. (Before the rescaling existed, a longer window turned
+/// a drained bucket partly full; docs/09 §4.)
+#[test]
+fn a_tightening_never_raises_the_room() {
+    let one = |capacity, window_ms| LimiterParams {
+        short: Bucket {
+            capacity,
+            window_ms,
+        },
+        long: Bucket {
+            capacity,
+            window_ms,
+        },
+        min_queue_delay_ms: 0,
+        horizon_ms: 0,
+    };
+    let now = 1_000_000i64;
+    let mut n = 0u64;
+    for backlog in 0..=200i64 {
+        let s = LimiterState {
+            tat_short_ms: now + backlog,
+            tat_long_ms: now + backlog,
+        };
+        for wo in 1..=48i64 {
+            for wn in wo..=48i64 {
+                for co in 1..=8u64 {
+                    let old = one(co, wo);
+                    let mut sn = s;
+                    rescale_windows(&mut sn, &old, &one(1, wn), now);
+                    // Exactly the used fraction, rounded toward "used".
+                    let bn = sn.tat_short_ms - now;
+                    if backlog > 0 && wn != wo {
+                        assert!(bn * wo >= backlog * wn && (bn - 1) * wo < backlog * wn);
+                    } else {
+                        assert_eq!(bn, backlog);
+                    }
+                    for cn in 1..=co {
+                        let new = one(cn, wn);
+                        for dt in 0..=2 * wn {
+                            let later = now + dt;
+                            assert!(
+                                available_now(&sn, &new, later) <= available_now(&s, &old, later),
+                                "backlog {backlog}, W {wo}->{wn}, C {co}->{cn}, +{dt}"
+                            );
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(n > 10_000_000);
 }

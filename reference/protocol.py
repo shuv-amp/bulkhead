@@ -61,6 +61,10 @@ class Session:
             return " ".join(str(x) for x in r)
         if cmd == "A":
             return f"A {self.limiter.available_now(int(a[0]))}"
+        if cmd == "W":
+            now, w1, w2 = map(int, a)
+            r = self.limiter.set_windows(now, w1, w2)
+            return " ".join(str(x) for x in r)
         if cmd == "M":
             c1, w1, c2, w2, tm = map(int, a)
             return f"M {ref.max_unbacked_over(c1, w1, c2, w2, max(tm, 0))}"

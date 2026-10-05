@@ -23,7 +23,7 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Regression fixtures** | `reference/regressions/`: 35 cases from real past mismatches, each with its current expected output (`reference/golden/regressions-expected.txt`) | 35/35 reproduced by the Rust core in `cargo test` |
 | **Differential runner** | Random cases for 29 commands (limiter, capacity, EMA, value, price, ledger, classification, ELF, governance, eject, Floor parsers, snapshot identity, murmur3, restore), weighted to edge values | 6,943,561 lines identical in the final 6-seed run (seeds 101–106, 200k cases each, 27 Sep; ~1.15M lines per seed) |
 | **Property tests** | 21 tests, seeded SplitMix64; `BULKHEAD_CASES` scales depth; coverage floors (proportional to depth) make vacuous passes fail | Pass at 1.5k, 3k, 20k and 100k cases each |
-| **Exhaustive checks** | 5 tests: every input of a small domain for the arithmetic properties (§5.2) | ~25.7M inputs |
+| **Exhaustive checks** | 6 tests: every input of a small domain for the arithmetic properties (§5.2) | ~584M inputs |
 | **Floor core tests** | 10 tests: the sBPF v3 strict ELF rules restated, murmur3 published vectors, loader-v3 headers, snapshot identity | Pass |
 | **Targeted unit tests** | 17 tests: 16 each written to kill a surviving mutant (§6), and `capacity_base` | Pass |
 | **Adversarial tests** | 7 tests (`crates/bulkhead-core/tests/adversarial.rs`): the attacks of `15` run through the real core, before and after each fix | Pass |
@@ -32,6 +32,8 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Mutation testing** | `cargo-mutants` on the core: 647 mutants (§6) | Every non-equivalent mutant killed; 22 equivalents, each explained |
 | **Program tests** | Floor (21) and Vault (27) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 48/48 |
 | **Program ↔ model differential** | Random operation sequences on-chain vs a host model built only from the core; invariants after every step (§7) | 12,000 steps across 24 seeds, identical; 24,000 steps across 24 seeds after the A1 fix (29 Sep), identical |
+| **Wide program differential** | The same, with a limit configuration drawn per seed (floors and caps far above the balance, a closed lane, a queue delay past the horizon) and every instruction that changes what can leave: protocol and vault freezes, quorum unfreezes, ticket extensions, backlog resets, lifeboat moves both ways, limit changes; `quote_release` against the release, every `attest` field against the core (§7) | 5 Oct: 200,000 steps across 400 configurations, then 100,000 with limit changes after finding 30, identical |
+| **Floor differential** | Random sequences of every Floor instruction but `register` and `release_authority` on the real loader, against a model built from the core's governance and restore rules; stale guardians, strangers, a former owner, wrong and malformed veto ids (§7) | 5 Oct: 200,000 steps across 400 seeds, every config field and the live code identical |
 | **End-to-end** | `solana-test-validator` + the programs + the Cloud guardian + an attacker (`cloud/e2e/run.sh`) | Attacker ordered 1.2M and got 100k: the burst is 2% of what is in the vault at each payout, so the second 100k no longer fit (200k before the 29 Sep fix); guardian froze 2–6 s after the triggering block (across runs); every queued payout cancelled; page numbers equal to `attest`; the run fails unless all of this holds |
 | **Client tests** | 25 JavaScript tests: base58, legacy messages, PDA derivation against an on-chain address, 256 curve25519 vectors from `curve25519-dalek`, RFC 8032 test vector 1, the guardian's policy and its follower, a paced attacker against the policy, the 40,000-case JS-vs-Python differential | 25/25 |
 | **`floor check` self-test** | The Python on-curve test against the same 256 dalek vectors | Agrees on all 256 |
@@ -120,6 +122,7 @@ cloud/e2e/s1.sh <url> <market>                    # S1 with the guardian on any 
 | 27 | 30 Sep | Second review (`15`, A10) | The seal didn't count backing created by pre-seal deposits. | Fixed 1 Oct (on-chain; devnet upgrade pending): coverage of imports plus deposits. |
 | 28 | 30 Sep | Second review (`15`, A11) | Harbor forwarded its caller-PDA signature without checking the target program. | Fixed 1 Oct (on-chain; devnet upgrade pending): a built-in Vault id; guide step. |
 | 29 | 30 Sep | Second review (`15`, A8) | The mint policy allowed a mint close authority. | Fixed 1 Oct (on-chain; devnet upgrade pending): extension 3 only without an authority. |
+| 30 | 5 Oct | Review of the limit classification, then the program on the real runtime | **A tightening could pay the burst again.** A longer window is classified Tighten, so it applies at once, but a bucket's state is a backlog in milliseconds, which is a smaller share of a longer window. A just-drained bucket looked partly full again. With only the admin key, draining and then lengthening both windows six times paid **913,278 USDC of a 10M vault in one second**, where G1 allows 200,000. The existing harnesses checked the classification and the bound's formula, never the state across the change. | Fixed (on-chain; devnet upgrade pending): `rescale_windows` keeps each bucket's used fraction (`⌈backlog · W_new / W_old⌉`) whenever a vault's limits change, in the core, the Python reference and the Vault. Checked by a program test (the attack now gets 200,000), two property tests, an exhaustive test, a Kani harness, the differential runner (new `W` command), a regression fixture, and the wide program differential below. Each of the program, property and exhaustive tests fails with the rescaling removed. |
 
 A method that finds a real bug in its own authors' code within minutes, twice, is the best argument for keeping it in CI.
 
@@ -154,7 +157,7 @@ Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 27 Sep 2026
 | `request_rules_hold_for_all_inputs` | SMALL-WIDTH | The inductive step of the G1 proof (`03 §2.5`): instant only when unfrozen and conforming; tickets respect min delay, freeze end, horizon and their conformance time; TAT never decreases; errors leave state unchanged | 10 s |
 | `ema_is_bounded` | SMALL-WIDTH (every time) | Reference stays between old reference and balance; equals the balance after 24h | 189 s |
 
-### 5.2 Exhaustive checks (5 tests, ~25.7M inputs, < 1 s)
+### 5.2 Exhaustive checks (6 tests, ~584M inputs, ~6 s)
 
 | Test | Domain (every input) | Property |
 |---|---|---|
@@ -163,6 +166,7 @@ Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 27 Sep 2026
 | `value_rounding_is_exact` | amount, mantissa ∈ 0..=40; expo ∈ −12..=0; decimals ∈ 0..=12; 9 boundary weights (2.6M) | Floor and ceil are the exact rational floor and ceiling; no overflow |
 | `g2_and_fail_closed_without_prices` | own deposit ∈ 1..=64; other position ∈ ±1..=4; request ∈ 0..=130 | G2 exactly; owing something with no prices → 0 backed |
 | `g1_holds_for_every_three_request_sequence` | both buckets' capacity, window ∈ 1..=3; 0 ≤ t1 ≤ t2 ≤ t3 ≤ 6; amounts ∈ 1..=4 (435k sequences) | G1 over every interval, counting instant payouts and tickets at their payable time |
+| `a_tightening_never_raises_the_room` | backlog ∈ 0..=200 ms; windows 1..=48 with the new one no shorter; capacities 1..=8 with the new one no larger; every time up to two windows on (559M) | After `rescale_windows`, the backlog is exactly the used fraction rounded toward "used", and the instant room never rises (finding 30) |
 
 ### 5.3 What Kani could not finish, and where it went
 
@@ -175,6 +179,7 @@ Each of these ran for the full 20-minute cap without an answer:
 | `cost_ms`, `value_v` rounding below 2^20 | Symbolic divisors and multiplier chains | `cost_is_exact_ceiling`, `value_rounding_is_exact` |
 | G1 for two instant payouts below 2^20 | Two symbolic divisions compared to a product | `g1_holds_for_every_three_request_sequence` + the Kani inductive step |
 | EMA at full width | u128 product divided by 86,400 | `ema_is_bounded` at SMALL-WIDTH |
+| `rescale_windows` keeps the used fraction and never raises the room, at SMALL (2^20) and TINY (2^10) width (finding 30) | A u128 product divided by a symbolic window: the circuit is 128 bits wide whatever the values are bounded to. Two attempts, 25 and 17 minutes, no answer | `a_tightening_never_raises_the_room` (559M inputs), two property tests, the differential runner, the program differentials |
 
 ## 6. Mutation testing
 
@@ -246,6 +251,8 @@ The overflow guards stay in the code as defense in depth; the tests document why
 | Check | What it does | Result |
 |---|---|---|
 | **Program ↔ model differential** (`programs/tests/tests/differential.rs`) | Random deposits, withdrawals, admin payouts (to users and outsiders), settlements, cancellations, freezes and time jumps (minutes to two days) on the real runtime. A host model built only from `bulkhead-core` (ledger, limiter, EMA) predicts every outcome. After every step it compares the release outcome, the vault balance (I12), the queue against the pending tickets (I14), and the balance around guardian actions (I11); at the end, every owner's ledger. | 12,000 steps (24 seeds × 500): 4,843 releases (3,701 backed, 281 instant, 1,140 queued, 1,092 refused), 618 settlements, 474 cancellations, 2,405 deposits, **all identical** |
+| **Wide program differential** (`programs/tests/tests/differential_wide.rs`) | A limit configuration per seed, weighted to the edges. On top of the operations above: quotes (compared with the release that follows and checked to move nothing), protocol and vault freezes, quorum unfreezes of either scope, ticket extensions (legal and not), backlog resets (legal and refused), lifeboat moves in and out (including more than the vault holds), and limit changes (a tightening applies at once with `rescale_windows`, a loosening only waits). After every step all of `attest` (instant, worst 1h and 24h, balance, freeze, queue, pending) equals the core's figures, and the lifeboat holds what the model says. | 5 Oct: 300,000 steps in all (600 seeds × 500), including 4,288 tightenings, 5,724 releases refused for want of tokens and 11,291 lifeboat moves, **all identical** |
+| **Floor differential** (`programs/tests/tests/floor_differential.rs`) | Random heartbeats, vetoes (no id, the pending id, another id, a malformed one), proposals of every kind (some invalid), executes, cancels, ejections, aborts by guardians and owners, approvals, snapshot restores, re-staging and re-pinning, with time jumps that let guardians go stale. A model built from `guardian_alive`, `quorum`, `can_eject`, `can_execute`, `can_restore` and `upgrade_eta` predicts whether each instruction succeeds; after every step the guardian list, heartbeats, owner, threshold, interval, delay, status, arming, proposal id, the pending proposal and the live program bytes are compared. | 5 Oct: 200,000 steps (400 seeds × 500), **all identical** |
 | **Scenarios** | S1 (G-1 second-for-second, including the EMA reference), S4 (a 20-depositor bank run during a freeze, 100% instant, no prices), S7, S8 (ten payouts in one transaction), S9 (backed exactly as the core computes), S10 (Floor lifecycle) | Pass |
 | **Negative tests** | Wrong caller, missing or foreign asset account, wrong feed, frozen settlement, early settlement, wrong recipient, tickets pending, not sealed, import exceeding balance, seal veto, permanent-delegate mint, delay below 72h, abdicated kind, freeze too long, no quorum, admin unfreeze, eject below threshold, and Floor's full set (`06 §6`) | Pass |
 | **Floor on a real program** | `scripts/floor-demo.sh <program-id>`: a mainnet program's bytes on a local validator with mainnet's feature set; register, stop with one guardian, restore with two | SPL Stake Pool (1.08 MB, v0): stopped with Floor's code, restored byte-identical (`06 §7`) |

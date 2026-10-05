@@ -102,6 +102,23 @@ class Limiter:
             self.tat2 = now + self.w2
         return ("Z", self.tat1, self.tat2)
 
+    def set_windows(self, now: int, w1: int, w2: int):
+        """New windows keep each bucket's used fraction: backlog * new / old, rounded up.
+
+        A backlog in ms is a smaller share of a longer window; leaving it as is
+        would let a longer window (a tightening, applied at once) refill a
+        drained bucket.
+        """
+        def scaled(tat: int, old_w: int, new_w: int) -> int:
+            if tat <= now or old_w == new_w or old_w <= 0 or new_w <= 0:
+                return tat
+            backlog = ceil_div((tat - now) * new_w, old_w)
+            return min(now + min(backlog, COST_MAX_MS), I64_MAX)
+        self.tat1 = scaled(self.tat1, self.w1, w1)
+        self.tat2 = scaled(self.tat2, self.w2, w2)
+        self.w1, self.w2 = w1, w2
+        return ("W", self.tat1, self.tat2)
+
     def available_now(self, now: int) -> int:
         """Largest amount that would be instant right now (ignoring freezes)."""
         out = None
