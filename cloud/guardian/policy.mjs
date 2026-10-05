@@ -29,6 +29,11 @@ export const DEFAULT_POLICY = {
   approvedChangeIds: [],
   /** Floor: veto upgrade proposals whose buffer isn't pre-approved. */
   approvedUpgradeBuffers: [],
+  /** Veto every lifeboat exit that isn't pre-approved as "mint:amount" (base
+   * units). An exit goes to a destination committed 72h earlier; vetoing it
+   * is the guardian's answer to a compromised destination (T18). */
+  vetoLifeboatExits: true,
+  approvedExits: [],
   heartbeatEveryS: 86_400,
   /** Compute-unit limit on every guardian transaction (a freeze, cancel,
    * veto or heartbeat uses a small fraction of it). */
@@ -113,6 +118,10 @@ export function decode(ev) {
       return { kind: "unfrozen", scope: f[0]?.[0] ?? 0 };
     case "vault:change_proposed":
       return { kind: "change_proposed", id: u64(f[0]), changeKind: f[1][0], target: b58encode(f[2]) };
+    case "vault:exit_proposed":
+      return { kind: "exit_proposed", mint: b58encode(f[0]), amount: u64(f[1]), executableS: Number(new Reader(f[2]).i64()) };
+    case "vault:lifeboat_in":
+      return { kind: "lifeboat_in", mint: b58encode(f[0]), amount: u64(f[1]) };
     case "floor:proposed":
       return { kind: "floor_proposed", program: b58encode(f[0]), proposalKind: f[1][0], id: u64(f[2]), target: b58encode(f[3]) };
     case "vault:settled":
@@ -230,6 +239,7 @@ export function judgeReplayedWindow(state, unjudged, worst, now, policy = DEFAUL
 
 export function vetoKey(action) {
   if (action.type === "veto_change") return `c${action.changeId}`;
+  if (action.type === "veto_exit") return `x${action.mint}:${action.executableS}`;
   if (action.type === "floor_veto") return `f${action.program}:${action.proposalId}`;
   return null;
 }
@@ -260,6 +270,12 @@ export function vetoRetryDisposition(action, chain) {
   if (action.type === "veto_change") {
     if (!chain) return "keep";
     if (chain.vetoed || chain.executed) return "drop";
+    return "send";
+  }
+  if (action.type === "veto_exit") {
+    if (!chain) return "keep";
+    // A new proposal has a new executable time and gets its own veto.
+    if (!chain.exitAmount || chain.exitVetoed || chain.exitExecutableS !== action.executableS) return "drop";
     return "send";
   }
   return "drop";
@@ -373,6 +389,21 @@ export function pendingChangeVeto(change, policy, now, already) {
   return { type: "veto_change", changeId: id, reason: `loosening ${id} (kind ${change.kind}) is still pending` };
 }
 
+function exitApproved(policy, mint, amount) {
+  return (policy.approvedExits ?? []).includes(`${mint}:${BigInt(amount)}`);
+}
+
+/** Veto a lifeboat exit that is still pending (a decoded vault). Same rule as
+ * a live `vault:exit_proposed` event. `already` is `state.vetoed`.
+ */
+export function pendingExitVeto(vault, policy, now, already) {
+  if (!policy.vetoLifeboatExits || !vault?.exitAmount || vault.exitVetoed) return null;
+  if (Number.isFinite(vault.exitExpiresS) && now >= vault.exitExpiresS) return null;
+  if (exitApproved(policy, vault.mint, vault.exitAmount)) return null;
+  const action = { type: "veto_exit", mint: vault.mint, executableS: vault.exitExecutableS, reason: `lifeboat exit of ${vault.exitAmount} is still pending` };
+  return already?.has(vetoKey(action)) ? null : action;
+}
+
 /** Veto a Floor upgrade that is still pending. Same rule as a live
  * `floor:proposed` event: only kind 1, and not a pre-approved buffer.
  */
@@ -449,6 +480,14 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
         actions.push({ type: "veto_change", changeId: e.id, reason: `loosening ${e.id} (kind ${e.changeKind}) is not pre-approved` });
       }
       break;
+    case "exit_proposed": {
+      if (!act || !policy.vetoLifeboatExits || exitApproved(policy, e.mint, e.amount)) break;
+      const action = { type: "veto_exit", mint: e.mint, executableS: e.executableS, reason: `lifeboat exit of ${e.amount} is not pre-approved` };
+      if (state.vetoed.has(vetoKey(action))) break;
+      state.vetoed.add(vetoKey(action));
+      actions.push(action);
+      break;
+    }
     case "floor_proposed":
       if (!act) break;
       if (e.proposalKind === 1 && !policy.approvedUpgradeBuffers.includes(e.target) && !state.vetoed.has(`f${e.program}:${e.id}`)) {

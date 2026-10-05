@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { b58decode, b58encode, key, onCurve, findPda, compileMessage } from "../lib/solana.mjs";
+import { b58decode, b58encode, key, onCurve, findPda, compileMessage, decodeVault } from "../lib/solana.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 
 const here = new URL(".", import.meta.url);
@@ -67,4 +67,26 @@ test("signer: RFC 8032 test vector 1 (empty message)", () => {
   assert.equal(Buffer.from(kp.publicKey).toString("hex"), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
   const sig = Buffer.from(kp.sign(new Uint8Array(0))).toString("hex");
   assert.equal(sig, "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+});
+
+test("a vault account decodes through its lifeboat exit, in the program's field order", () => {
+  // programs/vault/src/state.rs Vault::store.
+  const parts = [Buffer.from("BHVAULT1")];
+  const n = (bytes, v) => {
+    const b = Buffer.alloc(bytes);
+    if (bytes === 16) { b.writeBigUInt64LE(BigInt(v) & ((1n << 64n) - 1n)); b.writeBigUInt64LE(BigInt(v) >> 64n, 8); }
+    else if (bytes === 8) b.writeBigInt64LE(BigInt(v));
+    else if (bytes === 4) b.writeUInt32LE(v);
+    else if (bytes === 2) b.writeUInt16LE(v);
+    else b.writeUInt8(v);
+    parts.push(b);
+  };
+  for (let i = 0; i < 4; i++) parts.push(Buffer.alloc(32, i + 1));
+  n(2, 200); n(4, 3600); n(2, 500); n(4, 86400); n(4, 21600); for (let i = 0; i < 4; i++) n(8, 0);
+  n(8, 1); n(8, 2); n(8, 3); n(8, 4); n(1, 1); n(1, 6); n(1, 254); n(1, 253); n(4, 5); n(8, 6); n(8, 7); n(8, 8);
+  for (let i = 0; i < 5; i++) n(16, 9 + i);
+  n(8, 40); n(8, 30); n(8, 1000); n(8, 260_200); n(8, 865_000); n(1, 1);
+  const v = decodeVault(new Uint8Array(Buffer.concat(parts)));
+  assert.deepEqual([v.decimals, v.pendingTickets, v.cancelled], [6, 5, 13n]);
+  assert.deepEqual([v.lifeboatAmount, v.exitAmount, v.exitProposedS, v.exitExecutableS, v.exitExpiresS, v.exitVetoed], [40n, 30n, 1000, 260_200, 865_000, true]);
 });

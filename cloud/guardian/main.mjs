@@ -28,15 +28,19 @@
 // chain every cycle; active tickets are scanned at startup, on a freeze, and
 // periodically; truncated logs use the vault's own transfers and balances.
 //
+// Vetoes: every loosening not in `approvedChangeIds`, every lifeboat exit not
+// in `approvedExits` ("mint:amount"), and every Floor upgrade to a buffer not
+// in `approvedUpgradeBuffers`, live and, after a restart, from the accounts.
+//
 // Heartbeats keep this key live on the Vault and on every watched Floor it
 // guards, each inside its chain interval. A failed one is retried on a
 // backoff; a key that is already stale or absent is reported, not resent.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 
@@ -217,6 +221,24 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         }
         ixs = [vc.vetoChange(await vc.changeAddress(action.changeId), guardian.publicKey)];
         break;
+      case "veto_exit": {
+        const vault = (watched.find((v) => v.mint === action.mint) ?? {}).vault;
+        if (!vault) throw new Error(`no watched vault for ${action.mint}`);
+        if (retrying) {
+          const acc = await rpc.account(vault);
+          let chain = null;
+          if (acc) {
+            try { chain = decodeVault(acc.bytes); } catch { chain = null; }
+          }
+          const what = vetoRetryDisposition(action, chain);
+          if (what !== "send") {
+            if (what === "drop") log({ action: "veto_exit", skipped: "that exit is no longer pending", mint: action.mint });
+            return what === "drop";
+          }
+        }
+        ixs = [vc.vetoExit(vault, guardian.publicKey)];
+        break;
+      }
       case "floor_veto": {
         const fc = await new FloorClient(cfg.floorProgram, action.program).init();
         if (retrying) {
@@ -282,7 +304,7 @@ async function applyActions(actions, event, eventTime) {
       if (ok) state.pendingTickets.delete(action.ticketId);
       else state.cancelled.delete(action.ticketId);
     }
-    if (action.type === "veto_change" || action.type === "floor_veto") {
+    if (action.type === "veto_change" || action.type === "floor_veto" || action.type === "veto_exit") {
       if (!ok) pendingVetoes = queueFailedVeto(pendingVetoes, action);
       continue;
     }
@@ -324,6 +346,9 @@ async function consider(e, signature, now, act) {
   const actions = assess(state, e, ctx, policy, act);
   if (!act) return;
   log({ event: e.kind, signature, ...e });
+  if (e.kind === "lifeboat_in") {
+    log({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short until a guardian quorum or the admin returns them", mint: e.mint, amount: e.amount });
+  }
   await applyActions(actions, e, now);
 }
 
@@ -456,7 +481,7 @@ async function checkFloor() {
   }
 }
 
-/** Veto loosenings and Floor upgrades that are still pending. Replay does not
+/** Veto loosenings, lifeboat exits and Floor upgrades that are still pending. Replay does not
  * send actions, so a proposal that landed while this process was down is read
  * from the account.
  */
@@ -472,6 +497,18 @@ async function vetoStillPending(now) {
       }
     } catch (e) {
       log({ level: "warn", msg: `change scan failed; retrying: ${e.message}` });
+    }
+  }
+  for (const v of watched) {
+    try {
+      const acc = await rpc.account(v.vault);
+      if (!acc) continue;
+      const action = pendingExitVeto({ ...decodeVault(acc.bytes), mint: v.mint }, policy, now, state.vetoed);
+      if (!action) continue;
+      state.vetoed.add(`x${action.mint}:${action.executableS}`);
+      actions.push(action);
+    } catch (e) {
+      log({ level: "warn", msg: `lifeboat exit scan failed; retrying: ${e.message}` });
     }
   }
   for (const fc of floorWatch) {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -332,4 +332,51 @@ test("a retried vault veto stops once the change is closed", () => {
   bytes[50] = 1;
   assert.deepEqual(readChangeVeto(bytes), { vetoed: false, executed: true });
   assert.equal(readChangeVeto(new Uint8Array(51)), null);
+});
+
+test("a lifeboat exit is vetoed unless pre-approved, once per proposal", () => {
+  const mintKey = new Uint8Array(32).fill(7);
+  const exit = (amount, executableS) => decode({ name: "vault:exit_proposed", fields: [mintKey, u64le(amount), i64le(executableS)] });
+  const e = exit(4_000_000n, 900_000);
+  assert.equal(e.kind, "exit_proposed");
+  assert.equal(e.amount, 4_000_000n);
+  assert.equal(e.executableS, 900_000);
+  const s = newState();
+  const policy = { ...DEFAULT_POLICY };
+  const actions = assess(s, e, { now: 1 }, policy);
+  assert.deepEqual(actions.map((a) => [a.type, a.mint, a.executableS]), [["veto_exit", e.mint, 900_000]]);
+  assert.deepEqual(assess(s, e, { now: 2 }, policy), [], "the same proposal is vetoed once");
+  // A new proposal (the admin proposed again) is a new veto.
+  assert.equal(assess(s, exit(4_000_000n, 950_000), { now: 3 }, policy).length, 1);
+  // Pre-approved by mint and exact amount; anything else is still vetoed.
+  const approved = { ...policy, approvedExits: [`${e.mint}:4000000`] };
+  assert.deepEqual(assess(newState(), e, { now: 1 }, approved), []);
+  assert.equal(assess(newState(), exit(4_000_001n, 900_000), { now: 1 }, approved).length, 1);
+  assert.deepEqual(assess(newState(), e, { now: 1 }, { ...policy, vetoLifeboatExits: false }), []);
+  // Replayed history decides nothing; the restart scan does.
+  assert.deepEqual(assess(newState(), e, { now: 1 }, policy, false), []);
+  const lifeboatIn = decode({ name: "vault:lifeboat_in", fields: [mintKey, u64le(5n)] });
+  assert.deepEqual([lifeboatIn.kind, lifeboatIn.amount], ["lifeboat_in", 5n]);
+});
+
+test("a retried exit veto stops once that exit is gone, vetoed or replaced", () => {
+  const action = { type: "veto_exit", mint: "m", executableS: 900_000 };
+  const open = { exitAmount: 10n, exitVetoed: false, exitExecutableS: 900_000 };
+  assert.equal(vetoRetryDisposition(action, open), "send");
+  assert.equal(vetoRetryDisposition(action, { ...open, exitAmount: 0n }), "drop");
+  assert.equal(vetoRetryDisposition(action, { ...open, exitVetoed: true }), "drop");
+  assert.equal(vetoRetryDisposition(action, { ...open, exitExecutableS: 950_000 }), "drop");
+  assert.equal(vetoRetryDisposition(action, null), "keep");
+  assert.deepEqual(queueFailedVeto(queueFailedVeto([], action), action), [action]);
+});
+
+test("a restart vetoes a lifeboat exit that is still pending", () => {
+  const vault = { mint: "m", exitAmount: 10n, exitVetoed: false, exitExecutableS: 900_000, exitExpiresS: 1_500_000 };
+  const policy = { ...DEFAULT_POLICY };
+  assert.equal(pendingExitVeto(vault, policy, 1_000, new Set()).type, "veto_exit");
+  assert.equal(pendingExitVeto(vault, policy, 1_000, new Set(["xm:900000"])), null);
+  assert.equal(pendingExitVeto({ ...vault, exitAmount: 0n }, policy, 1_000, new Set()), null);
+  assert.equal(pendingExitVeto({ ...vault, exitVetoed: true }, policy, 1_000, new Set()), null);
+  assert.equal(pendingExitVeto(vault, policy, 1_500_000, new Set()), null, "expired");
+  assert.equal(pendingExitVeto(vault, { ...policy, approvedExits: ["m:10"] }, 1_000, new Set()), null);
 });

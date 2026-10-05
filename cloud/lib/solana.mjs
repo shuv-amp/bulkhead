@@ -349,6 +349,18 @@ export function decodeVault(d) {
     settled: r.u128(),
     cancelled: r.u128(),
   });
+  // The lifeboat and its pending exit (an account written by an older build
+  // may stop before them).
+  if (d.length >= r.o + 8 + 8 + 24 + 1) {
+    Object.assign(v, {
+      lifeboatAmount: r.u64(),
+      exitAmount: r.u64(),
+      exitProposedS: Number(r.i64()),
+      exitExecutableS: Number(r.i64()),
+      exitExpiresS: Number(r.i64()),
+      exitVetoed: r.u8() === 1,
+    });
+  }
   return v;
 }
 

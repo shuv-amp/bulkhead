@@ -42,6 +42,9 @@ export class VaultClient {
   vetoChange(change, guardian) {
     return this.ix(19, new Uint8Array(0), [r(this.protocol), w(change), s(guardian)]);
   }
+  vetoExit(vault, guardian) {
+    return this.ix(28, new Uint8Array(0), [r(this.protocol), w(vault), s(guardian)]);
+  }
   attestIx(vault, vaultTokens) {
     return this.ix(22, new Uint8Array(0), [r(this.protocol), r(vault), r(vaultTokens)]);
   }
