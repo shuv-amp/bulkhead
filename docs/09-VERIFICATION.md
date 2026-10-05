@@ -28,7 +28,7 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Targeted unit tests** | 17 tests: 16 each written to kill a surviving mutant (§6), and `capacity_base` | Pass |
 | **Adversarial tests** | 7 tests (`crates/bulkhead-core/tests/adversarial.rs`): the attacks of `15` run through the real core, before and after each fix | Pass |
 | **Crash scenario** | 2 tests (`crates/bulkhead-core/tests/cascade.rs`): an honest liquidation cascade on a synthetic −30% day, through the real ledger, pricing and limiter; pins the numbers `08` S11 reports | Pass |
-| **Bounded proofs (Kani)** | 13 harnesses: logic at full width, 2 at small width (§5) | **13/13 verified**, 209 s |
+| **Bounded proofs (Kani)** | 14 harnesses: logic at full width, 2 at small width (§5) | **14/14 verified**, 216 s (6 Oct) |
 | **Mutation testing** | `cargo-mutants` on the core: 647 mutants (§6) | Every non-equivalent mutant killed; 22 equivalents, each explained |
 | **Program tests** | Floor (21) and Vault (27) on the real agave runtime: LiteSVM, mainnet feature set, the mainnet token program | 48/48 |
 | **Program ↔ model differential** | Random operation sequences on-chain vs a host model built only from the core; invariants after every step (§7) | 12,000 steps across 24 seeds, identical; 24,000 steps across 24 seeds after the A1 fix (29 Sep), identical |
@@ -140,9 +140,9 @@ Domains:
 - **SMALL-WIDTH:** amounts, capacities and windows below 2^20 (branch logic is width-independent).
 - **Enumerated:** the ranges stated on each test.
 
-### 5.1 Kani harnesses (13) and results
+### 5.1 Kani harnesses (14) and results
 
-Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 27 Sep 2026. `scripts/prove.sh`: **Complete - 13 successfully verified harnesses, 0 failures, 13 total** (209 s).
+Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 6 Oct 2026. `scripts/prove.sh`: **Complete - 14 successfully verified harnesses, 0 failures, 14 total** (216 s).
 
 | Harness | Domain | Property | Time |
 |---|---|---|---|
@@ -154,6 +154,7 @@ Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 27 Sep 2026
 | `restore_rules_are_exact` | FULL | Snapshot: exactly a live quorum. Proposed: quorum on the exact buffer, or no veto and `eta ≤ now < expires`. | 0.1 s |
 | `loader_parsers_are_total` | FULL (every 48-byte prefix) | The loader-v3 parsers never panic and accept only their own account kind | 1.2 s |
 | `classify_tighten_is_sound` | FULL | A `Tighten` limits change never raises bps, floors or caps, and never shortens windows or delays | 0.1 s |
+| `a_closed_lane_stays_closed_at_every_balance` | FULL | A config `lane_always_closed` accepts has a bucket of capacity 0 at every reference balance; a vault created after the seal must pass it (finding 31) | 0.1 s |
 | `capacity_clamp_is_monotone` | FULL | Capacity respects floor and cap; a tighter (raw, floor, cap) never yields more | 0.3 s |
 | `reset_never_exceeds_an_empty_bucket` | FULL | Reset refuses with pending tickets; otherwise each TAT is unchanged or exactly "empty at now" | 0.1 s |
 | `conservative_price_brackets` | FULL | `lo ≤ min(spot, EMA)`, `hi ≥ max(spot, EMA)`; `None` exactly for non-positive inputs | 1.1 s |
