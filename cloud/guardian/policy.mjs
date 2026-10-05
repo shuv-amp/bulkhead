@@ -27,8 +27,12 @@ export const DEFAULT_POLICY = {
   /** Veto every loosening that isn't pre-approved by id. */
   vetoLoosenings: true,
   approvedChangeIds: [],
-  /** Floor: veto upgrade proposals whose buffer isn't pre-approved. */
+  /** Floor: veto every proposal not pre-approved. Upgrades and restores are
+   * approved by buffer; anything else (release authority, owner, guardians, a
+   * lower delay) by "program:proposalId". A quorum's approval still runs an
+   * honest restore over a veto. */
   approvedUpgradeBuffers: [],
+  approvedFloorProposals: [],
   /** Veto every lifeboat exit that isn't pre-approved as "mint:amount" (base
    * units). An exit goes to a destination committed 72h earlier; vetoing it
    * is the guardian's answer to a compromised destination (T18). */
@@ -263,7 +267,7 @@ export function queueFailedVeto(pending, action) {
 export function vetoRetryDisposition(action, chain) {
   if (action.type === "floor_veto") {
     if (!chain) return "keep";
-    if (chain.pendingKind !== 1 || chain.pendingVetoed) return "drop";
+    if (!chain.pendingKind || chain.pendingVetoed) return "drop";
     if (BigInt(chain.pendingId) !== BigInt(action.proposalId)) return "drop";
     return "send";
   }
@@ -404,15 +408,35 @@ export function pendingExitVeto(vault, policy, now, already) {
   return already?.has(vetoKey(action)) ? null : action;
 }
 
-/** Veto a Floor upgrade that is still pending. Same rule as a live
- * `floor:proposed` event: only kind 1, and not a pre-approved buffer.
+/** Floor proposal kinds (programs/floor/src/state.rs `kind`). */
+const FLOOR_KINDS = { 1: "upgrade", 2: "restore", 3: "release of the upgrade authority", 4: "new guardian set", 5: "new owner", 6: "lower upgrade delay" };
+
+/**
+ * Why a Floor proposal must be vetoed, or null if it is pre-approved. Every
+ * kind waits the delay and is vetoable, and every one can hand the program
+ * to whoever holds the owner key: new code, the upgrade authority itself, the
+ * owner, the guardians, or a shorter delay for all of those.
+ */
+export function floorProposalVeto({ program, kind, id, target }, policy) {
+  const what = FLOOR_KINDS[kind] ?? `kind ${kind}`;
+  if (kind === 1 || kind === 2) {
+    if ((policy.approvedUpgradeBuffers ?? []).includes(target)) return null;
+    return `${what} to unapproved buffer ${target}`;
+  }
+  if ((policy.approvedFloorProposals ?? []).includes(`${program}:${BigInt(id)}`)) return null;
+  return `${what} (target ${target}) is not pre-approved`;
+}
+
+/** Veto a Floor proposal that is still pending. Same rule as a live
+ * `floor:proposed` event (`floorProposalVeto`).
  */
 export function pendingUpgradeVeto(floor, policy, already) {
-  if (!floor || floor.pendingKind !== 1 || floor.pendingVetoed) return null;
+  if (!floor || !floor.pendingKind || floor.pendingVetoed) return null;
   const id = BigInt(floor.pendingId);
   if (already?.has(`f${floor.program}:${id}`)) return null;
-  if ((policy.approvedUpgradeBuffers ?? []).includes(floor.pendingTarget)) return null;
-  return { type: "floor_veto", program: floor.program, proposalId: id, reason: `upgrade to unapproved buffer ${floor.pendingTarget} is still pending` };
+  const why = floorProposalVeto({ program: floor.program, kind: floor.pendingKind, id, target: floor.pendingTarget }, policy);
+  if (!why) return null;
+  return { type: "floor_veto", program: floor.program, proposalId: id, reason: `${why} is still pending` };
 }
 
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
@@ -490,9 +514,12 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
     }
     case "floor_proposed":
       if (!act) break;
-      if (e.proposalKind === 1 && !policy.approvedUpgradeBuffers.includes(e.target) && !state.vetoed.has(`f${e.program}:${e.id}`)) {
-        state.vetoed.add(`f${e.program}:${e.id}`);
-        actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: `upgrade to unapproved buffer ${e.target}` });
+      {
+        const why = floorProposalVeto({ program: e.program, kind: e.proposalKind, id: e.id, target: e.target }, policy);
+        if (why && !state.vetoed.has(`f${e.program}:${e.id}`)) {
+          state.vetoed.add(`f${e.program}:${e.id}`);
+          actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: why });
+        }
       }
       break;
   }

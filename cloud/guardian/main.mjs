@@ -29,8 +29,9 @@
 // periodically; truncated logs use the vault's own transfers and balances.
 //
 // Vetoes: every loosening not in `approvedChangeIds`, every lifeboat exit not
-// in `approvedExits` ("mint:amount"), and every Floor upgrade to a buffer not
-// in `approvedUpgradeBuffers`, live and, after a restart, from the accounts.
+// in `approvedExits` ("mint:amount"), and every Floor proposal not approved
+// (code by buffer in `approvedUpgradeBuffers`, anything else by "program:id"
+// in `approvedFloorProposals`), live and, after a restart, from the accounts.
 //
 // Heartbeats keep this key live on the Vault and on every watched Floor it
 // guards, each inside its chain interval. A failed one is retried on a

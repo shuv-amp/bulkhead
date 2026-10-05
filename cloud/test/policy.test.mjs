@@ -308,7 +308,7 @@ test("a restart vetoes a loosening that is still pending and leaves a closed one
   const floor = { program: "prog", pendingKind: 1, pendingId: 4n, pendingVetoed: false, pendingTarget: "buf" };
   assert.equal(pendingUpgradeVeto(floor, DEFAULT_POLICY, new Set()).proposalId, 4n);
   assert.equal(pendingUpgradeVeto(floor, { ...DEFAULT_POLICY, approvedUpgradeBuffers: ["buf"] }, new Set()), null);
-  assert.equal(pendingUpgradeVeto({ ...floor, pendingKind: 2 }, DEFAULT_POLICY, new Set()), null);
+  assert.equal(pendingUpgradeVeto({ ...floor, pendingKind: 0 }, DEFAULT_POLICY, new Set()), null);
 });
 
 test("a retried floor veto is dropped when a different proposal is pending", () => {
@@ -317,6 +317,8 @@ test("a retried floor veto is dropped when a different proposal is pending", () 
   assert.equal(vetoRetryDisposition(action, open), "send");
   assert.equal(vetoRetryDisposition(action, { ...open, pendingId: 5n }), "drop");
   assert.equal(vetoRetryDisposition(action, { ...open, pendingKind: 0 }), "drop");
+  // Any kind is worth a retried veto while the same proposal waits.
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingKind: 3 }), "send");
   assert.equal(vetoRetryDisposition(action, { ...open, pendingVetoed: true }), "drop");
   assert.equal(vetoRetryDisposition(action, null), "keep");
 });
@@ -379,4 +381,27 @@ test("a restart vetoes a lifeboat exit that is still pending", () => {
   assert.equal(pendingExitVeto({ ...vault, exitVetoed: true }, policy, 1_000, new Set()), null);
   assert.equal(pendingExitVeto(vault, policy, 1_500_000, new Set()), null, "expired");
   assert.equal(pendingExitVeto(vault, { ...policy, approvedExits: ["m:10"] }, 1_000, new Set()), null);
+});
+
+test("every Floor proposal a stolen owner key could make is vetoed unless pre-approved", () => {
+  const program = "prog";
+  // A Floor proposed event: program, kind, id, target.
+  const proposed = (kind, id, target = new Uint8Array(32).fill(9)) =>
+    decode({ name: "floor:proposed", fields: [new Uint8Array(32).fill(1), Uint8Array.of(kind), u64le(id), target] });
+  for (const kind of [1, 2, 3, 4, 5, 6]) {
+    const e = proposed(kind, 10n + BigInt(kind));
+    const actions = assess(newState(), e, { now: 1 }, DEFAULT_POLICY);
+    assert.equal(actions.length, 1, `kind ${kind} is vetoed`);
+    assert.equal(actions[0].proposalId, e.id);
+  }
+  // Code is approved by buffer, everything else by program:id.
+  const code = proposed(2, 12n);
+  assert.deepEqual(assess(newState(), code, { now: 1 }, { ...DEFAULT_POLICY, approvedUpgradeBuffers: [code.target] }), []);
+  const release = proposed(3, 13n);
+  assert.deepEqual(assess(newState(), release, { now: 1 }, { ...DEFAULT_POLICY, approvedFloorProposals: [`${release.program}:13`] }), []);
+  assert.equal(assess(newState(), release, { now: 1 }, { ...DEFAULT_POLICY, approvedFloorProposals: [`${release.program}:14`] }).length, 1);
+  // After a restart, the same rule from the config.
+  const pending = { program, pendingKind: 3, pendingId: 7n, pendingVetoed: false, pendingTarget: "attacker" };
+  assert.match(pendingUpgradeVeto(pending, DEFAULT_POLICY, new Set()).reason, /release of the upgrade authority/);
+  assert.equal(pendingUpgradeVeto(pending, { ...DEFAULT_POLICY, approvedFloorProposals: ["prog:7"] }, new Set()), null);
 });
