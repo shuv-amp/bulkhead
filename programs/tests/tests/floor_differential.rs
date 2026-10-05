@@ -400,6 +400,10 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     if let Some(pd) = md.pending.as_mut() {
                         pd.approvals = 0;
                     }
+                    // A pending guardian set is withdrawn by an ejection.
+                    if matches!(&md.pending, Some(pd) if pd.kind == SET_GUARDIANS) {
+                        md.pending = None;
+                    }
                 }
                 (op, sent, model_ok) = ("eject", r.is_ok(), ok);
             }

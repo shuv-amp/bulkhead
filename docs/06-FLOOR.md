@@ -144,7 +144,7 @@ After SIMD-0500 activates, `Upgrade` accepts only sBPF v3. So:
 | Stolen owner key proposes a malicious binary | Waits ≥ 72h in public; any live guardian vetoes |
 | Stolen owner key proposes releasing the upgrade authority, a new owner, new guardians or a shorter delay | Each waits the delay in public and any live guardian vetoes it; the Cloud guardian vetoes every proposal not pre-approved |
 | Stolen owner key stops the program | Denial of service only; a quorum restores the snapshot in one instruction |
-| Malicious guardian stops the program, or vetoes everything | A live quorum of the other guardians ejects it and restores, in one transaction |
+| Malicious guardian stops the program, or vetoes everything | A live quorum of the other guardians ejects it and restores, in one transaction ; an ejection also withdraws a pending guardian set, so an older proposal cannot bring it back |
 | A guardian quorum is malicious | Out of scope: it holds Security Council power (fast restore). The status page checks the set against the on-chain parts of L2BEAT's bar (≥ 8 members, ≥ 75% threshold); the third part (≥ 50% outside the team) must be published by the team (§10). |
 | Bug in Floor | Every protected program at once. Mitigations: small instruction set, no arbitrary CPI, one dependency, verified core, devnet only until audited. |
 | Pre-signed (durable-nonce) proposals | Proposals expire 7 days after becoming executable, and are public for ≥ 72h |

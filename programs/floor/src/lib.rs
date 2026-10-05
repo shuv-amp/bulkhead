@@ -1102,6 +1102,12 @@ fn eject(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> Pro
     c.last_heartbeat[n - 1] = 0;
     c.guardian_count -= 1;
     c.pending_approvals = 0; // indices shifted; approvals must be given again
+    // A pending guardian set was written before this ejection and may still
+    // name the ejected key: withdraw it, so it cannot bring that key back.
+    // The owner may propose again; it waits again.
+    if c.pending_kind == kind::SET_GUARDIANS {
+        c.clear_pending();
+    }
     save_config(&mut accounts[0], &c)?;
     sys::event(&[ev::EJECTED, &c.program, &removed]);
     Ok(())

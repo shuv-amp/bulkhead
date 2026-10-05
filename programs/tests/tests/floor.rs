@@ -653,3 +653,23 @@ fn a_named_veto_does_not_apply_to_a_different_proposal() {
     env.ok(&[f.veto_id(&p.g[0].pubkey(), Some(id))], &[&p.g[0]]);
     assert_eq!(read_config(&env, f).pending_vetoed, 1);
 }
+
+#[test]
+fn an_older_guardian_set_cannot_bring_back_an_ejected_guardian() {
+    // The owner proposes a guardian set that still names g2; a quorum of the
+    // others then ejects g2. Executing the older set must not restore it.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let set = Floor::guardian_set(&gs, 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &solana_address::Address::default(), &set, None)], &[&p.owner]);
+    env.ok(&[f.eject(2, &[gs[0], gs[1]])], &[&p.g[0], &p.g[1]]);
+    env.advance(3 * DAY + 1);
+    // Whatever is still pending, executing it must not bring g2 back.
+    let _ = env.send(&[f.execute_config()], &[]);
+    let d = env.account(&f.config).data;
+    let n = d[424] as usize;
+    let back = (0..n).any(|i| d[104 + 32 * i..136 + 32 * i] == gs[2].to_bytes());
+    assert!(!back, "the ejected guardian came back through an older proposal");
+}
