@@ -78,6 +78,7 @@ export function rememberTicket(state, ticket) {
     mint: ticket.mint ?? old.mint ?? null,
     vault: ticket.vault ?? old.vault ?? null,
     owner: ticket.owner ?? ticket.recipientOwner ?? old.owner ?? "(unknown)",
+    amount: ticket.amount ?? old.amount ?? null,
   });
 }
 
@@ -193,6 +194,196 @@ export function retirePendingFreeze(pending, chainFrozenUntil, now) {
   return pending && chainFrozenUntil > now ? null : pending;
 }
 
+/** Judge the startup window at the later of the wall clock and the newest outflow. */
+export function decisionTime(wall, outflows) {
+  let now = wall;
+  for (const o of outflows) if (o.t > now) now = o.t;
+  return now;
+}
+
+/**
+ * Judge the replayed startup window once per mint, as soon as that mint has a
+ * worst-case figure (`worst(mint)` returns it, or null while the attest has
+ * not been read). Later releases are judged by `assess` as they arrive.
+ * Judging the same window again after that would freeze straight after a
+ * guardian quorum's unfreeze, for outflows the quorum has already weighed.
+ * A protocol already frozen, or a freeze in flight, settles every mint.
+ * Returns `{ action, mint, unjudged }`: the freeze to send, if any, and the
+ * mints still waiting for a figure.
+ */
+export function judgeReplayedWindow(state, unjudged, worst, now, policy = DEFAULT_POLICY) {
+  const none = new Set();
+  if (unjudged.size === 0) return { action: null, mint: null, unjudged: none };
+  if (now < state.frozenUntil || state.freezing) return { action: null, mint: null, unjudged: none };
+  const left = new Set();
+  for (const mint of unjudged) {
+    const figure = worst(mint);
+    if (!figure) {
+      left.add(mint);
+      continue;
+    }
+    const action = breach(state, mint, { ...figure, now }, policy);
+    if (action) return { action, mint, unjudged: none };
+  }
+  return { action: null, mint: null, unjudged: left };
+}
+
+export function vetoKey(action) {
+  if (action.type === "veto_change") return `c${action.changeId}`;
+  if (action.type === "floor_veto") return `f${action.program}:${action.proposalId}`;
+  return null;
+}
+
+/** Keep one retry for a veto whose send failed. The event is not seen again. */
+export function queueFailedVeto(pending, action) {
+  const key = vetoKey(action);
+  if (!key) return pending;
+  if (pending.some((a) => vetoKey(a) === key)) return pending;
+  return [...pending, action];
+}
+
+/**
+ * What a *retry* should do with a veto. The first send follows the event.
+ * A retry has to look again. Floor refuses a veto whose id is not the one
+ * still pending, and a change that already executed or was vetoed must not
+ * be sent forever.
+ * `chain` null means the account could not be read.
+ * Returns "send", "drop", or "keep".
+ */
+export function vetoRetryDisposition(action, chain) {
+  if (action.type === "floor_veto") {
+    if (!chain) return "keep";
+    if (chain.pendingKind !== 1 || chain.pendingVetoed) return "drop";
+    if (BigInt(chain.pendingId) !== BigInt(action.proposalId)) return "drop";
+    return "send";
+  }
+  if (action.type === "veto_change") {
+    if (!chain) return "keep";
+    if (chain.vetoed || chain.executed) return "drop";
+    return "send";
+  }
+  return "drop";
+}
+
+/** Vetoed and executed flags of a `BHCHNG01` account. Null if it is not one. */
+export function readChangeVeto(bytes) {
+  if (!bytes || bytes.length < 51) return null;
+  if (new TextDecoder().decode(bytes.slice(0, 8)) !== "BHCHNG01") return null;
+  return { vetoed: bytes[49] !== 0, executed: bytes[50] !== 0 };
+}
+
+/** bulkhead-core `MIN_HEARTBEAT_INTERVAL_S` and `MAX_HEARTBEAT_INTERVAL_S`. */
+const MIN_HEARTBEAT_INTERVAL_S = DAY_S;
+const MAX_HEARTBEAT_INTERVAL_S = 30 * DAY_S;
+/** How far past its chain deadline a key must be before it is written off. */
+const STANDING_GRACE_S = 600;
+
+/**
+ * Where this key stands on one account's guardian list (a decoded Vault
+ * protocol or Floor config), by bulkhead-core `guardian_alive`. Only a live
+ * guardian's heartbeat lands: once the interval has passed, no heartbeat can
+ * revive the key, and sending one only spends fees.
+ *   undefined account (unreadable) -> "unknown": send, it is the safe guess
+ *   null account, or a key not on the list -> "absent"
+ * `deadlineS` is when a live guardian stops counting.
+ */
+export function guardianStanding(account, guardian, nowS) {
+  if (account === undefined) return { standing: "unknown" };
+  const i = account?.guardians?.indexOf(guardian) ?? -1;
+  if (i < 0) return { standing: "absent" };
+  const interval = Number(account.heartbeatIntervalS);
+  const last = Number(account.lastHeartbeat?.[i]);
+  const inRange = interval >= MIN_HEARTBEAT_INTERVAL_S && interval <= MAX_HEARTBEAT_INTERVAL_S;
+  // This clock is not the chain's. A heartbeat stamped ahead of it is fresh,
+  // and a key is written off only well past its deadline: sending a few
+  // heartbeats too many costs little, stopping one too early loses the key.
+  if (inRange && nowS - last <= interval + STANDING_GRACE_S) return { standing: "live", deadlineS: last + interval };
+  return { standing: "dead", lastS: last, intervalS: interval };
+}
+
+export const HEARTBEAT_RETRY_MS = 15_000;
+export const HEARTBEAT_RETRY_MAX_MS = 600_000;
+/** How often an absent or dead key's standing is read again. Nothing is sent. */
+export const HEARTBEAT_RECHECK_MS = 3_600_000;
+
+/**
+ * When to look at one heartbeat target again, and its failure count.
+ * `outcome`: "sent", "failed", "absent" or "dead". A failure backs off from
+ * 15 s, doubling to 10 minutes, but never waits more than a quarter of the
+ * time the guardian has left (`deadlineMs`), so it is retried well before it
+ * goes stale. A success waits the period (`everyMs`).
+ */
+export function afterHeartbeat({ outcome, failures = 0, nowMs, everyMs, deadlineMs = null }) {
+  if (outcome === "sent") return { nextAt: nowMs + everyMs, failures: 0 };
+  if (outcome !== "failed") return { nextAt: nowMs + HEARTBEAT_RECHECK_MS, failures: 0 };
+  const n = failures + 1;
+  let wait = Math.min(HEARTBEAT_RETRY_MAX_MS, HEARTBEAT_RETRY_MS * 2 ** (n - 1));
+  if (deadlineMs !== null && deadlineMs > nowMs) wait = Math.min(wait, Math.floor((deadlineMs - nowMs) / 4));
+  return { nextAt: nowMs + Math.max(HEARTBEAT_RETRY_MS, wait), failures: n };
+}
+
+/** Period after a protocol-account read. An unreadable account uses the
+ * shortest legal chain interval, so a configured period equal to that
+ * window is still pulled inside it. */
+export function heartbeatEveryAfterAccount(policyEveryS, chainIntervalS) {
+  const interval = Number(chainIntervalS);
+  return heartbeatEverySeconds(policyEveryS, interval > 0 ? interval : DAY_S);
+}
+
+/** Seconds between heartbeats. A period equal to the chain interval lands
+ * after the deadline once confirmation is observed, and a stale guardian
+ * cannot revive itself. Stay at least an hour, and at least a tenth of the
+ * interval, inside the chain window.
+ */
+export function heartbeatEverySeconds(everyS, chainIntervalS) {
+  const every = Number(everyS);
+  if (!(every > 0)) return every;
+  const interval = Number(chainIntervalS);
+  if (!(interval > 0)) return every;
+  const slack = Math.max(3_600, Math.floor(interval / 10));
+  const ceiling = interval - slack;
+  if (ceiling <= 0) return every;
+  return Math.min(every, ceiling);
+}
+
+/** A `BHCHNG01` account still waiting, or null. */
+export function readPendingChange(bytes) {
+  if (!bytes || bytes.length < 140) return null;
+  if (new TextDecoder().decode(bytes.subarray(0, 8)) !== "BHCHNG01") return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    protocol: b58encode(bytes.subarray(8, 40)),
+    id: view.getBigUint64(40, true),
+    kind: bytes[48],
+    vetoed: bytes[49] !== 0,
+    executed: bytes[50] !== 0,
+    expiresS: Number(view.getBigInt64(132, true)),
+  };
+}
+
+/** Veto a loosening that is still pending. History replay does not send
+ * actions, so a restart has to read the account. `already` is `state.vetoed`.
+ */
+export function pendingChangeVeto(change, policy, now, already) {
+  if (!policy.vetoLoosenings || !change || change.vetoed || change.executed) return null;
+  if (Number.isFinite(change.expiresS) && now >= change.expiresS) return null;
+  const id = BigInt(change.id);
+  if (already?.has(`c${id}`)) return null;
+  if ((policy.approvedChangeIds ?? []).map(BigInt).includes(id)) return null;
+  return { type: "veto_change", changeId: id, reason: `loosening ${id} (kind ${change.kind}) is still pending` };
+}
+
+/** Veto a Floor upgrade that is still pending. Same rule as a live
+ * `floor:proposed` event: only kind 1, and not a pre-approved buffer.
+ */
+export function pendingUpgradeVeto(floor, policy, already) {
+  if (!floor || floor.pendingKind !== 1 || floor.pendingVetoed) return null;
+  const id = BigInt(floor.pendingId);
+  if (already?.has(`f${floor.program}:${id}`)) return null;
+  if ((policy.approvedUpgradeBuffers ?? []).includes(floor.pendingTarget)) return null;
+  return { type: "floor_veto", program: floor.program, proposalId: id, reason: `upgrade to unapproved buffer ${floor.pendingTarget} is still pending` };
+}
+
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
 export function observeProtocolFreeze(state, until, now, policy = DEFAULT_POLICY, act = true) {
   state.frozenUntil = Math.max(state.frozenUntil, until);
@@ -217,17 +408,19 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       // for tickets whose event was missed): its queued amount counts once.
       const ticket = e.queued > 0n ? e.ticketId : null;
       const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
-      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner });
+      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued });
       const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       // `e.at` is when the outflow happened. `ctx.now` is when the decision is made.
       state.outflows.push({ t: e.at ?? ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
       const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
       const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
-      if (act && !frozen && lastHour >= limit) {
+      // An empty sum is not a breach. A future-dated outflow is kept but not
+      // counted yet, and `0 ≥ 0` would freeze whenever the worst case is 0.
+      if (act && !frozen && lastHour > 0n && lastHour >= limit) {
         state.freezing = true;
         actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last hour: ${lastHour} ≥ ${limit} (${policy.freezeFractionOfWorst1h} × worst_1h)` });
-      } else if (act && !frozen && limit24h !== null && lastDay >= limit24h) {
+      } else if (act && !frozen && lastDay > 0n && limit24h !== null && lastDay >= limit24h) {
         state.freezing = true;
         actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)` });
       }
@@ -260,7 +453,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       if (!act) break;
       if (e.proposalKind === 1 && !policy.approvedUpgradeBuffers.includes(e.target) && !state.vetoed.has(`f${e.program}:${e.id}`)) {
         state.vetoed.add(`f${e.program}:${e.id}`);
-        actions.push({ type: "floor_veto", program: e.program, reason: `upgrade to unapproved buffer ${e.target}` });
+        actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: `upgrade to unapproved buffer ${e.target}` });
       }
       break;
   }

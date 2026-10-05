@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { b58decode, b58encode, key, onCurve, findPda, compileMessage } from "../lib/solana.mjs";
+import { FloorClient } from "../lib/bulkhead.mjs";
 
 const here = new URL(".", import.meta.url);
 
@@ -46,6 +47,18 @@ test("legacy messages order signers first, the fee payer at index 0", () => {
 
 import { Keypair } from "../lib/signer.mjs";
 import { verify, createPublicKey } from "node:crypto";
+
+test("a floor veto can name the proposal, and still be sent without one", () => {
+  const fc = new FloorClient("11111111111111111111111111111111", "11111111111111111111111111111112");
+  fc.config = key("11111111111111111111111111111113");
+  const guardian = "11111111111111111111111111111114";
+  const named = fc.veto(guardian, 4n);
+  assert.equal(named.data[0], 5);
+  assert.equal(named.data.length, 9);
+  assert.equal(named.data[1], 4);
+  assert.ok(named.data.subarray(2).every((b) => b === 0));
+  assert.deepEqual(fc.veto(guardian).data, Uint8Array.of(5));
+});
 
 test("signer: RFC 8032 test vector 1 (empty message)", () => {
   // RFC 8032 §7.1, TEST 1.

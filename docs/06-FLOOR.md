@@ -94,7 +94,7 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 2 | `pin_snapshot` | anyone | Accepts a frozen buffer byte-identical to the live code (`sol_memcmp_`) |
 | 3 | `abort` | a live guardian or the owner | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Never fails because of the snapshot. Cancels any pending proposal. |
 | 4 | `propose(kind, target, payload)` | owner | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay. Raising the delay is instant; everything else waits the delay and expires 7 days after it becomes executable. |
-| 5 | `veto` | any live guardian | Blocks the pending proposal |
+| 5 | `veto` | any live guardian | Blocks the pending proposal. Data may be empty, or the proposal id (u64). A named id that is not the one pending is refused, so a retried veto cannot hit a proposal that replaced it. |
 | 6 | `approve` | live guardians | Approves the pending Restore (its exact buffer) |
 | 7 | `execute` | anyone | Runs the pending proposal once allowed. A Restore runs at once with a quorum's approval. |
 | 8 | `restore_snapshot` | a live guardian quorum | Reinstalls the verified snapshot |

@@ -79,6 +79,8 @@ for p in bulkhead_floor bulkhead_vault bulkhead_harbor; do
 done
 mkdir -p "$DIR"
 if [ -f "$DIR/world.json" ]; then
+  # A leftover world.json is not a market. Confirm this cluster still has it.
+  node cloud/deploy/market.mjs confirm "$URL" "$DIR" "$(id bulkhead_vault)" "$(id bulkhead_harbor)"
   echo "== market already set up: $DIR/world.json"
 else
   node cloud/deploy/market.mjs setup "$URL" "$DIR" "$PAYER" "$(id bulkhead_vault)" "$(id bulkhead_harbor)"

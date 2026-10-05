@@ -138,8 +138,9 @@ export class FloorClient {
   cancel(owner) {
     return this.ix(11, new Uint8Array(0), [w(this.config), s(owner)]);
   }
-  veto(guardian) {
-    return this.ix(5, new Uint8Array(0), [w(this.config), s(guardian)]);
+  veto(guardian, proposalId = null) {
+    const data = proposalId == null ? new Uint8Array(0) : u64le(proposalId);
+    return this.ix(5, data, [w(this.config), s(guardian)]);
   }
   heartbeat(guardian) {
     return this.ix(9, new Uint8Array(0), [w(this.config), s(guardian)]);

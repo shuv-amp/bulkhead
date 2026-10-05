@@ -35,6 +35,7 @@ pub mod verr {
     pub const IMPORT_EXCEEDS_BALANCE: u32 = 8019;
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
     pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
+    pub const INSUFFICIENT_BALANCE: u32 = 8049;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;
@@ -45,6 +46,7 @@ pub mod verr {
     pub const CHANGE_NOT_EXECUTABLE: u32 = 8033;
     pub const CHANGE_VETOED: u32 = 8034;
     pub const ABDICATED: u32 = 8037;
+    pub const DUPLICATE_ACCOUNT: u32 = 8041;
     pub const CANNOT_EJECT: u32 = 8042;
     pub const GENESIS_ONLY: u32 = 8043;
     pub const DESTINATION_NOT_SETTLED: u32 = 8044;

@@ -119,7 +119,7 @@ pub fn process_instruction(
         ix::PIN_SNAPSHOT => pin_snapshot(program_id, accounts),
         ix::ABORT => abort(program_id, accounts),
         ix::PROPOSE => propose(program_id, accounts, args),
-        ix::VETO => veto(program_id, accounts),
+        ix::VETO => veto(program_id, accounts, args),
         ix::APPROVE => approve(program_id, accounts),
         ix::EXECUTE => execute(program_id, accounts),
         ix::RESTORE_SNAPSHOT => restore_snapshot(program_id, accounts),
@@ -778,13 +778,23 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
 
 // ---------------------------------------------------------------------------
 // 5. Veto (any live guardian)       Accounts: 0 config [w], 1 guardian [s].
+//    Data: empty, or the pending proposal id (u64). An id that is no longer
+//    pending is refused, so a retry cannot veto a proposal that replaced it.
 // ---------------------------------------------------------------------------
-fn veto(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+fn veto(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
     let guardian = acc(accounts, 1)?;
     live_guardian(&c, guardian, now()?)?;
     if c.pending_kind == kind::NONE {
         return Err(FloorError::NoProposal.into());
+    }
+    if !args.is_empty() {
+        let id: [u8; 8] = args
+            .try_into()
+            .map_err(|_| FloorError::InvalidInstruction)?;
+        if u64::from_le_bytes(id) != c.pending_id {
+            return Err(FloorError::NoProposal.into());
+        }
     }
     c.pending_vetoed = 1;
     let who = key(guardian);

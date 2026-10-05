@@ -285,6 +285,13 @@ pub fn release(
         return Err(VaultError::DuplicateAccount.into());
     }
     let (rmint, owner, _) = token::account_info(recipient)?;
+    if owner == key(acc(accounts, 2)?) {
+        // A token account the vault PDA owns: the lifeboat (entered only by
+        // lifeboat_move, which records the balance), or any other account
+        // someone opened for the vault PDA, which no instruction can move
+        // tokens out of. Either way a payout there is lost to the ledger.
+        return Err(VaultError::DuplicateAccount.into());
+    }
     if rmint != v.mint {
         return Err(VaultError::WrongMint.into());
     }
@@ -340,6 +347,12 @@ pub fn release(
     outcome[16..24].copy_from_slice(&queued.to_le_bytes());
     outcome[24..32].copy_from_slice(&ticket_id.to_le_bytes());
     outcome[32..40].copy_from_slice(&eta_s.to_le_bytes());
+    // The lifeboat, or a floor above the live balance, can make the ledger and
+    // the limiter promise more than this token account holds. Quote and release
+    // must agree: the token program would reject the transfer.
+    if backed + instant > balance {
+        return Err(VaultError::InsufficientBalance.into());
+    }
     if dry_run {
         pinocchio::cpi::set_return_data(&outcome);
         return Ok(());
@@ -444,6 +457,11 @@ pub fn settle_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     }
     if key(recipient) != tk.recipient || key(acc(accounts, 6)?) != tk.payer {
         return Err(VaultError::RecipientOwnerMismatch.into());
+    }
+    // The owner as it is now: a token account's owner can be changed after the
+    // ticket was created. Same rule as `release`.
+    if token::account_info(recipient)?.1 == key(acc(accounts, 1)?) {
+        return Err(VaultError::DuplicateAccount.into());
     }
     let t = now()?;
     if t < tk.eta_s {

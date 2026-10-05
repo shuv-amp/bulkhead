@@ -627,3 +627,29 @@ fn stopping_a_200kb_program_with_snapshot_verification_is_cheap() {
     env.next_slot();
     assert!(env.call(&f.program).is_ok());
 }
+
+#[test]
+fn a_named_veto_does_not_apply_to_a_different_proposal() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let buf = env.write_buffer(&drainer(), &p.owner);
+    env.set_buffer_authority(&buf, &p.owner, &f.authority);
+    env.ok(
+        &[f.propose(&p.owner.pubkey(), UPGRADE, &buf, &[], Some(&buf))],
+        &[&p.owner],
+    );
+    let id = u64::from_le_bytes(env.account(&f.config).data[528..536].try_into().unwrap());
+    assert_eq!(
+        env.fails(&[f.veto_id(&p.g[0].pubkey(), Some(id + 1))], &[&p.g[0]]),
+        err::NO_PROPOSAL
+    );
+    assert_eq!(read_config(&env, f).pending_vetoed, 0);
+    // An id that is not exactly 8 bytes is malformed, not a different proposal.
+    let mut short = f.veto_id(&p.g[0].pubkey(), Some(id));
+    short.data.truncate(5);
+    assert_eq!(env.fails(&[short], &[&p.g[0]]), err::INVALID_INSTRUCTION);
+    assert_eq!(read_config(&env, f).pending_vetoed, 0);
+    env.ok(&[f.veto_id(&p.g[0].pubkey(), Some(id))], &[&p.g[0]]);
+    assert_eq!(read_config(&env, f).pending_vetoed, 1);
+}

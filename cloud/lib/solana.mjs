@@ -376,6 +376,8 @@ export function decodeFloor(d) {
     snapshotPinned: !zero(at(480)),
     pendingKind: d[520],
     pendingVetoed: d[521] === 1,
+    pendingId: new DataView(d.buffer, d.byteOffset + 528, 8).getBigUint64(0, true),
+    pendingTarget: b58encode(at(536)),
     pendingEta: i64(568),
   };
 }

@@ -18,9 +18,11 @@ for p in programs/floor programs/vault; do
   RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --arch v3 \
     --manifest-path "$p/Cargo.toml" --sbf-out-dir target/deploy
 done
-# Harbor is bound to one Vault id at compile time. Default: the devnet Vault.
-# A local deploy sets BULKHEAD_VAULT_ID to the Vault keypair it just built.
-scripts/build-harbor.sh
+# Harbor is bound to one Vault id at compile time. The canonical binary is
+# always the devnet Vault. Passing it as an argument keeps a leftover
+# BULKHEAD_VAULT_ID (a local deploy's own vault) from being baked in.
+# A local deploy calls build-harbor.sh itself, with its vault and another directory.
+scripts/build-harbor.sh HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b
 python3 - <<'PY'
 import glob, sys
 sys.path.insert(0, "reference")

@@ -1062,6 +1062,82 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
 }
 
 #[test]
+fn a_release_cannot_pay_the_lifeboat() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let mv = w.m.vault_ix(24, &(1 * USDC).to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.usdc.vault_tokens, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    w.env.ok(&[mv], &[&w.m.admin]);
+    // The lifeboat is a vault-owned token account. Paying it through release
+    // would move tokens there without updating lifeboat_amount, so a later
+    // exit would not see them.
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &lifeboat, &w.usdc.vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
+    assert_eq!(w.env.balance(&lifeboat), 1 * USDC);
+}
+
+#[test]
+fn a_release_cannot_pay_any_account_the_vault_owns() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    // Anyone can open a token account whose owner is the vault PDA. No
+    // instruction moves tokens out of one, so a payout there is stranded.
+    let (mint, vault, program) = (w.usdc.mint, w.usdc.vault, w.usdc.token_program);
+    let stray = w.env.token_account(&mint, &vault, &program);
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
+    assert_eq!(w.env.balance(&stray), 0);
+}
+
+#[test]
+fn a_quote_cannot_promise_more_than_the_vault_holds() {
+    let mut w = World::new();
+    let whale = w.user();
+    let to = w.deposit("usdc", &whale, 1_000_000 * USDC);
+    w.seal();
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let mv = w.m.vault_ix(24, &(900_000 * USDC).to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.usdc.vault_tokens, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    w.env.ok(&[mv], &[&w.m.admin]);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 100_000 * USDC);
+
+    let too_much = 1_000_000 * USDC;
+    let mut quote_accounts = vec![AccountMeta::new_readonly(w.m.caller, false)];
+    quote_accounts.extend(w.m.release_accounts(&w.env, &w.usdc, &to, &whale.pubkey(), &w.usdc_prices(true)));
+    let quote = w.m.vault_ix(23, &too_much.to_le_bytes(), quote_accounts);
+    assert_eq!(w.env.fails(&[quote], &[]), verr::INSUFFICIENT_BALANCE);
+    let pay = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &to, too_much, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&whale]), verr::INSUFFICIENT_BALANCE);
+
+    let ok = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &to, 100_000 * USDC, &w.usdc_prices(true));
+    w.env.ok(&[ok], &[&whale]);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
+}
+
+#[test]
 fn sealing_counts_the_spendable_lifeboat_balance_after_token_2022_fees() {
     let mut w = World::with_transfer_fee_mint();
     let depositor = w.user();

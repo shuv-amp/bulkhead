@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLogs, parseEvents, decodeTicket, concat, key, u64le, i64le, b58encode } from "../lib/solana.mjs";
-import { activeTickets, vaultOutflows, ticketRelease } from "../guardian/chain.mjs";
+import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, tokenIncreases, countedAfterAllowlist, truncatedOutflows, unexplainedOutflow, vaultTransfersOut } from "../guardian/chain.mjs";
 import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket } from "../guardian/policy.mjs";
 
 const VAULT = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
@@ -82,6 +82,204 @@ test("a truncated transaction's outflow comes from the vault's own token balance
   // A deposit (the balance went up) is not an outflow.
   const inflow = { ...tx, meta: { preTokenBalances: tx.meta.postTokenBalances, postTokenBalances: tx.meta.preTokenBalances } };
   assert.equal(vaultOutflows(inflow, new Map([[vaultTokens, "USDC"]])).size, 0);
+});
+
+test("a truncated settlement is not a second outflow for a ticket already in the window", () => {
+  const vaultProgram = "Va1t111111111111111111111111111111111111111";
+  const ticket = "Tick111111111111111111111111111111111111111";
+  const vaultTokens = "VauLtTokens11111111111111111111111111111111";
+  const settle = {
+    transaction: {
+      message: {
+        accountKeys: [vaultProgram, ticket, vaultTokens],
+        instructions: [{ programIdIndex: 0, accounts: [0, 0, 2, 0, 1], data: b58encode(Uint8Array.of(9)) }],
+      },
+    },
+    meta: {
+      preTokenBalances: [{ accountIndex: 2, uiTokenAmount: { amount: "1000" } }],
+      postTokenBalances: [{ accountIndex: 2, uiTokenAmount: { amount: "600" } }],
+      innerInstructions: [{
+        index: 0,
+        instructions: [{ programIdIndex: 0, accounts: [0, 0, 2, 0, 1], data: b58encode(Uint8Array.of(8)) }],
+      }],
+    },
+  };
+  const settling = settledTicketAccounts(settle, vaultProgram);
+  assert.deepEqual([...settling.keys()], [ticket]);
+  const drop = vaultOutflows(settle, new Map([[vaultTokens, "USDC"]])).get("USDC");
+  assert.equal(freshVaultOutflow(drop, settling, [{ ticket, amount: 400n }]), 0n);
+  assert.equal(freshVaultOutflow(drop, settling, [{ ticket, amount: 400n }, { ticket: "other", amount: 50n }]), 0n);
+  // The same drop with an extra 100 that is not a known settlement still counts.
+  const mixed = structuredClone(settle);
+  mixed.meta.postTokenBalances[0].uiTokenAmount.amount = "500";
+  const mixedDrop = vaultOutflows(mixed, new Map([[vaultTokens, "USDC"]])).get("USDC");
+  assert.equal(freshVaultOutflow(mixedDrop, settling, [{ ticket, amount: 400n }]), 100n);
+  // A release (tag 8), even as an inner instruction, is not a settlement.
+  const releaseOnly = structuredClone(settle);
+  releaseOnly.transaction.message.instructions[0].data = b58encode(Uint8Array.of(8));
+  assert.equal(settledTicketAccounts(releaseOnly, vaultProgram).size, 0);
+  assert.equal(freshVaultOutflow(drop, settledTicketAccounts(releaseOnly, vaultProgram), [{ ticket, amount: 400n }]), drop);
+});
+
+test("a truncated settlement of a ticket that aged out of the window is not a new outflow", () => {
+  const pending = new Map([[7n, { ticketId: 7n, mint: "USDC", amount: 400n }]]);
+  const rows = settlementRows([], pending, "USDC");
+  assert.deepEqual(rows, [{ ticketId: 7n, amount: 400n }]);
+  assert.equal(freshVaultOutflow(400n, new Set(["ticket"]), [{ ticket: "ticket", amount: rows[0].amount }]), 0n);
+  // A ticket still in the window and the same pending ticket are one credit, not two.
+  const once = settlementRows([{ mint: "USDC", ticketId: 7n, amount: 400n }], pending, "USDC");
+  assert.deepEqual(once, [{ ticketId: 7n, amount: 400n }]);
+});
+
+test("a truncated payout to an allowlisted owner is not an outflow", () => {
+  const vaultTokens = "VauLtTokens11111111111111111111111111111111";
+  const recipient = "Recip111111111111111111111111111111111111111";
+  const tx = {
+    transaction: { message: { accountKeys: [vaultTokens, recipient] } },
+    meta: {
+      preTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "1000" } },
+        { accountIndex: 1, mint: "USDC", owner: "mm", uiTokenAmount: { amount: "0" } },
+      ],
+      postTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "600" } },
+        { accountIndex: 1, mint: "USDC", owner: "mm", uiTokenAmount: { amount: "400" } },
+      ],
+    },
+  };
+  const increases = tokenIncreases(tx, new Set([vaultTokens])).filter((r) => r.mint === "USDC");
+  assert.equal(countedAfterAllowlist(400n, increases, ["mm"]), 0n);
+  assert.equal(countedAfterAllowlist(400n, increases, []), 400n);
+  // The recipient account was created in this transaction, so it has no pre balance.
+  const created = {
+    transaction: { message: { accountKeys: [vaultTokens, recipient] } },
+    meta: {
+      preTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "1000" } },
+      ],
+      postTokenBalances: [
+        { accountIndex: 0, mint: "USDC", owner: "vault", uiTokenAmount: { amount: "600" } },
+        { accountIndex: 1, mint: "USDC", owner: "mm", uiTokenAmount: { amount: "400" } },
+      ],
+    },
+  };
+  const fresh = tokenIncreases(created, new Set([vaultTokens])).filter((r) => r.mint === "USDC");
+  assert.equal(countedAfterAllowlist(400n, fresh, ["mm"]), 0n);
+});
+
+// A truncated transaction as getTransaction returns it: `keys` in index order,
+// the vault's CPIs as inner instructions, token balances with their owners.
+const VAULT_PROGRAM = "Va1t111111111111111111111111111111111111111";
+const VAULT_TOKENS = "VauLtTokens11111111111111111111111111111111";
+const VAULT_PDA = "VauLtPda1111111111111111111111111111111111";
+function truncatedTx({ keys, outer = [], inner = [], balances }) {
+  const at = (k) => keys.indexOf(k);
+  const ix = (program, accounts, bytes) => ({ programIdIndex: at(program), accounts: accounts.map(at), data: b58encode(bytes) });
+  const transfer = (to, amount) => ix(TOKEN, [VAULT_TOKENS, "Mint11111111111111111111111111111111111111", to, VAULT_PDA], concat(Uint8Array.of(12), u64le(amount), Uint8Array.of(6)));
+  const entry = (k, [owner, amount]) => ({ accountIndex: at(k), mint: "USDC", owner, uiTokenAmount: { amount: String(amount) } });
+  return {
+    transaction: { message: { accountKeys: keys, instructions: outer.map((o) => ix(...o)) } },
+    meta: {
+      preTokenBalances: Object.entries(balances).filter(([, v]) => v[1] !== null).map(([k, v]) => entry(k, [v[0], v[1]])),
+      postTokenBalances: Object.entries(balances).map(([k, v]) => entry(k, [v[0], v[2]])),
+      innerInstructions: inner === null ? null : [{ index: 0, instructions: inner.map(([to, amount]) => transfer(to, amount)) }],
+    },
+  };
+}
+const MINTS = new Map([[VAULT_TOKENS, "USDC"]]);
+const VAULT_OF = new Map([["USDC", VAULT_PDA]]);
+const KEYS = [VAULT_PROGRAM, TOKEN, VAULT_TOKENS, "Mint11111111111111111111111111111111111111", VAULT_PDA, "Tick111111111111111111111111111111111111111", "Treasury1111111111111111111111111111111111", "Attacker1111111111111111111111111111111111", "Lifeboat1111111111111111111111111111111111"];
+const [, , , , , TICKET, TREASURY_TOKENS, ATTACKER_TOKENS, LIFEBOAT] = KEYS;
+const settleIx = [VAULT_PROGRAM, [VAULT_PROGRAM, VAULT_PDA, VAULT_TOKENS, KEYS[3], TICKET, TREASURY_TOKENS, VAULT_PROGRAM, TOKEN], Uint8Array.of(9)];
+
+test("a settled allowlisted ticket is not also an allowlist credit, so a hidden release still counts", () => {
+  // One truncated transaction settles the treasury's queued ticket (100) and
+  // pays 100 instantly to an attacker.
+  const tx = truncatedTx({
+    keys: KEYS,
+    outer: [settleIx],
+    inner: [[TREASURY_TOKENS, 100n], [ATTACKER_TOKENS, 100n]],
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 800], [TREASURY_TOKENS]: ["treasury", 0, 100], [ATTACKER_TOKENS]: ["attacker", 0, 100] },
+  });
+  const known = [{ mint: "USDC", ticketId: 7n, ticket: TICKET, amount: 100n }];
+  const seen = truncatedOutflows(tx, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known, allowlist: ["treasury"] });
+  assert.equal(seen.outflows.get("USDC"), 100n);
+  assert.deepEqual(seen.closed, [7n]);
+  // Without the settlement, an allowlisted payout is still not an outflow.
+  const payout = truncatedTx({
+    keys: KEYS,
+    inner: [[TREASURY_TOKENS, 100n]],
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 900], [TREASURY_TOKENS]: ["treasury", 0, 100] },
+  });
+  assert.equal(truncatedOutflows(payout, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known: [], allowlist: ["treasury"] }).outflows.size, 0);
+});
+
+test("tokens sent to an allowlisted owner from elsewhere earn no credit", () => {
+  // The attacker drains 100 and, in the same transaction, sends 100 of its own
+  // tokens to the treasury. Only the vault's own transfers are credited.
+  const tx = truncatedTx({
+    keys: KEYS,
+    inner: [[ATTACKER_TOKENS, 100n]],
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 900], [TREASURY_TOKENS]: ["treasury", 0, 100], [ATTACKER_TOKENS]: ["attacker", 50, 50] },
+  });
+  assert.equal(truncatedOutflows(tx, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known: [], allowlist: ["treasury"] }).outflows.get("USDC"), 100n);
+});
+
+test("a deposit in the same transaction does not hide a truncated release", () => {
+  // 500 deposited, 500 released: the balance is unchanged, the transfer is not.
+  const tx = truncatedTx({
+    keys: KEYS,
+    inner: [[ATTACKER_TOKENS, 500n]],
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 1_000], [ATTACKER_TOKENS]: ["attacker", 0, 500] },
+  });
+  assert.equal(vaultOutflows(tx, MINTS).size, 0);
+  assert.equal(truncatedOutflows(tx, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known: [], allowlist: [] }).outflows.get("USDC"), 500n);
+});
+
+test("a lifeboat move is not an outflow; a payout the parser cannot see still is", () => {
+  const move = truncatedTx({
+    keys: KEYS,
+    inner: [[LIFEBOAT, 300n]],
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 700], [LIFEBOAT]: [VAULT_PDA, 0, 300] },
+  });
+  const args = { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known: [], allowlist: [] };
+  assert.equal(truncatedOutflows(move, args).outflows.size, 0);
+  // An account another vault owns is not this vault's lifeboat.
+  assert.equal(truncatedOutflows(move, { ...args, vaultOf: new Map([["USDC", "SomeOtherVault"]]) }).outflows.get("USDC"), 300n);
+  // A balance drop larger than the transfers read still counts in full.
+  const unseen = truncatedTx({
+    keys: KEYS,
+    inner: [],
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 600] },
+  });
+  assert.deepEqual(vaultTransfersOut(unseen, MINTS), []);
+  assert.equal(truncatedOutflows(unseen, args).outflows.get("USDC"), 400n);
+});
+
+test("without inner instructions the balances decide, and a settlement payee is never an allowlist credit", () => {
+  const tx = truncatedTx({
+    keys: KEYS,
+    outer: [settleIx],
+    inner: null,
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 800], [TREASURY_TOKENS]: ["treasury", 0, 100], [ATTACKER_TOKENS]: ["attacker", 0, 100] },
+  });
+  assert.equal(vaultTransfersOut(tx, MINTS), null);
+  const known = [{ mint: "USDC", ticketId: 7n, ticket: TICKET, amount: 100n }];
+  const seen = truncatedOutflows(tx, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known, allowlist: ["treasury"] });
+  assert.equal(seen.outflows.get("USDC"), 100n);
+  assert.deepEqual(seen.closed, [7n]);
+});
+
+test("a surviving release event explains its part of a truncated figure", () => {
+  const outflows = new Map([["USDC", 500n]]);
+  // Counted on its own, under its owner: backed and instant both left the vault.
+  const left = unexplainedOutflow(outflows, [{ mint: "USDC", owner: "attacker", backed: 100n, instant: 200n }], []);
+  assert.equal(left.get("USDC"), 200n);
+  // An allowlisted payout was never in the figure.
+  assert.equal(unexplainedOutflow(outflows, [{ mint: "USDC", owner: "mm", backed: 0n, instant: 200n }], ["mm"]).get("USDC"), 500n);
+  // More surviving than the figure (a same-transaction deposit, balances only): nothing left over.
+  assert.equal(unexplainedOutflow(outflows, [{ mint: "USDC", owner: "attacker", backed: 0n, instant: 900n }], []).get("USDC"), 0n);
+  assert.equal(unexplainedOutflow(outflows, [{ mint: "SOL", owner: "attacker", backed: 0n, instant: 900n }], []).get("USDC"), 500n);
 });
 
 test("a ticket read from the chain counts once, even when its event arrives too", () => {

@@ -56,6 +56,8 @@ pub enum VaultError {
     Overflow,
     /// Loosen or upgrade delay above `MAX_LOOSEN_DELAY_S` (30 days).
     DelayAboveMaximum,
+    /// `backed + instant` is larger than the vault token account's balance.
+    InsufficientBalance,
 }
 
 impl From<VaultError> for ProgramError {

@@ -26,15 +26,19 @@
 // What it believes: an event counts only if the Vault (or Floor) program wrote
 // it (any program can write a "Program data:" line); freeze state is read from
 // chain every cycle; active tickets are scanned at startup, on a freeze, and
-// periodically; truncated logs use the vault's token balances.
+// periodically; truncated logs use the vault's own transfers and balances.
+//
+// Heartbeats keep this key live on the Vault and on every watched Floor it
+// guards, each inside its chain interval. A failed one is retried on a
+// backoff; a key that is already stale or absent is reported, not resent.
 
 import { readFileSync } from "node:fs";
 import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
-import { activeTickets, vaultOutflows, ticketRelease } from "./chain.mjs";
+import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
@@ -47,6 +51,8 @@ const vc = await new VaultClient(cfg.vaultProgram, cfg.protocolProgram).init();
 const watched = await Promise.all(cfg.mints.map(async (mint) => ({ mint, ...(await vc.vault(mint)) })));
 const vaultMints = new Map(watched.map((v) => [b58encode(v.vault), v.mint]));
 const tokenMints = new Map(watched.map((v) => [b58encode(v.vaultTokens), v.mint]));
+// Each mint's vault PDA. A transfer into a token account it owns is a lifeboat move.
+const vaultOf = new Map(watched.map((v) => [v.mint, b58encode(v.vault)]));
 // Only these programs' events count: any program can write "Program data:".
 const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
 const state = newState();
@@ -62,7 +68,13 @@ const worst1h = new Map();
 const worst24h = new Map();
 const warned = new Set();
 let pendingFreeze = null;
+let pendingVetoes = [];
+let vetoNotBefore = 0;
+const cancelRetryAt = new Map();
+const CANCEL_RETRY_MS = 15_000;
+const VETO_RETRY_MS = 15_000;
 let nextTicketScanAt = 0;
+let nextChangeScanAt = 0;
 let sweptFreezeUntil = 0;
 
 function wallNow() {
@@ -107,12 +119,68 @@ async function sendOptions() {
   return { computeUnits: policy.computeUnits, microLamports: Number(microLamports) || 0, rpcs: extraRpcs };
 }
 
-async function heartbeat() {
-  const sig = await send(rpc, guardian, [vc.heartbeat(guardian.publicKey)], [], await sendOptions());
-  log({ action: "heartbeat", signature: sig });
+/** Decoded account, null when it does not exist, undefined when it could not be read. */
+async function readDecoded(address, decodeBytes) {
+  try {
+    const acc = await rpc.account(address);
+    return acc ? decodeBytes(acc.bytes) : null;
+  } catch {
+    return undefined;
+  }
 }
 
-async function execute(action, event, eventTime) {
+// Per target (the Vault protocol, each watched Floor config): when to look
+// again, consecutive failures, and the standing last logged.
+const beats = new Map();
+
+/**
+ * One heartbeat target. Sends only while this key can still count there, so a
+ * stale, ejected or absent key is reported once and costs no transactions. A
+ * failure is retried alone, on its own backoff, inside the time left.
+ */
+async function beatOne(id, read, ix, logged) {
+  const b = beats.get(id) ?? { nextAt: 0, failures: 0, standing: null };
+  if (Date.now() < b.nextAt) return b.nextAt;
+  const account = await read();
+  const { standing, deadlineS, lastS, intervalS } = guardianStanding(account, guardian.address, wallNow());
+  if (standing !== b.standing && (standing === "dead" || standing === "absent")) {
+    log(standing === "dead"
+      ? { level: "error", msg: "this key is no longer a live guardian; a heartbeat cannot revive it, and it cannot freeze or veto here. Have the admin or a guardian quorum replace it.", target: logged.target, lastHeartbeatS: lastS, intervalS }
+      : { level: "warn", msg: "no heartbeat sent: the account does not exist or this key is not on its guardian list", target: logged.target });
+  }
+  let outcome = standing;
+  if (standing === "live" || standing === "unknown") {
+    try {
+      const signature = await send(rpc, guardian, [ix()], [], await sendOptions());
+      log({ ...logged, signature });
+      outcome = "sent";
+    } catch (e) {
+      log({ level: "warn", msg: `${logged.action} failed: ${e.message}` });
+      outcome = "failed";
+    }
+  }
+  const everyMs = heartbeatEveryAfterAccount(policy.heartbeatEveryS, account?.heartbeatIntervalS) * 1000;
+  const next = afterHeartbeat({ outcome, failures: b.failures, nowMs: Date.now(), everyMs, deadlineMs: deadlineS ? deadlineS * 1000 : null });
+  beats.set(id, { ...next, standing });
+  return next.nextAt;
+}
+
+/**
+ * Heartbeats for the Vault protocol and every watched Floor this key guards,
+ * or their vetoes and freezes die when the chain interval ends. Each period
+ * stays inside its own chain interval. Returns when the next one is due.
+ */
+async function beat() {
+  let next = await beatOne("vault", () => readDecoded(vc.protocol, decodeProtocol), () => vc.heartbeat(guardian.publicKey), { action: "heartbeat", target: "vault" });
+  for (const fc of floorWatch) {
+    const program = b58encode(fc.protected);
+    const at = await beatOne(`floor:${program}`, () => readDecoded(fc.config, decodeFloor), () => fc.heartbeat(guardian.publicKey), { action: "floor_heartbeat", program, target: `floor ${program}` });
+    next = Math.min(next, at);
+  }
+  return next;
+}
+
+async function execute(action, event, eventTime, { retrying = false } = {}) {
   const started = Date.now();
   try {
     let ixs;
@@ -121,23 +189,49 @@ async function execute(action, event, eventTime) {
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       case "cancel": {
+        // The caller returns a failed cancel to the sweep; this one waits.
+        if ((cancelRetryAt.get(action.ticketId) ?? 0) > Date.now()) return false;
         const vault = action.vault ?? (await vc.vault(action.mint ?? event.mint)).vault;
         const ticket = await vc.ticketAddress(action.ticketId);
         const acc = await rpc.account(ticket);
         if (!acc) {
-          log({ action: "cancel", skipped: "ticket already settled or cancelled", ticketId: action.ticketId });
-          return true;
+          // A lagging read is not proof the ticket settled. Retry; leaving it
+          // marked cancelled would let it pay out when the freeze ends.
+          log({ action: "cancel", skipped: "ticket account missing; will retry", ticketId: action.ticketId });
+          cancelRetryAt.set(action.ticketId, Date.now() + CANCEL_RETRY_MS);
+          return false;
         }
+        cancelRetryAt.delete(action.ticketId);
         const payer = acc.bytes.slice(136, 168); // Ticket: disc, protocol, vault, recipient, recipient_owner, payer
         ixs = [vc.cancelTicket(vault, ticket, guardian.publicKey, payer)];
         break;
       }
       case "veto_change":
+        if (retrying) {
+          const acc = await rpc.account(await vc.changeAddress(action.changeId));
+          const what = vetoRetryDisposition(action, acc ? readChangeVeto(acc.bytes) : null);
+          if (what !== "send") {
+            if (what === "drop") log({ action: "veto_change", skipped: "change is already closed", changeId: action.changeId });
+            return what === "drop";
+          }
+        }
         ixs = [vc.vetoChange(await vc.changeAddress(action.changeId), guardian.publicKey)];
         break;
       case "floor_veto": {
         const fc = await new FloorClient(cfg.floorProgram, action.program).init();
-        ixs = [fc.veto(guardian.publicKey)];
+        if (retrying) {
+          const acc = await rpc.account(fc.config);
+          let chain = null;
+          if (acc) {
+            try { chain = decodeFloor(acc.bytes); } catch { chain = null; }
+          }
+          const what = vetoRetryDisposition(action, chain);
+          if (what !== "send") {
+            if (what === "drop") log({ action: "floor_veto", skipped: "that proposal is no longer pending", proposalId: action.proposalId });
+            return what === "drop";
+          }
+        }
+        ixs = [fc.veto(guardian.publicKey, action.proposalId)];
         break;
       }
       default:
@@ -162,6 +256,7 @@ async function execute(action, event, eventTime) {
 
 /** After a freeze lands: cancel every queued ticket still outstanding. */
 async function sweepCancels(event, eventTime, { refresh = true } = {}) {
+  for (const id of cancelRetryAt.keys()) if (!state.pendingTickets.has(id)) cancelRetryAt.delete(id);
   if (refresh) {
     await tryRefreshPendingTickets();
   }
@@ -186,6 +281,10 @@ async function applyActions(actions, event, eventTime) {
     if (action.type === "cancel") {
       if (ok) state.pendingTickets.delete(action.ticketId);
       else state.cancelled.delete(action.ticketId);
+    }
+    if (action.type === "veto_change" || action.type === "floor_veto") {
+      if (!ok) pendingVetoes = queueFailedVeto(pendingVetoes, action);
+      continue;
     }
     if (action.type !== "freeze") continue;
     freezeOk = ok;
@@ -228,28 +327,47 @@ async function consider(e, signature, now, act) {
   await applyActions(actions, e, now);
 }
 
+/** Queued tickets already counted, with their addresses, for matching a truncated settlement. */
+async function knownTickets() {
+  const known = [];
+  for (const mint of cfg.mints) {
+    for (const row of settlementRows(state.outflows, state.pendingTickets, mint)) {
+      known.push({ mint, ticketId: row.ticketId, ticket: b58encode(await vc.ticketAddress(row.ticketId)), amount: row.amount });
+    }
+  }
+  return known;
+}
+
 async function ingest(sigs, act, checkpoint = () => {}) {
   await ingestSignatures(sigs, async (s) => {
     if (s.err) return;
     const tx = await requireTransaction(rpc, s.signature);
     const now = s.blockTime ?? tx?.blockTime ?? wallNow();
     const { events, truncated } = parseLogs(tx?.meta?.logMessages);
-    if (truncated) {
-      // Events past the log cap are gone; the balances are not. Every decrease
-      // of a watched vault in this transaction counts as unbacked outflow.
-      if (act) log({ level: "warn", msg: "log truncated: outflow taken from token balances", signature: s.signature });
-      for (const [mint, amount] of vaultOutflows(tx, tokenMints)) {
-        const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
-        await consider(e, s.signature, now, act);
-      }
-    }
+    const decoded = [];
     for (const raw of events) {
       if (!trusted.includes(raw.program)) continue; // written by another program: not an event
       const e = decode(raw);
-      if (e.kind === "other") continue;
-      if (truncated && e.kind === "released") e.instant = 0n; // counted from the balances above
+      if (e.kind !== "other") decoded.push(e);
+    }
+    // Tickets as they were before this transaction: a surviving `settled`
+    // event would otherwise drop the ticket its payout is matched against.
+    const known = truncated ? await knownTickets() : [];
+    for (const e of decoded) await consider(e, s.signature, now, act);
+    if (!truncated) return;
+    // Events past the log cap are gone; the instructions and balances are not.
+    // What left the vaults beyond the events that survived is an unbacked
+    // outflow of unknown owner.
+    if (act) log({ level: "warn", msg: "log truncated: outflow taken from the vault's transfers and balances", signature: s.signature });
+    const seen = truncatedOutflows(tx, { vaultProgram: cfg.vaultProgram, tokenMints, vaultOf, known, allowlist: policy.allowlistedOwners });
+    const released = decoded.filter((e) => e.kind === "released");
+    for (const [mint, amount] of unexplainedOutflow(seen.outflows, released, policy.allowlistedOwners)) {
+      if (amount === 0n) continue;
+      const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
       await consider(e, s.signature, now, act);
     }
+    // Their `vault:settled` events may be among the lost lines.
+    for (const ticketId of seen.closed) assess(state, { kind: "ticket_closed", ticketId }, { now }, policy, act);
   }, checkpoint);
 }
 
@@ -276,6 +394,7 @@ async function refreshPendingTickets({ recoverOutflows = false, act = false } = 
       mint: vaultMints.get(ticket.vault) ?? null,
       vault: ticket.vault,
       owner: ticket.recipientOwner,
+      amount: ticket.amount,
     });
   }
   return tickets.length;
@@ -337,24 +456,68 @@ async function checkFloor() {
   }
 }
 
-async function freezeIfWindowStillOpen(now) {
-  if (now < state.frozenUntil || state.freezing) return;
-  const mints = new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
-  for (const mint of mints) {
-    if (!worst1h.has(mint)) continue; // no figure yet: don't freeze from history alone
-    const action = breach(state, mint, { ...worstFor(mint), now }, policy);
-    if (!action) continue;
-    state.freezing = true;
-    log({ msg: "window already over threshold after catch-up", mint, reason: action.reason });
-    await applyActions([action], { mint }, now);
-    return;
+/** Veto loosenings and Floor upgrades that are still pending. Replay does not
+ * send actions, so a proposal that landed while this process was down is read
+ * from the account.
+ */
+async function vetoStillPending(now) {
+  const actions = [];
+  if (policy.vetoLoosenings) {
+    try {
+      for (const change of await activeChanges(rpc, cfg.vaultProgram, vc.protocol)) {
+        const action = pendingChangeVeto(change, policy, now, state.vetoed);
+        if (!action) continue;
+        state.vetoed.add(`c${action.changeId}`);
+        actions.push(action);
+      }
+    } catch (e) {
+      log({ level: "warn", msg: `change scan failed; retrying: ${e.message}` });
+    }
+  }
+  for (const fc of floorWatch) {
+    try {
+      const acc = await rpc.account(fc.config);
+      if (!acc) continue;
+      const fl = decodeFloor(acc.bytes);
+      const action = pendingUpgradeVeto(fl, policy, state.vetoed);
+      if (!action) continue;
+      state.vetoed.add(`f${action.program}:${action.proposalId}`);
+      actions.push(action);
+    } catch (e) {
+      log({ level: "warn", msg: `floor proposal scan failed; retrying: ${e.message}` });
+    }
+  }
+  if (actions.length) await applyActions(actions, { reason: "still pending" }, now);
+  nextChangeScanAt = Date.now() + 60_000;
+}
+
+// Mints whose replayed startup window has not been judged yet (no attest).
+let unjudged = new Set();
+
+/** Judge the replayed startup window, once per mint, once it has a figure. */
+async function judgeStartupWindow(now) {
+  const worst = (mint) => (worst1h.has(mint) ? worstFor(mint) : null);
+  const judged = judgeReplayedWindow(state, unjudged, worst, now, policy);
+  unjudged = judged.unjudged;
+  if (!judged.action) return;
+  state.freezing = true;
+  log({ msg: "window already over threshold after catch-up", mint: judged.mint, reason: judged.action.reason });
+  await applyActions([judged.action], { mint: judged.mint }, now);
+}
+
+/** One step of the loop. A failing step must not hold up the others. */
+async function step(name, run) {
+  try {
+    await run();
+  } catch (e) {
+    log({ level: "warn", msg: `${name}: ${e.message}` });
   }
 }
 
 async function main() {
   log({ msg: "guardian started", guardian: guardian.address, protocol: b58encode(vc.protocol), policy });
   await refreshWorstCase();
-  await heartbeat().catch((e) => log({ level: "warn", msg: `heartbeat failed: ${e.message}` }));
+  let heartbeatAt = await beat();
   const oldest = wallNow() - DAY_S;
   const history = await signatures(undefined, oldest);
   const until = history[0]?.signature;
@@ -364,42 +527,59 @@ async function main() {
   // release is outside the rolling outflow window. Current chain state is live,
   // so an already-active freeze must sweep tickets at startup too.
   await syncFromChain(true, { startup: true });
-  await freezeIfWindowStillOpen(wallNow());
+  unjudged = new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
+  await judgeStartupWindow(decisionTime(wallNow(), state.outflows));
+  await vetoStillPending(wallNow());
   log({ msg: "caught up", signatures: inWindow.length });
   await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
-  let lastHeartbeat = Date.now();
   let lastAttest = Date.now();
   let lastFloorCheck = Date.now();
   for (;;) {
-    try {
-      if (pendingFreeze && wallNow() >= state.frozenUntil) {
-        const { event, eventTime } = pendingFreeze;
-        const ok = await execute(pendingFreeze.action, event, eventTime);
-        if (ok) {
-          state.freezing = true;
-          pendingFreeze = null;
-          await sweepCancels(event, eventTime);
-        }
+    // Chain state first, then the freeze retry, which has to see it: a freeze
+    // that already landed (a backup endpoint may have carried it) must not be
+    // sent again, since a second freeze extends the lockout. Each step has its
+    // own try, so a transaction the RPC cannot return yet never holds up a
+    // freeze, a veto or a heartbeat.
+    await step("chain sync", async () => {
+      await syncFromChain(true);
+      if (!pendingFreeze || wallNow() < state.frozenUntil) return;
+      const { action, event, eventTime } = pendingFreeze;
+      if (await execute(action, event, eventTime)) {
+        state.freezing = true;
+        pendingFreeze = null;
+        await sweepCancels(event, eventTime);
       }
+    });
+    await step("ingest", async () => {
       const sigs = await signatures(cursor, null);
       await ingest(sigs, true, (signature) => { cursor = signature; });
-      await syncFromChain(true);
-      if (Date.now() - lastAttest > 10_000) {
+    });
+    if (pendingVetoes.length && Date.now() >= vetoNotBefore) {
+      await step("veto retry", async () => {
+        const still = [];
+        for (const action of pendingVetoes) {
+          if (!(await execute(action, { reason: action.reason }, wallNow(), { retrying: true }))) still.push(action);
+        }
+        pendingVetoes = still;
+        if (still.length) vetoNotBefore = Date.now() + VETO_RETRY_MS;
+      });
+    }
+    if (Date.now() - lastAttest > 10_000) {
+      await step("attest", async () => {
         await refreshWorstCase();
         lastAttest = Date.now();
-      }
-      if (floorWatch.length && Date.now() - lastFloorCheck > 60_000) {
-        lastFloorCheck = Date.now();
-        await checkFloor();
-      }
-      if (Date.now() - lastHeartbeat > policy.heartbeatEveryS * 1000) {
-        await heartbeat();
-        lastHeartbeat = Date.now();
-      }
-    } catch (e) {
-      log({ level: "warn", msg: e.message });
+        // A mint whose attest failed at startup has its replayed window
+        // judged once the figure exists.
+        if (unjudged.size) await judgeStartupWindow(decisionTime(wallNow(), state.outflows));
+      });
     }
+    if (Date.now() >= nextChangeScanAt) await step("pending proposals", () => vetoStillPending(wallNow()));
+    if (floorWatch.length && Date.now() - lastFloorCheck > 60_000) {
+      lastFloorCheck = Date.now();
+      await step("floor check", checkFloor);
+    }
+    if (Date.now() >= heartbeatAt) await step("heartbeat", async () => { heartbeatAt = await beat(); });
     await new Promise((r) => setTimeout(r, cfg.pollMs ?? 400));
   }
 }

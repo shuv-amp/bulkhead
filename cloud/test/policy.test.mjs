@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, scaleBy, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -152,6 +152,8 @@ test("floor readiness reads the real account layout", async () => {
   const { decodeFloor } = await import("../lib/solana.mjs");
   const d = new Uint8Array(916);
   d.set(new TextEncoder().encode("FLOORv01"), 0);
+  new DataView(d.buffer).setBigUint64(528, 4n, true);
+  assert.equal(decodeFloor(d).pendingId, 4n);
   assert.deepEqual(floorAlerts(decodeFloor(d)).map((a) => a.code), ["unarmed", "no_snapshot"]);
   d[448] = 6; // abort buffer (programs/floor/src/state.rs O_ABORT_BUF)
   d[480] = 7; // snapshot buffer (O_SNAP_BUF)
@@ -168,6 +170,17 @@ test("a later outflow is not treated as already inside an earlier window", () =>
   assert.equal(s.outflows.length, 2);
 });
 
+test("an empty window does not freeze when the worst case is zero", () => {
+  const s = newState();
+  const future = released({ queued: 400n, ticketId: 1n });
+  future.at = 5_000;
+  assert.deepEqual(assess(s, future, { worst1h: 0n, worst24h: 0n, now: 1_000 }), []);
+  assert.equal(breach(s, mint, { worst1h: 0n, worst24h: 0n, now: 1_000 }), null);
+  assert.equal(breach(s, mint, { worst1h: 0n, worst24h: 0n, now: 5_000 }).type, "freeze");
+  const live = newState();
+  assert.equal(assess(live, released({ instant: 1n }), { worst1h: 0n, worst24h: 0n, now: 1 })[0].type, "freeze");
+});
+
 test("a recovered ticket is stamped when it was created and judged now", () => {
   const s = newState();
   const e = released({ queued: 250_000n * USDC, ticketId: 4n });
@@ -182,4 +195,141 @@ test("a freeze already on chain retires a failed local freeze", () => {
   assert.equal(retirePendingFreeze(pending, 90_000, 1_000), null);
   assert.equal(retirePendingFreeze(pending, 0, 1_000), pending);
   assert.equal(retirePendingFreeze(null, 90_000, 1_000), null);
+});
+
+test("startup judges a breach at the chain time when the wall clock is behind", () => {
+  const s = newState();
+  assess(s, released({ instant: 250_000n * USDC }), { worst1h, now: 9_800 }, DEFAULT_POLICY, false);
+  assert.equal(breach(s, mint, { worst1h, now: 9_000 }), null);
+  const now = decisionTime(9_000, s.outflows);
+  assert.equal(now, 9_800);
+  assert.match(breach(s, mint, { worst1h, now }).reason, /last hour/);
+});
+
+test("a missing ticket account stays cancellable", () => {
+  const s = newState();
+  rememberTicket(s, { ticketId: 7n, mint, vault: "vault-address", owner });
+  assert.equal(pendingCancels(s).length, 1);
+  // A failed cancel (here: the account read came back empty) is returned to the sweep.
+  s.cancelled.delete(7n);
+  assert.equal(pendingCancels(s).length, 1);
+  assert.equal(pendingCancels(s).length, 0);
+});
+
+test("a failed veto is queued once and can be sent again", () => {
+  const action = { type: "veto_change", changeId: 3n, reason: "loosening 3" };
+  const queued = queueFailedVeto([], action);
+  assert.deepEqual(queueFailedVeto(queued, action), queued);
+  assert.equal(queued[0].changeId, 3n);
+  const floor = { type: "floor_veto", program: "prog", proposalId: 4n };
+  assert.equal(queueFailedVeto(queued, floor).length, 2);
+});
+
+test("a failed heartbeat backs off, stays inside the time left, and a success waits out the interval", () => {
+  const day = 86_400_000;
+  assert.deepEqual(afterHeartbeat({ outcome: "sent", failures: 3, nowMs: 1_000, everyMs: day }), { nextAt: 1_000 + day, failures: 0 });
+  assert.deepEqual(afterHeartbeat({ outcome: "failed", nowMs: 0, everyMs: day }), { nextAt: 15_000, failures: 1 });
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 1, nowMs: 0, everyMs: day }).nextAt, 30_000);
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 20, nowMs: 0, everyMs: day }).nextAt, 600_000);
+  // Twenty minutes left: never wait more than a quarter of it.
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 20, nowMs: 0, everyMs: day, deadlineMs: 1_200_000 }).nextAt, 300_000);
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 20, nowMs: 0, everyMs: day, deadlineMs: 10_000 }).nextAt, 15_000);
+  // A stale or absent key is looked at again later, with nothing sent.
+  assert.deepEqual(afterHeartbeat({ outcome: "dead", failures: 4, nowMs: 0, everyMs: day }), { nextAt: HEARTBEAT_RECHECK_MS, failures: 0 });
+  assert.equal(afterHeartbeat({ outcome: "absent", nowMs: 0, everyMs: day }).nextAt, HEARTBEAT_RECHECK_MS);
+});
+
+test("only a live guardian heartbeats: a stale key cannot revive itself on chain", () => {
+  const account = { guardians: ["g0", "g1"], lastHeartbeat: [1_000, 0], heartbeatIntervalS: 86_400 };
+  assert.deepEqual(guardianStanding(account, "g0", 1_000 + 86_400), { standing: "live", deadlineS: 1_000 + 86_400 });
+  // A clock behind the chain still sees a fresh heartbeat as live, and a key
+  // is written off only ten minutes past its deadline.
+  assert.equal(guardianStanding(account, "g0", 900).standing, "live");
+  assert.equal(guardianStanding(account, "g0", 1_000 + 86_400 + 600).standing, "live");
+  assert.equal(guardianStanding(account, "g0", 1_000 + 86_400 + 601).standing, "dead");
+  assert.equal(guardianStanding(account, "g1", 100_000).standing, "dead");
+  assert.equal(guardianStanding(account, "nobody", 1_000).standing, "absent");
+  assert.equal(guardianStanding(null, "g0", 1_000).standing, "absent");
+  assert.equal(guardianStanding(undefined, "g0", 1_000).standing, "unknown");
+  // An interval outside bulkhead-core's 1..30 day range keeps nobody live.
+  assert.equal(guardianStanding({ ...account, heartbeatIntervalS: 3_600 }, "g0", 1_000).standing, "dead");
+});
+
+test("a heartbeat period equal to the chain interval is pulled inside the window", () => {
+  assert.equal(heartbeatEverySeconds(86_400, 86_400), 77_760);
+  assert.equal(heartbeatEverySeconds(86_400, 604_800), 86_400);
+  assert.equal(heartbeatEverySeconds(1_000, 86_400), 1_000);
+  assert.equal(heartbeatEveryAfterAccount(86_400, null), 77_760);
+  assert.equal(heartbeatEveryAfterAccount(86_400, 604_800), 86_400);
+});
+
+test("the replayed window is judged once per mint, so a quorum's unfreeze sticks", () => {
+  const s = newState();
+  const policy = { ...DEFAULT_POLICY, allowlistedOwners: [] };
+  assess(s, released({ instant: 250_000n * USDC }), { worst1h, now: 1_000 }, policy, false);
+  const figure = () => ({ worst1h, worst24h: 1_000_000n * USDC });
+  // No attest yet: the mint waits, nothing is sent.
+  let judged = judgeReplayedWindow(s, new Set([mint]), () => null, 1_100, policy);
+  assert.equal(judged.action, null);
+  assert.deepEqual([...judged.unjudged], [mint]);
+  judged = judgeReplayedWindow(s, judged.unjudged, figure, 1_100, policy);
+  assert.equal(judged.action.type, "freeze");
+  assert.equal(judged.unjudged.size, 0);
+  // The freeze lands; ten minutes later a guardian quorum unfreezes.
+  s.frozenUntil = 1_100 + 86_400;
+  assess(s, { kind: "unfrozen", scope: 0 }, { now: 1_700 }, policy);
+  assert.equal(s.frozenUntil, 0);
+  // The same window, still over the threshold, is not judged a second time.
+  assert.notEqual(breach(s, mint, { ...figure(), now: 1_710 }, policy), null);
+  assert.equal(judgeReplayedWindow(s, judged.unjudged, figure, 1_710, policy).action, null);
+  // A protocol already frozen at startup settles every mint.
+  const frozen = newState();
+  frozen.frozenUntil = 5_000;
+  assert.equal(judgeReplayedWindow(frozen, new Set([mint]), figure, 1_000, policy).unjudged.size, 0);
+});
+
+test("a restart vetoes a loosening that is still pending and leaves a closed one", () => {
+  const bytes = new Uint8Array(140);
+  bytes.set(new TextEncoder().encode("BHCHNG01"));
+  new DataView(bytes.buffer).setBigUint64(40, 9n, true);
+  bytes[48] = 4;
+  new DataView(bytes.buffer).setBigInt64(132, 5_000n, true);
+  const open = readPendingChange(bytes);
+  assert.equal(open.id, 9n);
+  assert.equal(open.kind, 4);
+  const policy = { ...DEFAULT_POLICY, approvedChangeIds: [] };
+  const veto = pendingChangeVeto(open, policy, 1_000, new Set());
+  assert.equal(veto.type, "veto_change");
+  assert.equal(veto.changeId, 9n);
+  assert.equal(pendingChangeVeto(open, policy, 1_000, new Set(["c9"])), null);
+  assert.equal(pendingChangeVeto({ ...open, vetoed: true }, policy, 1_000, new Set()), null);
+  assert.equal(pendingChangeVeto(open, policy, 5_000, new Set()), null);
+  assert.equal(pendingChangeVeto(open, { ...policy, approvedChangeIds: [9] }, 1_000, new Set()), null);
+  const floor = { program: "prog", pendingKind: 1, pendingId: 4n, pendingVetoed: false, pendingTarget: "buf" };
+  assert.equal(pendingUpgradeVeto(floor, DEFAULT_POLICY, new Set()).proposalId, 4n);
+  assert.equal(pendingUpgradeVeto(floor, { ...DEFAULT_POLICY, approvedUpgradeBuffers: ["buf"] }, new Set()), null);
+  assert.equal(pendingUpgradeVeto({ ...floor, pendingKind: 2 }, DEFAULT_POLICY, new Set()), null);
+});
+
+test("a retried floor veto is dropped when a different proposal is pending", () => {
+  const action = { type: "floor_veto", program: "p", proposalId: 4n };
+  const open = { pendingKind: 1, pendingId: 4n, pendingVetoed: false };
+  assert.equal(vetoRetryDisposition(action, open), "send");
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingId: 5n }), "drop");
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingKind: 0 }), "drop");
+  assert.equal(vetoRetryDisposition(action, { ...open, pendingVetoed: true }), "drop");
+  assert.equal(vetoRetryDisposition(action, null), "keep");
+});
+
+test("a retried vault veto stops once the change is closed", () => {
+  const action = { type: "veto_change", changeId: 3n };
+  assert.equal(vetoRetryDisposition(action, { vetoed: false, executed: false }), "send");
+  assert.equal(vetoRetryDisposition(action, { vetoed: true, executed: false }), "drop");
+  assert.equal(vetoRetryDisposition(action, { vetoed: false, executed: true }), "drop");
+  assert.equal(vetoRetryDisposition(action, null), "keep");
+  const bytes = new Uint8Array(51);
+  bytes.set(new TextEncoder().encode("BHCHNG01"));
+  bytes[50] = 1;
+  assert.deepEqual(readChangeVeto(bytes), { vetoed: false, executed: true });
+  assert.equal(readChangeVeto(new Uint8Array(51)), null);
 });
