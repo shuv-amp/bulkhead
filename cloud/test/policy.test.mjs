@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assess, breach, decode, decisionTime, floorAlerts, heartbeatEveryAfterAccount, heartbeatEverySeconds, heartbeatRoundOk, newState, nextHeartbeatAt, noteMissingTicket, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingFreezeAfterSync, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -195,8 +195,6 @@ test("a freeze already on chain retires a failed local freeze", () => {
   assert.equal(retirePendingFreeze(pending, 90_000, 1_000), null);
   assert.equal(retirePendingFreeze(pending, 0, 1_000), pending);
   assert.equal(retirePendingFreeze(null, 90_000, 1_000), null);
-  assert.equal(pendingFreezeAfterSync(pending, 90_000, 1_000), null);
-  assert.equal(pendingFreezeAfterSync(pending, 0, 1_000), pending);
 });
 
 test("startup judges a breach at the chain time when the wall clock is behind", () => {
@@ -212,7 +210,8 @@ test("a missing ticket account stays cancellable", () => {
   const s = newState();
   rememberTicket(s, { ticketId: 7n, mint, vault: "vault-address", owner });
   assert.equal(pendingCancels(s).length, 1);
-  noteMissingTicket(s, 7n);
+  // A failed cancel (here: the account read came back empty) is returned to the sweep.
+  s.cancelled.delete(7n);
   assert.equal(pendingCancels(s).length, 1);
   assert.equal(pendingCancels(s).length, 0);
 });
@@ -226,9 +225,34 @@ test("a failed veto is queued once and can be sent again", () => {
   assert.equal(queueFailedVeto(queued, floor).length, 2);
 });
 
-test("a failed heartbeat is retried shortly, and a success waits out the interval", () => {
-  assert.equal(nextHeartbeatAt(false, 1_000, 86_400_000, 15_000), 16_000);
-  assert.equal(nextHeartbeatAt(true, 1_000, 86_400_000, 15_000), 86_401_000);
+test("a failed heartbeat backs off, stays inside the time left, and a success waits out the interval", () => {
+  const day = 86_400_000;
+  assert.deepEqual(afterHeartbeat({ outcome: "sent", failures: 3, nowMs: 1_000, everyMs: day }), { nextAt: 1_000 + day, failures: 0 });
+  assert.deepEqual(afterHeartbeat({ outcome: "failed", nowMs: 0, everyMs: day }), { nextAt: 15_000, failures: 1 });
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 1, nowMs: 0, everyMs: day }).nextAt, 30_000);
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 20, nowMs: 0, everyMs: day }).nextAt, 600_000);
+  // Twenty minutes left: never wait more than a quarter of it.
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 20, nowMs: 0, everyMs: day, deadlineMs: 1_200_000 }).nextAt, 300_000);
+  assert.equal(afterHeartbeat({ outcome: "failed", failures: 20, nowMs: 0, everyMs: day, deadlineMs: 10_000 }).nextAt, 15_000);
+  // A stale or absent key is looked at again later, with nothing sent.
+  assert.deepEqual(afterHeartbeat({ outcome: "dead", failures: 4, nowMs: 0, everyMs: day }), { nextAt: HEARTBEAT_RECHECK_MS, failures: 0 });
+  assert.equal(afterHeartbeat({ outcome: "absent", nowMs: 0, everyMs: day }).nextAt, HEARTBEAT_RECHECK_MS);
+});
+
+test("only a live guardian heartbeats: a stale key cannot revive itself on chain", () => {
+  const account = { guardians: ["g0", "g1"], lastHeartbeat: [1_000, 0], heartbeatIntervalS: 86_400 };
+  assert.deepEqual(guardianStanding(account, "g0", 1_000 + 86_400), { standing: "live", deadlineS: 1_000 + 86_400 });
+  // A clock behind the chain still sees a fresh heartbeat as live, and a key
+  // is written off only ten minutes past its deadline.
+  assert.equal(guardianStanding(account, "g0", 900).standing, "live");
+  assert.equal(guardianStanding(account, "g0", 1_000 + 86_400 + 600).standing, "live");
+  assert.equal(guardianStanding(account, "g0", 1_000 + 86_400 + 601).standing, "dead");
+  assert.equal(guardianStanding(account, "g1", 100_000).standing, "dead");
+  assert.equal(guardianStanding(account, "nobody", 1_000).standing, "absent");
+  assert.equal(guardianStanding(null, "g0", 1_000).standing, "absent");
+  assert.equal(guardianStanding(undefined, "g0", 1_000).standing, "unknown");
+  // An interval outside bulkhead-core's 1..30 day range keeps nobody live.
+  assert.equal(guardianStanding({ ...account, heartbeatIntervalS: 3_600 }, "g0", 1_000).standing, "dead");
 });
 
 test("a heartbeat period equal to the chain interval is pulled inside the window", () => {
@@ -239,14 +263,29 @@ test("a heartbeat period equal to the chain interval is pulled inside the window
   assert.equal(heartbeatEveryAfterAccount(86_400, 604_800), 86_400);
 });
 
-test("an unreadable floor config retries soon instead of waiting out the interval", () => {
-  const sentAt = 77_760_000;
-  assert.equal(heartbeatRoundOk(true, []), true);
-  assert.equal(heartbeatRoundOk(true, [true]), true);
-  assert.equal(heartbeatRoundOk(true, [false]), false);
-  assert.equal(heartbeatRoundOk(true, [true, false]), false);
-  assert.equal(heartbeatRoundOk(false, [true]), false);
-  assert.equal(nextHeartbeatAt(heartbeatRoundOk(true, [false]), sentAt, 86_400_000, 15_000), sentAt + 15_000);
+test("the replayed window is judged once per mint, so a quorum's unfreeze sticks", () => {
+  const s = newState();
+  const policy = { ...DEFAULT_POLICY, allowlistedOwners: [] };
+  assess(s, released({ instant: 250_000n * USDC }), { worst1h, now: 1_000 }, policy, false);
+  const figure = () => ({ worst1h, worst24h: 1_000_000n * USDC });
+  // No attest yet: the mint waits, nothing is sent.
+  let judged = judgeReplayedWindow(s, new Set([mint]), () => null, 1_100, policy);
+  assert.equal(judged.action, null);
+  assert.deepEqual([...judged.unjudged], [mint]);
+  judged = judgeReplayedWindow(s, judged.unjudged, figure, 1_100, policy);
+  assert.equal(judged.action.type, "freeze");
+  assert.equal(judged.unjudged.size, 0);
+  // The freeze lands; ten minutes later a guardian quorum unfreezes.
+  s.frozenUntil = 1_100 + 86_400;
+  assess(s, { kind: "unfrozen", scope: 0 }, { now: 1_700 }, policy);
+  assert.equal(s.frozenUntil, 0);
+  // The same window, still over the threshold, is not judged a second time.
+  assert.notEqual(breach(s, mint, { ...figure(), now: 1_710 }, policy), null);
+  assert.equal(judgeReplayedWindow(s, judged.unjudged, figure, 1_710, policy).action, null);
+  // A protocol already frozen at startup settles every mint.
+  const frozen = newState();
+  frozen.frozenUntil = 5_000;
+  assert.equal(judgeReplayedWindow(frozen, new Set([mint]), figure, 1_000, policy).unjudged.size, 0);
 });
 
 test("a restart vetoes a loosening that is still pending and leaves a closed one", () => {

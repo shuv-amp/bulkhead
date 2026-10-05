@@ -194,18 +194,6 @@ export function retirePendingFreeze(pending, chainFrozenUntil, now) {
   return pending && chainFrozenUntil > now ? null : pending;
 }
 
-/**
- * Whether a failed freeze is still worth sending, after this cycle's chain
- * read. The retry has to see that read: `frozenUntil` still 0 locally while
- * the freeze already landed, and a second freeze extends the lockout
- * (`freeze_until` takes the later deadline).
- */
-export function pendingFreezeAfterSync(pending, chainFrozenUntil, now) {
-  const still = retirePendingFreeze(pending, chainFrozenUntil, now);
-  if (!still || now < chainFrozenUntil) return null;
-  return still;
-}
-
 /** Judge the startup window at the later of the wall clock and the newest outflow. */
 export function decisionTime(wall, outflows) {
   let now = wall;
@@ -214,11 +202,30 @@ export function decisionTime(wall, outflows) {
 }
 
 /**
- * One null account read is not proof the ticket is gone. Dropping it from
- * the cancellation set lets the next sweep try again.
+ * Judge the replayed startup window once per mint, as soon as that mint has a
+ * worst-case figure (`worst(mint)` returns it, or null while the attest has
+ * not been read). Later releases are judged by `assess` as they arrive.
+ * Judging the same window again after that would freeze straight after a
+ * guardian quorum's unfreeze, for outflows the quorum has already weighed.
+ * A protocol already frozen, or a freeze in flight, settles every mint.
+ * Returns `{ action, mint, unjudged }`: the freeze to send, if any, and the
+ * mints still waiting for a figure.
  */
-export function noteMissingTicket(state, ticketId) {
-  state.cancelled.delete(ticketId);
+export function judgeReplayedWindow(state, unjudged, worst, now, policy = DEFAULT_POLICY) {
+  const none = new Set();
+  if (unjudged.size === 0) return { action: null, mint: null, unjudged: none };
+  if (now < state.frozenUntil || state.freezing) return { action: null, mint: null, unjudged: none };
+  const left = new Set();
+  for (const mint of unjudged) {
+    const figure = worst(mint);
+    if (!figure) {
+      left.add(mint);
+      continue;
+    }
+    const action = breach(state, mint, { ...figure, now }, policy);
+    if (action) return { action, mint, unjudged: none };
+  }
+  return { action: null, mint: null, unjudged: left };
 }
 
 export function vetoKey(action) {
@@ -265,25 +272,54 @@ export function readChangeVeto(bytes) {
   return { vetoed: bytes[49] !== 0, executed: bytes[50] !== 0 };
 }
 
-/**
- * When the next heartbeat may be sent. A success waits out the interval.
- * A failure is retried on the short delay: treating it as a success schedules
- * the next one a full interval later, and a dead guardian cannot revive itself.
- */
-export function nextHeartbeatAt(succeeded, now, everyMs, retryMs) {
-  return now + (succeeded ? everyMs : retryMs);
-}
+/** bulkhead-core `MIN_HEARTBEAT_INTERVAL_S` and `MAX_HEARTBEAT_INTERVAL_S`. */
+const MIN_HEARTBEAT_INTERVAL_S = DAY_S;
+const MAX_HEARTBEAT_INTERVAL_S = 30 * DAY_S;
+/** How far past its chain deadline a key must be before it is written off. */
+const STANDING_GRACE_S = 600;
 
 /**
- * A round may wait the long interval only when the vault heartbeat was sent
- * and every watched Floor config was readable. An unreadable config is not a
- * success: the Floor heartbeat was skipped, and the next wait would be the
- * long interval, past the point where a stale guardian can revive itself.
- * An empty list means no Floor is watched. A config that was read, including
- * one whose guardian set does not include this key, is `true`.
+ * Where this key stands on one account's guardian list (a decoded Vault
+ * protocol or Floor config), by bulkhead-core `guardian_alive`. Only a live
+ * guardian's heartbeat lands: once the interval has passed, no heartbeat can
+ * revive the key, and sending one only spends fees.
+ *   undefined account (unreadable) -> "unknown": send, it is the safe guess
+ *   null account, or a key not on the list -> "absent"
+ * `deadlineS` is when a live guardian stops counting.
  */
-export function heartbeatRoundOk(sentOk, floorConfigsReadable) {
-  return Boolean(sentOk) && floorConfigsReadable.every(Boolean);
+export function guardianStanding(account, guardian, nowS) {
+  if (account === undefined) return { standing: "unknown" };
+  const i = account?.guardians?.indexOf(guardian) ?? -1;
+  if (i < 0) return { standing: "absent" };
+  const interval = Number(account.heartbeatIntervalS);
+  const last = Number(account.lastHeartbeat?.[i]);
+  const inRange = interval >= MIN_HEARTBEAT_INTERVAL_S && interval <= MAX_HEARTBEAT_INTERVAL_S;
+  // This clock is not the chain's. A heartbeat stamped ahead of it is fresh,
+  // and a key is written off only well past its deadline: sending a few
+  // heartbeats too many costs little, stopping one too early loses the key.
+  if (inRange && nowS - last <= interval + STANDING_GRACE_S) return { standing: "live", deadlineS: last + interval };
+  return { standing: "dead", lastS: last, intervalS: interval };
+}
+
+export const HEARTBEAT_RETRY_MS = 15_000;
+export const HEARTBEAT_RETRY_MAX_MS = 600_000;
+/** How often an absent or dead key's standing is read again. Nothing is sent. */
+export const HEARTBEAT_RECHECK_MS = 3_600_000;
+
+/**
+ * When to look at one heartbeat target again, and its failure count.
+ * `outcome`: "sent", "failed", "absent" or "dead". A failure backs off from
+ * 15 s, doubling to 10 minutes, but never waits more than a quarter of the
+ * time the guardian has left (`deadlineMs`), so it is retried well before it
+ * goes stale. A success waits the period (`everyMs`).
+ */
+export function afterHeartbeat({ outcome, failures = 0, nowMs, everyMs, deadlineMs = null }) {
+  if (outcome === "sent") return { nextAt: nowMs + everyMs, failures: 0 };
+  if (outcome !== "failed") return { nextAt: nowMs + HEARTBEAT_RECHECK_MS, failures: 0 };
+  const n = failures + 1;
+  let wait = Math.min(HEARTBEAT_RETRY_MAX_MS, HEARTBEAT_RETRY_MS * 2 ** (n - 1));
+  if (deadlineMs !== null && deadlineMs > nowMs) wait = Math.min(wait, Math.floor((deadlineMs - nowMs) / 4));
+  return { nextAt: nowMs + Math.max(HEARTBEAT_RETRY_MS, wait), failures: n };
 }
 
 /** Period after a protocol-account read. An unreadable account uses the
