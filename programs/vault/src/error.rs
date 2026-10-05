@@ -58,6 +58,8 @@ pub enum VaultError {
     DelayAboveMaximum,
     /// `backed + instant` is larger than the vault token account's balance.
     InsufficientBalance,
+    /// A loosening while the seal is under its 72h review.
+    SealUnderReview,
 }
 
 impl From<VaultError> for ProgramError {

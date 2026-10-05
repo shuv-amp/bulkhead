@@ -102,6 +102,14 @@ pub fn config_is_valid(cfg: &LimitConfig) -> bool {
         && cfg.long_window_s > 0
 }
 
+/// Whether `cfg` keeps the unbacked lane closed at every balance: one bucket
+/// has no bps and no floor, so its capacity is 0 whatever the reference (a cap
+/// only ever lowers it). A vault created after the seal must start this way;
+/// opening it is then a loosening, which waits.
+pub fn lane_always_closed(cfg: &LimitConfig) -> bool {
+    (cfg.short_bps == 0 && cfg.short_floor == 0) || (cfg.long_bps == 0 && cfg.long_floor == 0)
+}
+
 /// The base that capacities are computed from: the lower of the reference (a
 /// 24h average that rises slowly, so a deposit just before an attack buys
 /// almost nothing) and the live balance (so money that has left, for example

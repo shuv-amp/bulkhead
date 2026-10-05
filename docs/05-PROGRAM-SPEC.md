@@ -53,14 +53,14 @@ register_protocol → create_vault / upsert_asset / import_backing        (genes
                   → propose_change (tighten: now; loosen: 72h + veto) / freeze / cancel / lifeboat …
 ```
 
-The seal waits 72h so anyone can compare the imported backing (public events) with the protocol's own books before money can leave (T19).
+The seal waits 72h so anyone can compare the imported backing (public events) with the protocol's own books before money can leave (T19). While the seal is under review (proposed, not vetoed, not expired), no loosening applies: a new vault, an import, a looser asset, limits, guardians, admin, destination or delay are refused with `SealUnderReview`. Tightenings still apply at once. A guardian's veto ends the review; the next proposal waits a full 72h.
 
 ## 4. Instructions
 
 | Tag | Instruction | Signer | Checks | Effect |
 |---|---|---|---|---|
 | 0 | `register_protocol` | the protocol's upgrade authority, **or** its caller PDA via CPI | delay ≥ 72h; 2 ≤ threshold ≤ count ≤ 8; guardians unique, ≠ admin; interval 1–30 days; destination ≠ admin | Creates `Protocol` (survives a pre-funded address) |
-| 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7) | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
+| 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7); not while the seal is under review; after the seal, the limits must keep the unbacked lane closed (one bucket with no bps and no floor), and opening it is a 72h change | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
 | 2 | `upsert_asset(config)` | admin | genesis only (afterwards: `propose_change`) | Creates or updates `Asset` |
 | 3 | `import_backing(amount)` | admin | genesis only | Credits `Backing[owner]`; `vault.imported += amount` |
 | 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault, vault token account, and lifeboat token PDA passed exactly once; `imported + total_in ≤ vault balance + actual spendable lifeboat balance` | `sealed = true` |
@@ -133,7 +133,7 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 
 Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and the abort code:
 
-`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048), `InsufficientBalance` (8049).
+`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048), `InsufficientBalance` (8049), `SealUnderReview` (8050).
 
 ## 9. The Solana attack classes (`sealevel-attacks`)
 

@@ -14,7 +14,7 @@ use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decisio
 use common::vault::*;
 use common::*;
 use solana_address::Address;
-use solana_instruction::AccountMeta;
+use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 
@@ -1387,4 +1387,108 @@ fn lengthening_a_window_is_a_tightening_that_grants_no_new_burst() {
     assert_eq!(w.env.balance(&to), paid);
     // Everything above happened in the same second: G1 at T = 0 is one burst.
     assert!(paid <= burst, "a stolen admin key took {} USDC instantly; G1 allows {}", paid / USDC, burst / USDC);
+}
+
+fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
+    let (mint, _) = w.env.create_mint(6, &token_program());
+    let vault = pda(&[b"vault", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
+    w.m.vault_ix(1, &limits.bytes(), vec![
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new(vault, false),
+        AccountMeta::new(vault_tokens, false),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new_readonly(token_program(), false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+fn import_ix(w: &World, owner: &Address, amount: u64) -> Instruction {
+    w.m.vault_ix(3, &amount.to_le_bytes(), vec![
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.m.backing(owner), false),
+        AccountMeta::new_readonly(*owner, false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+#[test]
+fn nothing_loosens_while_the_seal_is_under_review() {
+    // The seal waits 72h so anyone can review what is sealed (T19). If the
+    // admin could still loosen in that window, a minute before the seal it
+    // could swap in its own guardians (nobody left to veto), open the limits,
+    // add a vault and import backing, and seal all of it unreviewed.
+    let mut w = World::new();
+    let u = w.user();
+    w.deposit("usdc", &u, 1_000_000 * USDC);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY - 60);
+    let vault = w.usdc.vault;
+    let zero = Address::default();
+
+    let puppets = [Keypair::new(), Keypair::new()];
+    let mut guardians = vec![2u8];
+    for k in &puppets {
+        guardians.extend_from_slice(k.pubkey().as_ref());
+    }
+    guardians.push(2);
+    guardians.extend_from_slice(&(7 * DAY).to_le_bytes());
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardians, None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "guardian swap");
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 10_000;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "looser limits");
+    let ix = import_ix(&w, &Keypair::new().pubkey(), 1);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "an import");
+    let ix = create_vault_ix(&mut w, &Limits::default_limits());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "a new vault");
+
+    // Making things safer never waits.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+
+    // A guardian's veto ends the review; the admin may change things again,
+    // and the seal it proposes next waits a full 72h from then.
+    let veto = w.m.vault_ix(6, &[], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.g[0].pubkey(), true)]);
+    w.env.ok(&[veto], &[&w.m.g[0]]);
+    let ix = import_ix(&w, &Keypair::new().pubkey(), 1);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1, &w.usdc.token_program);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY - 1);
+    let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[seal.clone()], &[]), verr::SEAL_NOT_EXECUTABLE);
+    w.env.advance(1);
+    w.env.ok(&[seal], &[]);
+}
+
+#[test]
+fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
+    // Creating a vault applied its limits at once, even after the seal: an
+    // admin key alone could open an instant 100%-an-hour lane on a new mint.
+    let mut w = World::new();
+    let u = w.user();
+    w.deposit("usdc", &u, 1_000_000 * USDC);
+    w.seal();
+    let ix = create_vault_ix(&mut w, &Limits::default_limits());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY);
+    // A closed lane (either bucket at capacity 0) is accepted; opening it is a
+    // loosening, so it waits 72h like any other.
+    let mut closed = Limits::default_limits();
+    closed.short_bps = 0;
+    let ix = create_vault_ix(&mut w, &closed);
+    let vault = ix.accounts[3].pubkey;
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &Limits::default_limits().bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let d = w.env.account(&vault).data;
+    assert_eq!(u16::from_le_bytes(d[8 + 32 * 4..8 + 32 * 4 + 2].try_into().unwrap()), 0, "still closed: the opening is only a proposal");
 }

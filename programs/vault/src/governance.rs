@@ -186,6 +186,9 @@ pub fn propose_change(
         return Err(VaultError::Abdicated.into());
     }
     let t = now()?;
+    if class == Class::Loosen {
+        crate::genesis::require_no_seal_review(&p, t)?;
+    }
 
     if class == Class::Tighten || !p.sealed {
         // Tightening (or genesis): apply now.
