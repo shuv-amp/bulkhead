@@ -304,7 +304,7 @@ Examples (golden G-12):
 | Action | Who | Effect | Limits |
 |---|---|---|---|
 | `settle_ticket` | anyone (crank) | Pays the stored recipient once `now ≥ eta` and not frozen | Only the stored recipient |
-| `cancel_ticket` | any guardian, admin | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5) |
+| `cancel_ticket` | any live guardian (not the admin, A4) | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5) |
 | `extend_ticket` | any guardian | `eta += x` | ≤ 24h per call, ≤ 7 days total |
 | `freeze` | any guardian, admin | `frozen_until = max(frozen_until, now + x)` | `x ≤ 24h`; re-freezable |
 | `unfreeze` | guardian quorum | `frozen_until = now` | |

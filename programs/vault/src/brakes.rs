@@ -16,14 +16,17 @@ fn guardian_or_admin(p: &Protocol, a: &AccountView, now_s: i64) -> ProgramResult
 }
 
 // ---------------------------------------------------------------------------
-// 10. cancel_ticket: live guardian or admin. The reservation is NOT refunded
-//     (G1 depends on it). The tokens stay in the vault.
+// 10. cancel_ticket: a live guardian. The reservation is NOT refunded (G1
+//     depends on it). The tokens stay in the vault. Not the admin: a stolen
+//     admin key could otherwise cancel every honest queued withdrawal with no
+//     counter, and each cancel keeps its reservation, so the lane stays full
+//     (docs/15, A4). The admin's brake is `freeze`.
 // ---------------------------------------------------------------------------
-// Accounts: 0 protocol, 1 vault [w], 2 ticket [w], 3 signer [s], 4 rent receiver [w].
+// Accounts: 0 protocol, 1 vault [w], 2 ticket [w], 3 guardian [s], 4 rent receiver [w].
 pub fn cancel_ticket(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
-    guardian_or_admin(&p, acc(accounts, 3)?, now()?)?;
+    live_guardian(&p, acc(accounts, 3)?, now()?)?;
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
     let tk = load(program_id, acc(accounts, 2)?, Ticket::load)?;
     if tk.vault != key(acc(accounts, 1)?) || tk.protocol != key(protocol) {

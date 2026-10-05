@@ -68,7 +68,7 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 | 8 | `release(amount)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
 | 23 | `quote_release(amount)` | none | as `release` | The same outcome as return data, no writes (for `simulateTransaction`) |
 | 9 | `settle_ticket` | anyone | `now ≥ ETA`; not frozen (protocol or vault); the stored recipient and payer | Pays the ticket; closes it (rent to its payer) |
-| 10 | `cancel_ticket` | live guardian or admin | ticket of this vault | Closes it; **no refund** of the reservation (G1 depends on it) |
+| 10 | `cancel_ticket` | live guardian (not the admin: a stolen admin key could cancel every queued withdrawal, A4) | ticket of this vault | Closes it; **no refund** of the reservation (G1 depends on it) |
 | 11 | `extend_ticket(secs)` | live guardian | ≤ 24h per call, ≤ 7 days in total | ETA later |
 | 12 | `freeze(scope, secs)` | live guardian or admin | ≤ 24h; never shortens | Protocol or vault `frozen_until` |
 | 13 | `unfreeze(scope)` | live quorum | — | Freeze ends now (the admin can't unfreeze) |

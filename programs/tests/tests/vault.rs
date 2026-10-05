@@ -1492,3 +1492,26 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
     let d = w.env.account(&vault).data;
     assert_eq!(u16::from_le_bytes(d[8 + 32 * 4..8 + 32 * 4 + 2].try_into().unwrap()), 0, "still closed: the opening is only a proposal");
 }
+
+#[test]
+fn only_a_live_guardian_cancels_a_ticket_not_the_admin() {
+    // A stolen admin key could cancel every honest queued withdrawal, without
+    // end and with no counter: each cancel also keeps its reservation, so the
+    // lane stays full (A4). Cancelling is a guardian's brake; the admin keeps
+    // freeze.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 2_000_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let admin = w.m.admin.pubkey();
+    let by_admin = w.m.cancel_ix(&w.usdc, &ticket, &admin, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(&[by_admin], &[&w.m.admin]), verr::NOT_GUARDIAN);
+    let g0 = w.m.g[0].pubkey();
+    let by_guardian = w.m.cancel_ix(&w.usdc, &ticket, &g0, &w.env.payer.pubkey());
+    w.env.ok(&[by_guardian], &[&w.m.g[0]]);
+}
