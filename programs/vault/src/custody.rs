@@ -248,10 +248,12 @@ fn limiter_error(e: LimiterError) -> ProgramError {
 // Accounts: 0 caller [s], 1 protocol [w], 2 vault [w], 3 vault token account [w],
 //           4 mint, 5 recipient token account [w], 6 backing PDA of the
 //           recipient's owner [w], 7 token program, 8 payer [s,w],
-//           9 ticket PDA for id = protocol.next_ticket_id [w], 10 system,
+//           9 ticket PDA ["ticket", protocol, payer, nonce] [w], 10 system,
 //           11.. (asset PDA, price account) for the released mint, then for
 //           each other mint in the recipient owner's ledger, in ledger order.
-// Data: amount u64.
+// Data: amount u64, then nonce u64 (needed only when part is queued). The
+// payer names its own ticket, so queued releases built from the same state
+// never race for one address; the ticket's id is still the protocol counter.
 // Returns `ReleaseOutcome` as return data: backed, instant, queued (u64),
 // ticket_id (u64, meaningful when queued > 0), eta_s (i64).
 pub fn release(
@@ -260,7 +262,9 @@ pub fn release(
     args: &[u8],
     dry_run: bool,
 ) -> ProgramResult {
-    let amount = state::R::args(args).u64()?;
+    let mut data = state::R::args(args);
+    let amount = data.u64()?;
+    let nonce = data.u64().ok();
     if amount == 0 {
         return Err(VaultError::ZeroAmount.into());
     }
@@ -377,13 +381,18 @@ pub fn release(
     v.backed_out = v.backed_out.saturating_add(backed as u128);
     v.unbacked_out = v.unbacked_out.saturating_add(instant as u128);
 
+    // The ticket's address, for the event (all zero when nothing is queued):
+    // it can no longer be derived from the id alone.
+    let mut ticket_key = [0u8; 32];
     if queued > 0 {
         let payer = acc(accounts, 8)?;
         require_signer(payer)?;
         check_system(acc(accounts, 10)?)?;
-        let id = ticket_id.to_le_bytes();
+        let nb = nonce.ok_or(VaultError::InvalidInstruction)?.to_le_bytes();
+        let pb = key(payer);
         let ticket = acc(accounts, 9)?;
-        let bump = expect_pda(&[seeds::TICKET, &pk, &id], program_id, ticket)?;
+        let bump = expect_pda(&[seeds::TICKET, &pk, &pb, &nb], program_id, ticket)?;
+        ticket_key = key(ticket);
         let tb = [bump];
         create_pda(
             payer,
@@ -391,7 +400,8 @@ pub fn release(
             &[
                 Seed::from(seeds::TICKET),
                 Seed::from(&pk),
-                Seed::from(&id),
+                Seed::from(&pb),
+                Seed::from(&nb),
                 Seed::from(&tb),
             ],
             Ticket::LEN,
@@ -429,7 +439,7 @@ pub fn release(
     // Set last: every CPI (the token transfer, the ticket's account) clears
     // return data when it starts.
     pinocchio::cpi::set_return_data(&outcome);
-    sys::event(&[b"vault:released", &v.mint, &owner, &outcome]);
+    sys::event(&[b"vault:released", &v.mint, &owner, &outcome, &ticket_key]);
     Ok(())
 }
 

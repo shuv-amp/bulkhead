@@ -48,8 +48,9 @@ export class VaultClient {
   attestIx(vault, vaultTokens) {
     return this.ix(22, new Uint8Array(0), [r(this.protocol), r(vault), r(vaultTokens)]);
   }
-  async ticketAddress(id) {
-    const [t] = await findPda(["ticket", this.protocol, u64le(id)], this.program);
+  /** A ticket's address: named by its payer and the payer's nonce, not by its id. */
+  async ticketAddress(payer, nonce) {
+    const [t] = await findPda(["ticket", this.protocol, key(payer), u64le(nonce)], this.program);
     return t;
   }
   async changeAddress(id) {

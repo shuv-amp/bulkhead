@@ -405,3 +405,23 @@ test("every Floor proposal a stolen owner key could make is vetoed unless pre-ap
   assert.match(pendingUpgradeVeto(pending, DEFAULT_POLICY, new Set()).reason, /release of the upgrade authority/);
   assert.equal(pendingUpgradeVeto(pending, { ...DEFAULT_POLICY, approvedFloorProposals: ["prog:7"] }, new Set()), null);
 });
+
+test("a queued release's ticket address travels from the event to the cancel", () => {
+  const addr = new Uint8Array(32).fill(5);
+  const outcome = concat(u64le(0n), u64le(0n), u64le(400n), u64le(7n), i64le(99));
+  const e = decode({ name: "vault:released", fields: [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), outcome, addr] });
+  assert.equal(e.ticketId, 7n);
+  assert.equal(e.ticket, decode({ name: "vault:released", fields: [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), outcome, addr] }).ticket);
+  assert.notEqual(e.ticket, null);
+  // An all-zero address (nothing queued), or an event from an older build without it, is no address.
+  assert.equal(decode({ name: "vault:released", fields: [new Uint8Array(32), new Uint8Array(32), outcome, new Uint8Array(32)] }).ticket, null);
+  assert.equal(decode({ name: "vault:released", fields: [new Uint8Array(32), new Uint8Array(32), outcome] }).ticket, null);
+  const s = newState();
+  assess(s, e, { worst1h: 1_000_000n, worst24h: 2_000_000n, now: 1 }, DEFAULT_POLICY, false);
+  assert.equal(s.pendingTickets.get(7n).address, e.ticket);
+  // A later chain scan without an address does not erase it.
+  rememberTicket(s, { ticketId: 7n });
+  assert.equal(s.pendingTickets.get(7n).address, e.ticket);
+  const [cancel] = pendingCancels(s);
+  assert.deepEqual([cancel.ticketId, cancel.address], [7n, e.ticket]);
+});

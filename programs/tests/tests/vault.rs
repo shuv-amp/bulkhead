@@ -1322,16 +1322,12 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     // then 99,000 of the 9.9M left fill it exactly; the rest queue.
     let attacker = Keypair::new();
     let loot = w.account("usdc", &attacker.pubkey());
-    let (base, _) = w.m.next_ticket(&w.env);
     let mut ixs = Vec::new();
     for k in 0..10u64 {
         let amount = if k == 1 { 99_000 } else { 100_000 } * USDC;
-        let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &loot, &attacker.pubkey(), amount, &w.usdc_prices(true));
-        // The first two fit the burst; each later one becomes ticket base + (k - 2).
-        let id = base + k.saturating_sub(2);
-        let ticket = pda(&[b"ticket", w.m.protocol.as_ref(), &id.to_le_bytes()], &w.m.vault_program);
-        ix.accounts[3 + 9 - 1].pubkey = ticket; // Harbor: 3 own accounts, then Vault release index 9 at 3 + (9 - 1)
-        ixs.push(ix);
+        // Each payout names its own ticket (payer, nonce k): ten in one
+        // transaction, built from the same state, never collide.
+        ixs.push(w.m.admin_payout_with(&w.env, &w.usdc, &loot, &attacker.pubkey(), amount, &w.usdc_prices(true), k));
     }
     let m = w.env.ok(&ixs, &[&w.m.admin]);
     assert_eq!(w.env.balance(&loot), 199_000 * USDC, "Bulkhead: only the 2% burst inside the transaction");
@@ -1344,8 +1340,8 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     let g0 = w.m.g[0].pubkey();
     let fz = w.m.freeze_ix(&g0, None, 86_400);
     w.env.ok(&[fz], &[&w.m.g[0]]);
-    for id in base..base + 8 {
-        let t = pda(&[b"ticket", w.m.protocol.as_ref(), &id.to_le_bytes()], &w.m.vault_program);
+    for nonce in 2..10u64 {
+        let t = w.m.ticket_pda(&w.env.payer.pubkey(), nonce);
         let ix = w.m.cancel_ix(&w.usdc, &t, &g0, &w.env.payer.pubkey());
         w.env.ok(&[ix], &[&w.m.g[0]]);
     }
@@ -1652,4 +1648,31 @@ fn a_stale_asset_loosening_cannot_undo_a_later_asset_tightening() {
     w.env.ok(&[ix], &[&w.m.admin]);
     w.env.advance(3 * DAY);
     assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &asset)], &[]), verr::CHANGE_STALE);
+}
+
+#[test]
+fn queued_releases_built_from_the_same_state_do_not_collide() {
+    // A ticket used to be named by the protocol's next id, so two users who
+    // read the same state raced for one address and the second failed. Each
+    // payer now names its own ticket.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (a, b) = (w.user(), w.user());
+    let (ta, tb) = (w.account("usdc", &a.pubkey()), w.account("usdc", &b.pubkey()));
+    // Drain the burst first, so both of the next payouts are queued.
+    let drain = w.m.admin_payout_ix(&w.env, &w.usdc, &ta, &a.pubkey(), 200_000 * USDC, &w.usdc_prices(true));
+    w.env.ok(&[drain], &[&w.m.admin]);
+    let first = w.m.admin_payout_with(&w.env, &w.usdc, &ta, &a.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 7);
+    let second = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
+    let o1 = outcome(&w.env.ok(&[first], &[&w.m.admin]));
+    let o2 = outcome(&w.env.ok(&[second], &[&w.m.admin]));
+    assert_eq!((o1.queued, o2.queued), (1_000 * USDC, 1_000 * USDC));
+    assert_eq!(o2.ticket_id, o1.ticket_id + 1, "ids still count up");
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!(a.pending, 2);
+    // A payer reusing its own nonce is refused, and nothing else is.
+    let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
+    assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
 }

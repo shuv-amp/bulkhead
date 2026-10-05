@@ -36,7 +36,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
    3. `propose_seal`. The seal executes after 72h; meanwhile anyone can compare the imports (public events) with your books.
 6. **Replace every token movement:**
    - transfer in → CPI `deposit(amount)`, signed by the caller PDA plus the user;
-   - transfer out → CPI `release(amount)`, signed by the caller PDA.
+   - transfer out → CPI `release(amount, nonce)`, signed by the caller PDA. Pass the ticket account `["ticket", protocol, payer, nonce]` with a nonce the payer has not used (a counter or random u64): it is created only if part of the amount is queued, and two users' releases never compete for it.
 7. **Read the outcome** of each `release` from return data: `backed | instant | queued | ticket_id | eta_s` (40 bytes, `05 §4`). Book the full amount against the user. If `queued > 0`, record `(ticket_id, queued, eta_s)` so your UI shows "arriving at ETA"; anyone can call `settle_ticket` once it's due.
 8. **A cancelled ticket** is a governance matter. The tokens stay in the vault. Never re-release automatically: cancellation usually means an incident.
 9. **Calibrate** (§4) before the seal. Tightening later is instant; loosening takes 72h.

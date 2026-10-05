@@ -256,6 +256,7 @@ export function ticketRelease(ticket, vaultMints) {
     queued: ticket.amount,
     ticketId: ticket.id,
     etaS: ticket.etaS,
+    ticket: ticket.address ?? null,
   };
 }
 

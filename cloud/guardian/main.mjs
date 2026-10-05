@@ -38,7 +38,7 @@
 // backoff; a key that is already stale or absent is reported, not resent.
 
 import { readFileSync } from "node:fs";
-import { Rpc, b58encode, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { Rpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
@@ -197,8 +197,11 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         // The caller returns a failed cancel to the sweep; this one waits.
         if ((cancelRetryAt.get(action.ticketId) ?? 0) > Date.now()) return false;
         const vault = action.vault ?? (await vc.vault(action.mint ?? event.mint)).vault;
-        const ticket = await vc.ticketAddress(action.ticketId);
-        const acc = await rpc.account(ticket);
+        // The address comes from the release event or the account scan; a
+        // ticket only known by id waits for the next scan to name it.
+        const address = action.address ?? state.pendingTickets.get(action.ticketId)?.address;
+        const ticket = address ? key(address) : null;
+        const acc = ticket ? await rpc.account(ticket) : null;
         if (!acc) {
           // A lagging read is not proof the ticket settled. Retry; leaving it
           // marked cancelled would let it pay out when the freeze ends.
@@ -358,7 +361,8 @@ async function knownTickets() {
   const known = [];
   for (const mint of cfg.mints) {
     for (const row of settlementRows(state.outflows, state.pendingTickets, mint)) {
-      known.push({ mint, ticketId: row.ticketId, ticket: b58encode(await vc.ticketAddress(row.ticketId)), amount: row.amount });
+      const address = state.pendingTickets.get(row.ticketId)?.address;
+      if (address) known.push({ mint, ticketId: row.ticketId, ticket: address, amount: row.amount });
     }
   }
   return known;
@@ -421,6 +425,7 @@ async function refreshPendingTickets({ recoverOutflows = false, act = false } = 
       vault: ticket.vault,
       owner: ticket.recipientOwner,
       amount: ticket.amount,
+      address: ticket.address,
     });
   }
   return tickets.length;

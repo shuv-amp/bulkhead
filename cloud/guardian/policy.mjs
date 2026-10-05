@@ -88,6 +88,8 @@ export function rememberTicket(state, ticket) {
     vault: ticket.vault ?? old.vault ?? null,
     owner: ticket.owner ?? ticket.recipientOwner ?? old.owner ?? "(unknown)",
     amount: ticket.amount ?? old.amount ?? null,
+    // A ticket is named by its payer and nonce, not its id: keep its address.
+    address: ticket.address ?? ticket.ticket ?? old.address ?? null,
   });
 }
 
@@ -112,7 +114,9 @@ export function decode(ev) {
   switch (ev.name) {
     case "vault:released": {
       const r = new Reader(f[2]);
-      return { kind: "released", mint: b58encode(f[0]), owner: b58encode(f[1]), backed: r.u64(), instant: r.u64(), queued: r.u64(), ticketId: r.u64(), etaS: Number(r.i64()) };
+      // f[3]: the ticket's address when part was queued (all zero otherwise).
+      const ticket = f[3]?.length === 32 && f[3].some((b) => b !== 0) ? b58encode(f[3]) : null;
+      return { kind: "released", mint: b58encode(f[0]), owner: b58encode(f[1]), backed: r.u64(), instant: r.u64(), queued: r.u64(), ticketId: r.u64(), etaS: Number(r.i64()), ticket };
     }
     // Scope 0 is the whole protocol, 1 a single vault. The event does not say
     // which vault, so a vault-scoped freeze must not be read as protocol-wide.
@@ -189,6 +193,7 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
       actions.push({
         type: "cancel",
         ticketId: ticket.ticketId,
+        address: ticket.address,
         mint: ticket.mint,
         vault: ticket.vault,
         reason: `incident: ticket to ${ticket.owner}`,
@@ -463,7 +468,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       // for tickets whose event was missed): its queued amount counts once.
       const ticket = e.queued > 0n ? e.ticketId : null;
       const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
-      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued });
+      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued, address: e.ticket });
       const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       // `e.at` is when the outflow happened. `ctx.now` is when the decision is made.
