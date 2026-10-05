@@ -198,6 +198,10 @@ pub struct Protocol {
     pub seal_executable_s: i64,
     pub seal_expires_s: i64,
     pub seal_vetoed: bool,
+    /// One counter per protocol-level change kind (guardians, admin,
+    /// destination, delay), bumped whenever that value changes. A pending
+    /// change records it and goes stale if it moved. In the old padding.
+    pub versions: [u32; 4],
 }
 
 impl Protocol {
@@ -250,6 +254,7 @@ impl Protocol {
             seal_executable_s: r.i64()?,
             seal_expires_s: r.i64()?,
             seal_vetoed: r.bool()?,
+            versions: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
         };
         if p.guardian_count as usize > MAX_GUARDIANS {
             return Err(VaultError::WrongAccountType.into());
@@ -284,6 +289,9 @@ impl Protocol {
         w.i64(self.seal_executable_s);
         w.i64(self.seal_expires_s);
         w.bool(self.seal_vetoed);
+        for v in self.versions {
+            w.u32(v);
+        }
         Ok(())
     }
 
@@ -346,6 +354,8 @@ pub struct Vault {
     pub exit_executable_s: i64,
     pub exit_expires_s: i64,
     pub exit_vetoed: bool,
+    /// Bumped whenever `limits` change; see `Protocol::versions`.
+    pub limits_version: u32,
 }
 
 impl Vault {
@@ -384,6 +394,7 @@ impl Vault {
             exit_executable_s: r.i64()?,
             exit_expires_s: r.i64()?,
             exit_vetoed: r.bool()?,
+            limits_version: r.u32()?,
         })
     }
 
@@ -417,6 +428,7 @@ impl Vault {
         w.i64(self.exit_executable_s);
         w.i64(self.exit_expires_s);
         w.bool(self.exit_vetoed);
+        w.u32(self.limits_version);
         Ok(())
     }
 
@@ -444,6 +456,8 @@ pub struct Asset {
     pub config: AssetConfig,
     pub decimals: u8,
     pub bump: u8,
+    /// Bumped whenever `config` changes; see `Protocol::versions`.
+    pub version: u32,
 }
 
 impl Asset {
@@ -458,6 +472,7 @@ impl Asset {
             config: r.asset_config()?,
             decimals: r.u8()?,
             bump: r.u8()?,
+            version: r.u32()?,
         })
     }
 
@@ -468,6 +483,7 @@ impl Asset {
         w.asset_config(&self.config);
         w.u8(self.decimals);
         w.u8(self.bump);
+        w.u32(self.version);
         Ok(())
     }
 }
@@ -634,6 +650,8 @@ pub struct Change {
     pub expires_s: i64,
     pub payload_len: u16,
     pub payload: [u8; MAX_PAYLOAD],
+    /// The target's version when proposed; execution requires it unchanged.
+    pub base_version: u32,
 }
 
 impl Change {
@@ -658,6 +676,7 @@ impl Change {
         for b in payload.iter_mut() {
             *b = r.u8()?;
         }
+        let base_version = r.u32()?;
         if payload_len as usize > MAX_PAYLOAD {
             return Err(VaultError::WrongAccountType.into());
         }
@@ -675,6 +694,7 @@ impl Change {
             expires_s,
             payload_len,
             payload,
+            base_version,
         })
     }
 
@@ -695,7 +715,8 @@ impl Change {
         for b in &self.payload {
             w.u8(*b);
         }
-        w.zeros(6);
+        w.u32(self.base_version);
+        w.zeros(2);
         Ok(())
     }
 
@@ -743,6 +764,7 @@ mod tests {
             seal_executable_s: 14,
             seal_expires_s: 15,
             seal_vetoed: true,
+            versions: [7, 8, 9, u32::MAX],
         };
         p.guardians[2] = [9; 32];
         let mut buf = [0u8; Protocol::LEN];
@@ -778,6 +800,7 @@ mod tests {
             exit_executable_s: 20,
             exit_expires_s: 21,
             exit_vetoed: true,
+            limits_version: 41,
         };
         let mut buf = [0u8; Vault::LEN];
         v.store(&mut buf).unwrap();
@@ -807,6 +830,7 @@ mod tests {
             expires_s: 8,
             payload_len: 9,
             payload: [10; MAX_PAYLOAD],
+            base_version: 0xDEAD_BEEF,
         };
         let mut buf = [0u8; Change::LEN];
         c.store(&mut buf).unwrap();

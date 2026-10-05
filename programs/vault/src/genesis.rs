@@ -126,6 +126,7 @@ pub fn register_protocol(
         seal_executable_s: 0,
         seal_expires_s: 0,
         seal_vetoed: false,
+        versions: [0; 4],
     };
     save(&mut accounts[1], |d| p.store(d))?;
     sys::event(&[b"vault:registered", &pk, &p.admin]);
@@ -234,6 +235,7 @@ pub fn create_vault(
         exit_executable_s: 0,
         exit_expires_s: 0,
         exit_vetoed: false,
+        limits_version: 0,
     };
     save(&mut accounts[3], |d| v.store(d))?;
     p.vault_count = p.vault_count.checked_add(1).ok_or(VaultError::Overflow)?;
@@ -292,6 +294,14 @@ pub(crate) fn write_asset(
     )?;
     let asset = acc(accounts, asset_i)?;
     let bump = expect_pda(&[seeds::ASSET, &pk, &mk], program_id, asset)?;
+    // An absent record reads as version 0, so creating one is a change too.
+    let version = if asset.is_data_empty() {
+        1
+    } else {
+        load(program_id, asset, Asset::load)?
+            .version
+            .wrapping_add(1)
+    };
     if asset.is_data_empty() {
         let b = [bump];
         create_pda(
@@ -313,6 +323,7 @@ pub(crate) fn write_asset(
         config: *config,
         decimals,
         bump,
+        version,
     };
     save(&mut accounts[asset_i], |d| a.store(d))?;
     sys::event(&[b"vault:asset", &pk, &mk, &[config.allowlisted as u8]]);

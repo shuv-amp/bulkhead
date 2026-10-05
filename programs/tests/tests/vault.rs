@@ -1515,3 +1515,141 @@ fn only_a_live_guardian_cancels_a_ticket_not_the_admin() {
     let by_guardian = w.m.cancel_ix(&w.usdc, &ticket, &g0, &w.env.payer.pubkey());
     w.env.ok(&[by_guardian], &[&w.m.g[0]]);
 }
+
+/// Execute change `id`; `target` is the vault (SetLimits), the asset PDA
+/// (UpsertAsset), or anything for a protocol-level change.
+fn execute_change_ix(w: &World, id: u64, target: &Address) -> Instruction {
+    w.m.vault_ix(20, &[], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new(*target, false),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+fn short_bps(w: &World, vault: &Address) -> u16 {
+    let d = w.env.account(vault).data;
+    u16::from_le_bytes(d[8 + 128..8 + 130].try_into().unwrap())
+}
+
+#[test]
+fn a_stale_loosening_cannot_undo_a_later_tightening() {
+    // A loosening stores only its payload. Executed after a tightening of the
+    // same vault, it used to replace the whole config and silently undo the
+    // tightening, which was never part of what the 72h review saw.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 1_000;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    // An emergency tightening while it waits.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 50;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &vault)], &[]), verr::CHANGE_STALE);
+    assert_eq!(short_bps(&w, &vault), 50, "the tightening stands");
+}
+
+#[test]
+fn two_pending_loosenings_of_one_vault_cannot_both_execute() {
+    // "Last executed wins" let anyone pick the order of overlapping changes.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    for bps in [300u16, 1_000] {
+        let mut l = Limits::default_limits();
+        l.short_bps = bps;
+        let ix = w.m.propose_change_ix(&w.env, 0, &vault, &l.bytes(), Some(&vault));
+        w.env.ok(&[ix], &[&w.m.admin]);
+    }
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 0, &vault)], &[]);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &vault)], &[]), verr::CHANGE_STALE);
+    assert_eq!(short_bps(&w, &vault), 300);
+}
+
+#[test]
+fn an_older_guardian_set_cannot_bring_back_an_ejected_guardian() {
+    // A quorum ejects a guardian; a SetGuardians proposed before the ejection,
+    // still naming it, must not restore it.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let zero = Address::default();
+    let mut set = vec![3u8];
+    for k in &w.m.g {
+        set.extend_from_slice(k.pubkey().as_ref());
+    }
+    set.push(2);
+    set.extend_from_slice(&(7 * DAY).to_le_bytes());
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set, None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let eject = w.m.vault_ix(15, &[2], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(w.m.g[0].pubkey(), true),
+        AccountMeta::new_readonly(w.m.g[1].pubkey(), true),
+    ]);
+    w.env.ok(&[eject], &[&w.m.g[0], &w.m.g[1]]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &protocol)], &[]), verr::CHANGE_STALE);
+}
+
+#[test]
+fn a_change_to_one_thing_does_not_stale_a_change_to_another() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let new_admin = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &new_admin, &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    // Raising the delay (a tightening of another kind) and tightening a vault.
+    let zero = Address::default();
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(4 * DAY).to_le_bytes(), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let vault = w.usdc.vault;
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    let d = w.env.account(&protocol).data;
+    assert_eq!(&d[8 + 64..8 + 96], new_admin.as_ref(), "the admin changed");
+}
+
+#[test]
+fn a_stale_asset_loosening_cannot_undo_a_later_asset_tightening() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (asset, mint, program) = (w.usdc.asset, w.usdc.mint, w.usdc.token_program);
+    let upsert = |w: &World, cfg: &[u8]| {
+        let mut ix = w.m.propose_change_ix(&w.env, 1, &mint, cfg, Some(&asset));
+        ix.accounts.push(AccountMeta::new_readonly(mint, false));
+        ix.accounts.push(AccountMeta::new_readonly(program, false));
+        ix
+    };
+    // Loosen: a larger haircut allowance. Then tighten: a smaller one.
+    let ix = upsert(&w, &asset_bytes(true, 9_950, 10_100, 20_000, 60, 100, USDC_FEED));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = upsert(&w, &asset_bytes(true, 9_000, 10_100, 20_000, 60, 100, USDC_FEED));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &asset)], &[]), verr::CHANGE_STALE);
+}

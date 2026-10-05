@@ -189,6 +189,9 @@ pub fn eject(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) ->
     p.guardians[n - 1] = [0; 32];
     p.last_heartbeat[n - 1] = 0;
     p.guardian_count -= 1;
+    // The guardian set changed: a pending SetGuardians that still names the
+    // ejected key must not bring it back.
+    p.versions[0] = p.versions[0].wrapping_add(1);
     save(&mut accounts[0], |d| p.store(d))?;
     sys::event(&[b"vault:ejected", &removed]);
     Ok(())

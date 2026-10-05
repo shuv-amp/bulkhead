@@ -60,6 +60,8 @@ pub enum VaultError {
     InsufficientBalance,
     /// A loosening while the seal is under its 72h review.
     SealUnderReview,
+    /// The change's target changed after it was proposed.
+    ChangeStale,
 }
 
 impl From<VaultError> for ProgramError {

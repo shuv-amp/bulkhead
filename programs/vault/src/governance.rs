@@ -62,6 +62,44 @@ fn parse(
     })
 }
 
+/// Which `Protocol::versions` slot a protocol-level change kind uses.
+pub(crate) fn version_slot(kind: u8) -> Option<usize> {
+    match kind {
+        change::SET_GUARDIANS => Some(0),
+        change::SET_ADMIN => Some(1),
+        change::SET_LIFEBOAT_DESTINATION => Some(2),
+        change::SET_LOOSEN_DELAY => Some(3),
+        _ => None,
+    }
+}
+
+/// The current version of what a change of `kind` replaces: the vault's
+/// limits, the asset record (absent: 0), or a protocol-level value. A change
+/// records it when proposed and executes only if it has not moved, so a
+/// loosening can never undo something applied after it was reviewed.
+fn target_version(
+    program_id: &Address,
+    accounts: &[AccountView],
+    p: &Protocol,
+    kind: u8,
+    (protocol_i, target_i): (usize, usize),
+) -> Result<u32, ProgramError> {
+    Ok(match kind {
+        change::SET_LIMITS => {
+            load_vault(program_id, &accounts[protocol_i], acc(accounts, target_i)?)?.limits_version
+        }
+        change::UPSERT_ASSET => {
+            let a = acc(accounts, target_i)?;
+            if a.is_data_empty() {
+                0
+            } else {
+                load(program_id, a, Asset::load)?.version
+            }
+        }
+        _ => p.versions[version_slot(kind).ok_or(VaultError::InvalidInstruction)?],
+    })
+}
+
 /// Applies a parsed change. Accounts by index: `target_i` is the vault
 /// (SetLimits) or the asset PDA (UpsertAsset); `payer_i`, `mint_i`,
 /// `token_i` are used when an asset record must be created.
@@ -94,6 +132,7 @@ fn apply(
             );
             v.set_limiter_state(state);
             v.limits = l;
+            v.limits_version = v.limits_version.wrapping_add(1);
             save(&mut accounts[target_i], |d| v.store(d))
         }
         Parsed::Asset(a) => {
@@ -110,19 +149,23 @@ fn apply(
             p.threshold = th;
             p.heartbeat_interval_s = interval;
             p.last_heartbeat = [t; MAX_GUARDIANS];
+            p.versions[0] = p.versions[0].wrapping_add(1);
             Ok(())
         }
         Parsed::Key(k) => {
             if kind == change::SET_ADMIN {
                 p.admin = k;
+                p.versions[1] = p.versions[1].wrapping_add(1);
             } else {
                 p.lifeboat_destination = k;
                 p.destination_set_s = t;
+                p.versions[2] = p.versions[2].wrapping_add(1);
             }
             Ok(())
         }
         Parsed::Delay(d) => {
             p.loosen_delay_s = d;
+            p.versions[3] = p.versions[3].wrapping_add(1);
             Ok(())
         }
     }
@@ -211,6 +254,7 @@ pub fn propose_change(
     let payer = acc(accounts, 0)?;
     require_signer(payer)?;
     check_system(acc(accounts, 4)?)?;
+    let base_version = target_version(program_id, accounts, &p, kind, (2, 5))?;
     let id = p.next_change_id;
     let idb = id.to_le_bytes();
     let pk = key(protocol);
@@ -246,6 +290,7 @@ pub fn propose_change(
         expires_s: s.expires_s,
         payload_len: payload.len() as u16,
         payload: buf,
+        base_version,
     };
     save(&mut accounts[3], |d| c.store(d))?;
     p.next_change_id += 1;
@@ -314,6 +359,12 @@ pub fn execute_change(program_id: &Address, accounts: &mut [AccountView]) -> Pro
             _ => VaultError::ChangeNotExecutable,
         })
     })?;
+    // The target must be what the review saw: a tightening, another change or
+    // an ejection since the proposal makes this change stale. It must be
+    // proposed again, and waits again.
+    if target_version(program_id, accounts, &p, c.kind, (0, 2))? != c.base_version {
+        return Err(VaultError::ChangeStale.into());
+    }
     let payload = &c.payload[..c.payload_len as usize];
     let parsed = parse(&p, c.kind, &c.target, payload)?; // re-validated at execution
     apply(
