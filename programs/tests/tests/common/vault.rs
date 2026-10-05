@@ -47,6 +47,7 @@ pub mod verr {
     pub const TICKETS_PENDING: u32 = 8032;
     pub const CHANGE_NOT_EXECUTABLE: u32 = 8033;
     pub const CHANGE_VETOED: u32 = 8034;
+    pub const CHANGE_EXPIRED: u32 = 8035;
     pub const ABDICATED: u32 = 8037;
     pub const DUPLICATE_ACCOUNT: u32 = 8041;
     pub const CANNOT_EJECT: u32 = 8042;

@@ -106,6 +106,11 @@ struct Model {
     vault_frozen: i64,
     ledgers: BTreeMap<[u8; 32], Ledger>,
     tickets: BTreeMap<u64, Ticket>,
+    /// Bumped by every applied limits change (finding 34).
+    limits_version: u32,
+    /// Pending loosenings: change id -> (limits, version when proposed, executable, expires).
+    pending: BTreeMap<u64, (LimitConfig, u32, i64, i64)>,
+    next_change_id: u64,
 }
 
 impl Model {
@@ -143,6 +148,7 @@ fn program_matches_the_core_model_with_caps_freezes_and_the_lifeboat() {
         "deposit", "release", "backed", "instant", "queued", "refused", "quote", "settle", "cancel",
         "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_refused", "reset", "reset_refused",
         "lifeboat_in", "lifeboat_out", "lifeboat_refused", "insufficient", "tighten", "loosen_waits",
+        "loosen_executed", "loosen_stale", "loosen_early",
     ] {
         let n = totals.get(k).copied().unwrap_or(0);
         assert!(n >= 10, "{k} occurred only {n} times: {totals:?}");
@@ -185,6 +191,9 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
         vault_frozen: 0,
         ledgers: BTreeMap::new(),
         tickets: BTreeMap::new(),
+        limits_version: 0,
+        pending: BTreeMap::new(),
+        next_change_id: 0,
     };
     let um = usdc.mint.to_bytes();
     let priced = || {
@@ -512,9 +521,61 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 if classify_limits(&md.cfg, &next) == Class::Tighten {
                     rescale_windows(&mut md.limiter, &params_from_config(&md.cfg, 0), &params_from_config(&next, 0), now * 1_000);
                     md.cfg = next;
+                    md.limits_version += 1;
                     count("tighten");
                 } else {
+                    let executable = now + 3 * DAY;
+                    md.pending.insert(md.next_change_id, (next, md.limits_version, executable, executable + 7 * DAY));
+                    md.next_change_id += 1;
                     count("loosen_waits");
+                }
+            }
+            // Anyone executes a pending loosening: too early, expired, stale
+            // (the limits changed since it was proposed), or applied.
+            37..=39 => {
+                if !md.pending.is_empty() {
+                    let k = rng.below(md.pending.len() as u64) as usize;
+                    let (&id, &(next, base, executable, expires)) = md.pending.iter().nth(k).unwrap();
+                    let exec = m.vault_ix(20, &[], vec![
+                        AccountMeta::new(m.protocol, false),
+                        AccountMeta::new(m.change_address(id), false),
+                        AccountMeta::new(usdc.vault, false),
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new_readonly(usdc.mint, false),
+                        AccountMeta::new_readonly(usdc.token_program, false),
+                        AccountMeta::new_readonly(SYSTEM, false),
+                    ]);
+                    let r = env.send(&[exec], &[]);
+                    let expected = if now < executable {
+                        Some(verr::CHANGE_NOT_EXECUTABLE)
+                    } else if now >= expires {
+                        Some(verr::CHANGE_EXPIRED)
+                    } else if base != md.limits_version {
+                        Some(verr::CHANGE_STALE)
+                    } else {
+                        None
+                    };
+                    match expected {
+                        None => {
+                            r.unwrap_or_else(|e| panic!("{}: {:?}", at("execute change"), e.err));
+                            rescale_windows(&mut md.limiter, &params_from_config(&md.cfg, 0), &params_from_config(&next, 0), now * 1_000);
+                            md.cfg = next;
+                            md.limits_version += 1;
+                            md.pending.remove(&id);
+                            count("loosen_executed");
+                        }
+                        Some(code) => {
+                            assert_eq!(r.map_err(|f| custom_code(&f)).err(), Some(Some(code)), "{}", at("execute change refused"));
+                            count(match code {
+                                verr::CHANGE_STALE => "loosen_stale",
+                                verr::CHANGE_EXPIRED => "loosen_expired",
+                                _ => "loosen_early",
+                            });
+                            if code != verr::CHANGE_NOT_EXECUTABLE {
+                                md.pending.remove(&id);
+                            }
+                        }
+                    }
                 }
             }
             // Time passes with nothing sent.
