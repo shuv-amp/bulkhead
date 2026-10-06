@@ -5,7 +5,7 @@
 // veto proposals, and (under Floor) abort. It can never move funds or choose a
 // recipient; the programs enforce that, not this file.
 
-import { b58encode, Reader } from "../lib/solana.mjs";
+import { b58encode, Reader, decodeChange } from "../lib/solana.mjs";
 
 export const DEFAULT_POLICY = {
   /** Freeze when unbacked outflow to non-allowlisted owners within the last
@@ -306,9 +306,8 @@ export function vetoRetryDisposition(action, chain) {
 
 /** Vetoed and executed flags of a `BHCHNG01` account. Null if it is not one. */
 export function readChangeVeto(bytes) {
-  if (!bytes || bytes.length < 51) return null;
-  if (new TextDecoder().decode(bytes.slice(0, 8)) !== "BHCHNG01") return null;
-  return { vetoed: bytes[49] !== 0, executed: bytes[50] !== 0 };
+  const c = readPendingChange(bytes);
+  return c && { vetoed: c.vetoed, executed: c.executed };
 }
 
 /** bulkhead-core `MIN_HEARTBEAT_INTERVAL_S` and `MAX_HEARTBEAT_INTERVAL_S`. */
@@ -387,19 +386,13 @@ export function heartbeatEverySeconds(everyS, chainIntervalS) {
 
 /** A `BHCHNG01` account still waiting, or null. */
 export function readPendingChange(bytes) {
-  if (!bytes || bytes.length < 140) return null;
-  if (new TextDecoder().decode(bytes.subarray(0, 8)) !== "BHCHNG01") return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return {
-    protocol: b58encode(bytes.subarray(8, 40)),
-    id: view.getBigUint64(40, true),
-    kind: bytes[48],
-    vetoed: bytes[49] !== 0,
-    executed: bytes[50] !== 0,
-    target: b58encode(bytes.subarray(52, 84)),
-    executableS: Number(view.getBigInt64(124, true)),
-    expiresS: Number(view.getBigInt64(132, true)),
-  };
+  if (!bytes) return null;
+  try {
+    const { protocol, id, kind, vetoed, executed, target, executableS, expiresS } = decodeChange(bytes);
+    return { protocol, id, kind, vetoed, executed, target, executableS, expiresS };
+  } catch {
+    return null;
+  }
 }
 
 /** Veto a loosening that is still pending. History replay does not send
@@ -491,12 +484,15 @@ export function openIncident(state, now) {
 }
 
 /**
- * The protocol's freeze moved from `prevUntil` to `until`. A freeze that ended
- * before it was due was lifted by a guardian quorum: that closes the incident.
- * One that simply ran out does not.
+ * The protocol's freeze end moved from `prevUntil` to `until`. A freeze only
+ * ever moves the end later (to the later of the two), and only a guardian
+ * quorum's unfreeze moves it earlier (to the moment it ran): so an end that
+ * moved earlier is a quorum's decision, and closes the incident. A freeze that
+ * simply ran out leaves the end where it was. Comparing ends, not clocks, also
+ * holds across a restart that missed the unfreeze.
  */
-export function observeFreezeEnd(state, prevUntil, until, now) {
-  if (prevUntil > now && until <= now) state.incidentSince = null;
+export function observeFreezeEnd(state, prevUntil, until) {
+  if (until < prevUntil) state.incidentSince = null;
 }
 
 /**
@@ -570,7 +566,13 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       if ((e.scope ?? 0) !== 0) break;
       state.frozenUntil = 0;
       state.freezing = false;
-      state.incidentSince = null; // only a guardian quorum unfreezes
+      // Only a guardian quorum unfreezes, and it has weighed everything up to
+      // then: those outflows no longer count toward a freeze (a restart that
+      // replays the last 24h must not freeze again on them), and an incident
+      // that started before it is over. One that started later (the replay
+      // of an older unfreeze) is not.
+      state.outflows = state.outflows.filter((o) => o.t > ctx.now);
+      if (state.incidentSince != null && state.incidentSince <= ctx.now) state.incidentSince = null;
       break;
     case "ticket_closed":
       state.pendingTickets.delete(e.ticketId);

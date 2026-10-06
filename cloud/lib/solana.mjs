@@ -253,7 +253,11 @@ export class Rpc {
           signal: AbortSignal.timeout(this.timeoutMs), // never hang on a stuck endpoint
         });
       } catch (e) {
-        if (e.name === "TimeoutError" || attempt >= this.retries) throw new Error(`${method}: ${e.message}`);
+        // The cause (ECONNREFUSED, ENOTFOUND, ...) is what an operator needs.
+        // (A host with several addresses fails with each in `cause.errors`.)
+        const code = e.cause?.code ?? e.cause?.errors?.[0]?.code ?? e.cause?.message;
+        const cause = code ? ` (${code})` : "";
+        if (e.name === "TimeoutError" || attempt >= this.retries) throw new Error(`${method}: ${e.message}${cause}`);
         await new Promise((res) => setTimeout(res, 500 * 2 ** attempt)); // dropped connection: back off
         continue;
       }

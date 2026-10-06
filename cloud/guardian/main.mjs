@@ -47,7 +47,8 @@
 // backoff; a key that is already stale or absent is reported, not resent.
 
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { Rpc, FailoverRpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { basename } from "node:path";
+import { Rpc, FailoverRpc, b58encode, decodeTicket, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
@@ -80,24 +81,45 @@ const vaultOf = new Map(watched.map((v) => [v.mint, b58encode(v.vault)]));
 // Only these programs' events count: any program can write "Program data:".
 const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
 const state = newState();
-// The incident hold must survive a restart (a deploy, a crash): its start is
-// kept beside the config, per protocol.
-const stateFile = cfg.stateFile ?? `${process.argv[2]}.state.json`;
-let savedIncident = null;
+// The incident hold must survive a restart (a deploy, a crash): its start,
+// and the protocol's freeze end as last seen, are kept beside the config, per
+// protocol. Without the freeze end, a guardian restarted after a quorum's
+// unfreeze could not tell it from a freeze that ran out, and would freeze again.
+// Under systemd (cloud/guardian/bulkhead-guardian@.service) the config's
+// directory is read-only: the default is then the unit's state directory.
+const stateFile = cfg.stateFile
+  ?? (process.env.STATE_DIRECTORY
+    ? `${process.env.STATE_DIRECTORY.split(":")[0]}/${basename(process.argv[2])}.state.json`
+    : `${process.argv[2]}.state.json`);
+let saveError = null;
+// The protocol's freeze end at the last sync: an end that moves earlier is a
+// guardian quorum's unfreeze (observeFreezeEnd).
+let lastChainFrozenUntil = 0;
+let saved = { incidentSince: null, frozenUntil: 0 };
 try {
-  const saved = JSON.parse(readFileSync(stateFile, "utf8"));
-  if (saved.protocol === b58encode(vc.protocol) && Number.isFinite(saved.incidentSince)) state.incidentSince = savedIncident = saved.incidentSince;
+  const s = JSON.parse(readFileSync(stateFile, "utf8"));
+  if (s.protocol === b58encode(vc.protocol)) {
+    if (Number.isFinite(s.incidentSince)) state.incidentSince = s.incidentSince;
+    if (Number.isFinite(s.frozenUntil)) lastChainFrozenUntil = s.frozenUntil;
+    saved = { incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil };
+  }
 } catch {
   // no saved state: no incident open
 }
 function saveIncident() {
-  if (state.incidentSince === savedIncident) return;
+  if (state.incidentSince === saved.incidentSince && lastChainFrozenUntil === saved.frozenUntil) return;
   try {
-    writeFileSync(`${stateFile}.tmp`, JSON.stringify({ protocol: b58encode(vc.protocol), incidentSince: state.incidentSince }), { mode: 0o600 });
+    const now = { incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil };
+    writeFileSync(`${stateFile}.tmp`, JSON.stringify({ protocol: b58encode(vc.protocol), ...now }), { mode: 0o600 });
     renameSync(`${stateFile}.tmp`, stateFile);
-    savedIncident = state.incidentSince;
+    saved = now;
+    saveError = null;
   } catch (e) {
-    console.log(JSON.stringify({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state: ${e.message}` }));
+    // Said once per cause, not on every poll.
+    if (saveError !== e.message) {
+      saveError = e.message;
+      console.log(JSON.stringify({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state to ${stateFile}: ${e.message}` }));
+    }
   }
 }
 // Alerts to a webhook (alert.mjs); never on the guardian's critical path.
@@ -266,7 +288,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
           return false;
         }
         cancelRetryAt.delete(action.ticketId);
-        const payer = acc.bytes.slice(136, 168); // Ticket: disc, protocol, vault, recipient, recipient_owner, payer
+        const payer = decodeTicket(acc.bytes).payer;
         ixs = [vc.cancelTicket(vault, ticket, guardian.publicKey, payer)];
         break;
       }
@@ -300,7 +322,13 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         break;
       }
       case "floor_veto": {
-        const fc = await new FloorClient(cfg.floorProgram, action.program).init();
+        const fc = floorWatch.find((c) => b58encode(c.protected) === action.program);
+        if (!fc) {
+          // Any Floor config's event can ride in a transaction that touches
+          // this protocol: a program this key does not guard is not ours to veto.
+          log({ action: "floor_veto", skipped: "not a program this guardian watches", program: action.program });
+          return true;
+        }
         if (retrying) {
           const acc = await rpc.account(fc.config);
           let chain = null;
@@ -321,7 +349,10 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
     }
     const sig = await guardianSend(ixs);
     const confirmed = Date.now();
-    if (action.type === "freeze") openIncident(state, wallNow());
+    if (action.type === "freeze") {
+      openIncident(state, wallNow());
+      saveIncident();
+    }
     log({
       action: action.type,
       reason: action.reason,
@@ -501,12 +532,22 @@ async function tryRefreshPendingTickets(options = {}) {
   }
 }
 
+// The newest slot the protocol account was read at. Reads never go back: a
+// lagging node (a backup endpoint behind the others) would show an older freeze
+// end, which looks like a quorum's unfreeze and would end an incident hold.
+let protocolSlot = 0;
+async function readProtocolAccount() {
+  const r = await rpc.call("getAccountInfo", [b58encode(vc.protocol), { encoding: "base64", commitment: "confirmed", minContextSlot: protocolSlot }]);
+  protocolSlot = Math.max(protocolSlot, r.context?.slot ?? 0);
+  return r.value ? { bytes: Uint8Array.from(atob(r.value.data[0]), (c) => c.charCodeAt(0)) } : null;
+}
+
 async function syncFromChain(act, { startup = false } = {}) {
-  const acc = await rpc.account(vc.protocol);
+  const acc = await readProtocolAccount();
   if (!acc) return;
   const p = decodeProtocol(acc.bytes);
   const now = wallNow();
-  observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil, now);
+  observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil);
   lastChainFrozenUntil = p.frozenUntil;
   state.frozenUntil = p.frozenUntil;
   pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now);
@@ -538,9 +579,6 @@ async function syncFromChain(act, { startup = false } = {}) {
   saveIncident();
 }
 
-// The protocol's freeze end at the last sync: an end that moves earlier, before
-// it was due, is a guardian quorum's unfreeze (observeFreezeEnd).
-let lastChainFrozenUntil = 0;
 
 /** Log each Floor program's missing pieces, once per change (A5). */
 async function checkFloor() {
@@ -622,9 +660,11 @@ async function executeChangeIx(action) {
  * lapse. A failure is logged once per reason and retried next scan.
  */
 async function keepApproved(now) {
+  // `ix` may be a function: building the instruction can read the chain, and
+  // one failed read must not skip the other approved changes.
   const attempt = async (doneKey, what, ix) => {
     try {
-      const signature = await guardianSend([ix]);
+      const signature = await guardianSend([typeof ix === "function" ? await ix() : ix]);
       executedByKeeper.add(doneKey);
       log({ action: "execute", what, signature });
     } catch (e) {
@@ -636,7 +676,7 @@ async function keepApproved(now) {
   try {
     for (const change of await activeChanges(rpc, cfg.vaultProgram, vc.protocol)) {
       const action = dueApprovedChange(change, policy, now, executedByKeeper);
-      if (action) await attempt(`c${action.changeId}`, `change ${action.changeId}`, await executeChangeIx(action));
+      if (action) await attempt(`c${action.changeId}`, `change ${action.changeId}`, () => executeChangeIx(action));
     }
   } catch (e) {
     log({ level: "warn", msg: `keeper change scan failed; retrying: ${e.message}` });

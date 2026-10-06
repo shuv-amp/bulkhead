@@ -71,3 +71,22 @@ test("sending returns at once, survives a dead or hanging webhook, and needs a U
   none({ action: "freeze", signature: "s" });
   await none.flush();
 });
+
+test("review fixes: distinct vetoes alert, skipped lines do not, failing freezes are rate-limited", () => {
+  const seen = new Map();
+  // Two different loosenings vetoed minutes apart: two alerts.
+  assert.ok(alertFor({ action: "veto_change", changeId: 4, signature: "a" }, seen, 0));
+  assert.ok(alertFor({ action: "veto_change", changeId: 5, signature: "b" }, seen, 60_000));
+  assert.equal(alertFor({ action: "veto_change", changeId: 5, signature: "c" }, seen, 61_000), null, "the same change again");
+  // A skipped action is not news, and does not use up the slot.
+  assert.equal(alertFor({ action: "cancel", skipped: "ticket account missing; will retry", ticketId: 3 }, seen, 0), null);
+  assert.ok(alertFor({ action: "cancel", ticketId: 3, signature: "d" }, seen, 1));
+  // A freeze failing on every poll: once a minute per cause; a landed one always.
+  const failed = { level: "error", action: "freeze", error: "transaction simulation failed" };
+  assert.ok(alertFor(failed, seen, 0));
+  assert.equal(alertFor(failed, seen, 500), null);
+  assert.equal(alertFor(failed, seen, 59_000), null);
+  assert.ok(alertFor(failed, seen, 60_000));
+  assert.ok(alertFor({ action: "freeze", signature: "e" }, seen, 60_001));
+  assert.ok(alertFor({ action: "freeze", signature: "f" }, seen, 60_002));
+});

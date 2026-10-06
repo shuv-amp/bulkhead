@@ -225,3 +225,34 @@ test("failover: every endpoint down fails with the last error", async () => {
   assert.equal(endpointTrouble(new Error("x")), true);
   assert.equal(endpointTrouble(Object.assign(new Error("x"), { rpcError: { code: -32602 } })), false, "a bad request is the caller's");
 });
+
+test("a refused preflight is not resent when a backup already landed the transaction", async () => {
+  const sent = [];
+  let landedSig = null;
+  const primary = {
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        sent.push(Buffer.from(params[0], "base64").includes(Buffer.from(COMPUTE_BUDGET)) ? "budget" : "bare");
+        const err = new Error("sendTransaction: simulation failed");
+        err.rpcError = { code: PREFLIGHT_REFUSED, message: "Transaction simulation failed: Blockhash not found" };
+        throw err;
+      }
+      if (method === "getSignatureStatuses") {
+        // The backup landed exactly the transaction the primary refused.
+        return { value: [params[0][0] === landedSig ? { confirmationStatus: "confirmed", err: null } : null] };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const backup = { call: async (method, params) => { if (method === "sendTransaction") sent.push("backup"); return "x"; } };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  // The signature of the budgeted transaction is what the error carries.
+  const err = await send(primary, payer, [ix], [], { computeUnits: 200_000, rpcs: [backup] }).then(() => null, (e) => e);
+  landedSig = err.signature;
+  sent.length = 0;
+  const sig = await sendWithFallback(primary, payer, [ix], [], { computeUnits: 200_000, rpcs: [backup], landedWaitMs: 50 });
+  assert.equal(sig, landedSig);
+  assert.deepEqual(sent.sort(), ["backup", "budget"], "no second, unbudgeted transaction");
+});

@@ -333,6 +333,33 @@ jobs:
           sudo cp cloud/guardian/bulkhead-guardian@.service /etc/systemd/system/
           systemd-analyze verify /etc/systemd/system/bulkhead-guardian@test.service
           systemd-analyze security --offline=yes --no-pager /etc/systemd/system/bulkhead-guardian@test.service | tail -1
+      - name: The guardian runs in that sandbox, and is restarted when it stops
+        run: |
+          # A guardian whose endpoint is down stops loudly (finding 52); the unit
+          # must let Node run at all, then start it again.
+          sudo useradd --system --no-create-home bulkhead
+          sudo mkdir -p /etc/bulkhead/keys
+          node -e 'console.log(JSON.stringify([...require("crypto").randomBytes(32)]))' | sudo tee /etc/bulkhead/keys/guardian.json > /dev/null
+          echo '{ "rpc": "http://localhost:59999", "vaultProgram": "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b",
+                  "protocolProgram": "6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh",
+                  "mints": ["CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB"], "guardianKey": "/etc/bulkhead/keys/guardian.json" }' \
+            | sudo tee /etc/bulkhead/test.json > /dev/null
+          sudo chown -R bulkhead:bulkhead /etc/bulkhead && sudo chmod 600 /etc/bulkhead/keys/guardian.json
+          sudo systemctl daemon-reload
+          sudo systemctl start bulkhead-guardian@test
+          # One endpoint is retried patiently (about 30 s a call), so the first
+          # stop takes a minute or two.
+          for _ in $(seq 1 240); do
+            [ "$(systemctl show -p NRestarts --value bulkhead-guardian@test)" -ge 1 ] && break
+            sleep 1
+          done
+          journalctl -u bulkhead-guardian@test --no-pager | tail -6
+          journalctl -u bulkhead-guardian@test --no-pager | grep -q '"guardian started"'
+          journalctl -u bulkhead-guardian@test --no-pager | grep -q 'guardian stopped'
+          # The host name resolved inside the sandbox: refused, not unresolved.
+          journalctl -u bulkhead-guardian@test --no-pager | grep -q 'ECONNREFUSED'
+          [ "$(systemctl show -p NRestarts --value bulkhead-guardian@test)" -ge 1 ]
+          sudo systemctl stop bulkhead-guardian@test
 
   devnet:
     # Weekly, and when these checks change: build the programs here and
