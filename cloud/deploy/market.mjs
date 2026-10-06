@@ -136,6 +136,7 @@ function keysIn(dir) {
     mint: k("mint"),
     whaleTokens: k("whale-tokens"),
     attackerTokens: k("attacker-tokens"),
+    recovery: () => k("recovery"), // only created when a recovery key is proposed
   };
 }
 
@@ -320,6 +321,74 @@ async function caps(url, dir, payerPath) {
   console.log(`caps set: ${fmt(CAPS.short)} per 1h, ${fmt(CAPS.long)} per 24h (a tightening, applied at once): ${sig}`);
 }
 
+/** Proposes a protocol-level change (kind, target, payload) as the admin. */
+async function proposeAsAdmin(rpc, payer, k, world, kind, target, payload) {
+  const p = decodeProtocol((await rpc.account(world.protocol)).bytes);
+  const vaultProgram = key(world.vaultProgram);
+  const [change] = await findPda(["change", key(world.protocol), u64le(p.nextChangeId)], vaultProgram);
+  const sig = await sendTx(rpc, payer, [vaultIx({ vaultProgram }, 18, concat(Uint8Array.of(kind), key(target), payload), [
+    s(payer.publicKey, true), s(k.admin.publicKey), w(world.protocol), w(change), r(IDS.system),
+  ])], [k.admin]);
+  const executable = new Date((Math.floor(Date.now() / 1000) + 3 * DAY) * 1000).toISOString();
+  return { id: p.nextChangeId, sig, executable };
+}
+
+/** Every guardian that is still live sends a heartbeat (a dead one cannot). */
+async function heartbeat(url, dir, payerPath) {
+  const rpc = new Rpc(url);
+  const payer = Keypair.load(payerPath);
+  const k = keysIn(dir);
+  const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
+  const p = decodeProtocol((await rpc.account(world.protocol)).bytes);
+  const now = Math.floor(Date.now() / 1000);
+  for (const [i, g] of k.guardians.entries()) {
+    const at = p.guardians.indexOf(g.address);
+    const last = at < 0 ? null : Number(p.lastHeartbeat[at]);
+    if (last === null || now - last > p.heartbeatIntervalS) {
+      console.log(`guardian${i}: not live (last heartbeat ${last ? new Date(last * 1000).toISOString() : "none"}); only a new guardian set revives it`);
+      continue;
+    }
+    const sig = await sendTx(rpc, payer, [vaultIx({ vaultProgram: key(world.vaultProgram) }, 14, new Uint8Array(0), [w(world.protocol), s(g.publicKey)])], [g]);
+    console.log(`guardian${i}: heartbeat ${sig}`);
+  }
+}
+
+/** The admin proposes the same guardian set again: after the delay, every
+ * guardian counts as live from that moment (the way a stale one comes back). */
+async function renewGuardians(url, dir, payerPath) {
+  const rpc = new Rpc(url);
+  const payer = Keypair.load(payerPath);
+  const k = keysIn(dir);
+  const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
+  const set = concat(Uint8Array.of(k.guardians.length), ...k.guardians.map((g) => key(g.publicKey)), Uint8Array.of(2), i64le(7 * DAY));
+  const c = await proposeAsAdmin(rpc, payer, k, world, 2, new Uint8Array(32), set);
+  console.log(`guardian set proposed as change ${c.id} (${c.sig}); anyone may execute it from about ${c.executable}: market.mjs execute-change <rpc> <dir> <payer> ${c.id}`);
+}
+
+/** The admin names a recovery key (allowed only while none exists; docs/15, A4). */
+async function setRecovery(url, dir, payerPath) {
+  const rpc = new Rpc(url);
+  const payer = Keypair.load(payerPath);
+  const k = keysIn(dir);
+  const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
+  const recovery = k.recovery();
+  const c = await proposeAsAdmin(rpc, payer, k, world, 6, recovery.publicKey, new Uint8Array(0));
+  console.log(`recovery key ${recovery.address} (keys/recovery.json) proposed as change ${c.id} (${c.sig}); executable from about ${c.executable}`);
+}
+
+/** Anyone executes a protocol-level change once it is due. */
+async function executeChange(url, dir, payerPath, id) {
+  const rpc = new Rpc(url);
+  const payer = Keypair.load(payerPath);
+  const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
+  const vaultProgram = key(world.vaultProgram);
+  const [change] = await findPda(["change", key(world.protocol), u64le(BigInt(id))], vaultProgram);
+  const sig = await sendTx(rpc, payer, [vaultIx({ vaultProgram }, 20, new Uint8Array(0), [
+    w(world.protocol), w(change), w(world.protocol), s(payer.publicKey, true), r(world.mint), r(IDS.token), r(IDS.system),
+  ])]);
+  console.log(`change ${id} executed: ${sig}`);
+}
+
 /**
  * What to do with one setup step. `found` is true or false from a successful
  * read, and anything else means the read failed. A recorded step still has to
@@ -391,8 +460,12 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   else if (cmd === "seal" && args.length === 3) await seal(...args);
   else if (cmd === "caps" && args.length === 3) await caps(...args);
   else if (cmd === "confirm" && args.length === 4) await confirm(...args);
+  else if (cmd === "heartbeat" && args.length === 3) await heartbeat(...args);
+  else if (cmd === "renew-guardians" && args.length === 3) await renewGuardians(...args);
+  else if (cmd === "set-recovery" && args.length === 3) await setRecovery(...args);
+  else if (cmd === "execute-change" && args.length === 4) await executeChange(...args);
   else {
-    console.error("usage: market.mjs setup <rpc> <dir> <payer.json> <vaultProgram> <harborProgram> | confirm <rpc> <dir> <vaultProgram> <harborProgram> | seal <rpc> <dir> <payer.json> | caps <rpc> <dir> <payer.json>");
+    console.error("usage: market.mjs setup <rpc> <dir> <payer.json> <vaultProgram> <harborProgram> | confirm <rpc> <dir> <vaultProgram> <harborProgram> | heartbeat|renew-guardians|set-recovery <rpc> <dir> <payer.json> | execute-change <rpc> <dir> <payer.json> <id> | seal <rpc> <dir> <payer.json> | caps <rpc> <dir> <payer.json>");
     process.exit(2);
   }
 }
