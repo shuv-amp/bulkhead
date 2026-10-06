@@ -7,7 +7,9 @@ use bulkhead_core::classify::{classify_asset, classify_limits, AssetConfig, Clas
 use bulkhead_core::floor::{deployable_after_simd0500, elf_info};
 use bulkhead_core::governance::Abdications;
 use bulkhead_core::ledger::{Ledger, Mint, PricedAsset, Pricing};
-use bulkhead_core::limiter::{capacity_base, rescale_windows};
+use bulkhead_core::limiter::{
+    capacity_base, lane_always_closed, params_from_config, rescale_windows,
+};
 
 fn mint(i: u8) -> Mint {
     [i; 32]
@@ -747,4 +749,48 @@ fn rescale_windows_saturation_keeps_the_bucket_full() {
     rescale_windows(&mut s, &p(huge), &p(short), now);
     assert!(s.tat_long_ms - now > short);
     assert_eq!(available_now(&s, &p(short), now), 0);
+}
+
+// --- a vault created after the seal (genesis.rs, GenesisOnly) ----------------
+
+/// `lane_always_closed` is exactly "some bucket has no bps and no floor",
+/// checked against what the limiter does with the config: a closed lane has a
+/// bucket of capacity 0 at every reference (the soundness direction Kani also
+/// proves), and any other config opens both buckets for a large enough
+/// reference, so it must be refused after the seal. Mutation testing found no
+/// core test of this rule (all 9 of its mutants survived).
+#[test]
+fn lane_always_closed_is_exactly_a_bucket_without_bps_or_floor() {
+    for bits in 0u8..16 {
+        let mut cfg = limits();
+        cfg.short_cap = 0;
+        cfg.long_cap = 0;
+        cfg.short_bps = if bits & 1 != 0 { 200 } else { 0 };
+        cfg.short_floor = if bits & 2 != 0 { 1_000 } else { 0 };
+        cfg.long_bps = if bits & 4 != 0 { 500 } else { 0 };
+        cfg.long_floor = if bits & 8 != 0 { 1_000 } else { 0 };
+        let open_at = |r: u64| {
+            let p = params_from_config(&cfg, r);
+            p.short.capacity > 0 && p.long.capacity > 0
+        };
+        let refs = [0, 1, 49, 10_000, u64::MAX];
+        let closed_everywhere = refs.iter().all(|&r| !open_at(r));
+        assert_eq!(
+            lane_always_closed(&cfg),
+            closed_everywhere,
+            "bits {bits:04b}"
+        );
+        if !closed_everywhere {
+            assert!(
+                open_at(u64::MAX),
+                "bits {bits:04b}: an open config opens at a large reference"
+            );
+        }
+    }
+    // A cap only lowers a capacity: it never closes a lane on its own, so a
+    // config with bps and a 1-unit cap is still open.
+    let mut capped = limits();
+    capped.short_cap = 1;
+    capped.long_cap = 1;
+    assert!(!lane_always_closed(&capped));
 }

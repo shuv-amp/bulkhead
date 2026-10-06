@@ -1,0 +1,37 @@
+# cargo-mutants: the 22 equivalent mutants of bulkhead-core, each explained
+# in docs/09-VERIFICATION.md §6 ("Equivalent mutants"). They behave
+# identically on every reachable input, so no test can kill them; excluding
+# them lets CI require that every other mutant on a changed line is caught.
+# Matched by file, column, mutation and function, not line number, so an edit
+# elsewhere in a file does not unmatch them. If an edit changes one of these
+# lines, its pattern stops matching and the mutant must be judged again.
+exclude_re = [
+  # classify.rs: new == old == 0 already returned true
+  'classify\.rs:\d+:20: replace > with >= in cap_tighter_or_equal$',
+  # ledger.rs: net == 0 returns earlier
+  'ledger\.rs:\d+:12: replace > with >= in contribution$',
+  # ledger.rs: stored positions are never 0
+  'ledger\.rs:\d+:40: replace < with <= in Ledger::has_liability$',
+  'ledger\.rs:\d+:77: replace < with <= in Ledger::backed_amount$',
+  # ledger.rs: after == 0 with the mint absent means b == 0, never evaluated
+  'ledger\.rs:\d+:22: replace < with <= in Ledger::backed_amount$',
+  # ledger.rs: the overflow fallback is unreachable with 8 positions
+  'ledger\.rs:\d+:73: replace > with (==|<|>=) in Ledger::backed_amount$',
+  # limiter.rs: at equality both branches give the same value
+  'limiter\.rs:\d+:23: replace > with >= in capacity_from_ref$',
+  'limiter\.rs:\d+:24: replace < with <= in clamp_capacity$',
+  'limiter\.rs:\d+:21: replace > with >= in clamp_capacity$',
+  'limiter\.rs:\d+:10: replace > with >= in cost_ms$',
+  # limiter.rs: clamping an equal value is a no-op
+  'limiter\.rs:\d+:(27|26): replace > with >= in reset_backlog$',
+  # limiter.rs: the saturation guard is unreachable (result <= C <= u64::MAX)
+  'limiter\.rs:\d+:10: replace > with (==|>=) in available_now$',
+  # value.rs: the v > i128::MAX guard is unreachable
+  'value\.rs:\d+:10: replace > with (==|>=) in value_v$',
+  # floor.rs: k starts at 0 and each tail byte has its own 8 bits (XOR == OR).
+  # By line: the body and finalizer XORs sit at the same column and are not
+  # equivalent (tests catch them). Re-check these lines if floor.rs moves.
+  'floor\.rs:(235|238|241):11: replace \^= with \|= in murmur3_32$',
+  # governance.rs: count == threshold already fails the quorum check
+  'governance\.rs:\d+:50: replace > with >= in can_eject$',
+]
