@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -489,4 +489,58 @@ test("the keeper's execute instruction names the right target for each kind of c
   const asset = await build(1, mint, token2022);
   const [assetPda] = await findPda(["asset", k(protocol), k(mint)], k(vaultProgram));
   assert.deepEqual(names(asset).slice(2), [enc(assetPda), payer, mint, token2022, enc(IDS.system)]);
+});
+
+// --- incident hold ------------------------------------------------------------
+// A stolen admin key stays stolen when a 24h freeze ends. Without the hold a
+// patient attacker waits each freeze out and takes one more burst a day.
+
+test("incident hold: renews a guardian freeze near its end, never past the hold", () => {
+  const H = DEFAULT_POLICY.holdIncidentS, F = DEFAULT_POLICY.freezeSecs;
+  const s = newState();
+  assert.equal(incidentHold(s, 0, 1_000), null, "no incident, no hold");
+  openIncident(s, 1_000);
+  openIncident(s, 5_000); // a renewal landing keeps the incident's start
+  assert.equal(s.incidentSince, 1_000);
+  assert.equal(incidentHold(s, 1_000 + F, 2_000), null, "plenty of freeze left");
+  const r = incidentHold(s, 1_000 + F, 1_000 + F - 3_600);
+  assert.equal(r.type, "freeze");
+  assert.equal(r.secs, F);
+  // Already thawed (the guardian was down): freeze again at once.
+  assert.equal(incidentHold(s, 1_000 + F, 1_000 + F + 10).secs, F);
+  // The last renewal is cut to the hold's end.
+  assert.equal(incidentHold(s, 0, 1_000 + H - 600).secs, 600);
+  // At the end the incident closes.
+  assert.equal(incidentHold(s, 0, 1_000 + H), null);
+  assert.equal(s.incidentSince, null);
+});
+
+test("incident hold: a freeze in flight is not doubled; 0 turns the hold off", () => {
+  const s = newState();
+  openIncident(s, 0);
+  s.freezing = true;
+  assert.equal(incidentHold(s, 0, 100), null);
+  s.freezing = false;
+  assert.equal(incidentHold(s, 0, 100, { ...DEFAULT_POLICY, holdIncidentS: 0 }), null);
+  assert.ok(incidentHold(s, 0, 100));
+});
+
+test("incident hold: a quorum unfreeze ends it; a freeze that runs out does not", () => {
+  const s = newState();
+  openIncident(s, 0);
+  // Ran out between two syncs: the old end is in the past at the second one.
+  observeFreezeEnd(s, 86_400, 86_400, 90_000);
+  assert.equal(s.incidentSince, 0);
+  // Lifted early: the end moved to before it was due.
+  observeFreezeEnd(s, 86_400, 50_000, 50_010);
+  assert.equal(s.incidentSince, null);
+  assert.equal(incidentHold(s, 50_000, 50_010), null);
+  // The unfrozen event closes it the same way.
+  openIncident(s, 60_000);
+  assess(s, { kind: "unfrozen", scope: 0 }, { now: 60_100 });
+  assert.equal(s.incidentSince, null);
+  // One vault unfrozen is not the protocol.
+  openIncident(s, 70_000);
+  assess(s, { kind: "unfrozen", scope: 1 }, { now: 70_100 });
+  assert.equal(s.incidentSince, 70_000);
 });

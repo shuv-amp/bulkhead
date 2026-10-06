@@ -46,11 +46,43 @@ export async function signatureWalk(fetchPage, { until, oldestWanted, limit = SI
   return out;
 }
 
+/**
+ * Whether `e` says the node no longer has the cursor `signature`. A node keeps
+ * a limited history; on a quiet protocol the last signature the guardian read
+ * ages out, and every `until: <it>` query then fails. The guardian used to
+ * retry that query forever, reading nothing new: an attack included.
+ */
+export function cursorGone(e, signature) {
+  const message = e?.rpcError?.message ?? e?.message ?? "";
+  return Boolean(signature) && message.includes(signature) && /not found/i.test(message);
+}
+
+/**
+ * The signatures after a cursor the node no longer has: walk back from the
+ * newest without `until`, and keep what is past the cursor's slot, or in its
+ * slot and not ingested yet (`seen`). Stops at the first page that reaches
+ * back before that slot.
+ */
+export async function signatureWalkSinceSlot(fetchPage, { slot, seen = new Set(), limit = SIG_PAGE } = {}) {
+  const out = [];
+  let before;
+  for (;;) {
+    const page = await fetchPage(pageQuery({ before, limit }));
+    if (!page?.length) break;
+    for (const s of page) if (s.slot > slot || (s.slot === slot && !seen.has(s.signature))) out.push(s);
+    if (page.length < limit || page.at(-1).slot < slot) break;
+    const next = page.at(-1).signature;
+    if (next === before) throw new Error(`signature walk made no progress before ${next}`);
+    before = next;
+  }
+  return out;
+}
+
 /** Process one oldest-first signature batch, checkpointing only completed items. */
 export async function ingestSignatures(signatures, ingestOne, checkpoint = () => {}) {
   for (const signature of [...signatures].reverse()) {
     await ingestOne(signature);
-    checkpoint(signature.signature);
+    checkpoint(signature.signature, signature);
   }
 }
 
