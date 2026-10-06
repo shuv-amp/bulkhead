@@ -23,7 +23,7 @@ Built, and passing (`09` has every number):
 | Tools | `tools/floor_check.py`: who can upgrade a program, and whether it is ready for SIMD-0500 |
 | CI | Three jobs: `check` (core, reference, tools, Cloud), `programs` (build, LiteSVM, end to end), `kani`. **Not run on GitHub yet: the repository has no commits.** |
 
-Not built, by decision: mint gates and flash loans (`07 §6`).
+Not built, by decision: mint gates and flash loans (`07 §7`).
 
 ## 2. Team and rhythm
 

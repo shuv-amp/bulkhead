@@ -266,7 +266,7 @@ Size the buckets so a liquidation cascade fits inside them (`07 §4`, step 5). M
 | Interest above net deposit | Unbacked (small) | Yield is not a deposit |
 | Perps profit above deposit | Unbacked | Fake-PnL drains (Mango) are capped. Calibrate for honest big days. |
 | Receipt token transferred, then redeemed by the new holder | New holder has no backing, so unbacked | Documented limitation; vault-share products must size the buckets for secondary-market redemptions |
-| Flash loan (specified; not in this build, `07 §6`) | `flash_release` + a top-level `flash_repay` of the exact amount in the same transaction; ledger and limiter untouched | Net zero within one transaction; checked by instruction introspection |
+| Flash loan (specified; not in this build, `07 §7`) | `flash_release` + a top-level `flash_repay` of the exact amount in the same transaction; ledger and limiter untouched | Net zero within one transaction; checked by instruction introspection |
 | Admin fee withdrawal | Unbacked | The Raydium-2022 pattern is capped |
 
 ## 5. Change classification

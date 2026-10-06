@@ -774,4 +774,14 @@ async function main() {
   }
 }
 
-main();
+// A guardian that stops must say so and exit, so its supervisor starts a fresh
+// one (cloud/guardian/bulkhead-guardian@.service). Retrying the startup in place
+// would replay the 24h window into a half-built state and count outflows twice.
+async function fatal(e) {
+  log({ level: "error", msg: `guardian stopped: ${e?.message ?? e}; its supervisor must restart it` });
+  await sendAlert.flush();
+  process.exit(1);
+}
+process.on("unhandledRejection", fatal);
+process.on("uncaughtException", fatal);
+main().catch(fatal);

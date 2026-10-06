@@ -1,0 +1,43 @@
+# systemd unit for a Bulkhead guardian (docs/07 §6). One instance per guarded
+# protocol: /etc/bulkhead/<name>.json holds its config, started as
+#   systemctl enable --now bulkhead-guardian@<name>
+#
+# The guardian exits on anything it cannot recover from (logged, and alerted
+# when `alert` is set); systemd starts a fresh one. In the config, point
+# "stateFile" at /var/lib/bulkhead/<name>.state.json so an incident hold
+# survives restarts, and keep the guardian key readable by this user only.
+[Unit]
+Description=Bulkhead guardian (%i)
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting: a guardian that stays down cannot freeze.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=bulkhead
+Group=bulkhead
+ExecStart=/usr/bin/env node /opt/bulkhead/cloud/guardian/main.mjs /etc/bulkhead/%i.json
+Restart=always
+RestartSec=5
+StateDirectory=bulkhead
+StateDirectoryMode=0700
+# One JSON line per decision on stdout: journalctl -u bulkhead-guardian@<name>
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
