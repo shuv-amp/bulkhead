@@ -322,6 +322,13 @@ export function decodeProtocol(d) {
     sealExpiresS: Number(r.i64()),
     sealVetoed: r.u8() === 1,
   });
+  // Change-version counters, then the recovery key (all zero: none), both in
+  // what older builds left as padding.
+  if (d.length >= r.o + 4 * 5 + 32) {
+    p.versions = [r.u32(), r.u32(), r.u32(), r.u32(), r.u32()];
+    const recovery = r.key();
+    p.recovery = recovery.every((b) => b === 0) ? null : b58encode(recovery);
+  }
   return p;
 }
 

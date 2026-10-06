@@ -24,6 +24,7 @@ pub fn pyth_receiver() -> Address {
 pub mod verr {
     pub const WRONG_ACCOUNT_TYPE: u32 = 8001;
     pub const WRONG_ADDRESS: u32 = 8002;
+    pub const INVALID_INSTRUCTION: u32 = 8000;
     pub const NOT_ADMIN: u32 = 8005;
     pub const NOT_GUARDIAN: u32 = 8006;
     pub const NO_QUORUM: u32 = 8007;

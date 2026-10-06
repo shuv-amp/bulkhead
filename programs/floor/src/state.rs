@@ -31,6 +31,8 @@ pub mod kind {
     pub const SET_OWNER: u8 = 5;
     /// Lower the upgrade delay (payload: i64). Raising it is instant.
     pub const SET_DELAY: u8 = 6;
+    /// Replace the recovery key. Target: the new key (all zero: none).
+    pub const SET_RECOVERY: u8 = 7;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +68,12 @@ pub struct Config {
     pub pending_expires: i64,
     pub pending_payload_len: u16,
     pub pending_payload: [u8; MAX_PAYLOAD],
+    /// The recovery key (all zero: none). It may only propose a new owner or a
+    /// new recovery key; the owner cannot cancel those, and a stop does not
+    /// clear them (docs/15, A4). In the old padding.
+    pub recovery: [u8; 32],
+    /// 1 when the pending proposal came from the recovery key.
+    pub pending_by_recovery: u8,
 }
 
 // Byte offsets.
@@ -96,9 +104,11 @@ const O_P_ETA: usize = 568;
 const O_P_EXPIRES: usize = 576;
 const O_P_LEN: usize = 584;
 const O_P_PAYLOAD: usize = 586;
+const O_RECOVERY: usize = O_P_PAYLOAD + MAX_PAYLOAD;
+const O_P_BY_RECOVERY: usize = O_RECOVERY + 32;
 /// Total size, with room reserved for later fields.
 pub const LEN: usize = O_P_PAYLOAD + MAX_PAYLOAD + 64;
-const _: () = assert!(O_P_PAYLOAD + MAX_PAYLOAD <= LEN && O_P_LEN + 2 == O_P_PAYLOAD);
+const _: () = assert!(O_P_BY_RECOVERY < LEN && O_P_LEN + 2 == O_P_PAYLOAD);
 
 fn k32(d: &[u8], o: usize) -> [u8; 32] {
     let mut k = [0u8; 32];
@@ -155,6 +165,8 @@ impl Config {
             pending_expires: i64_at(d, O_P_EXPIRES),
             pending_payload_len: len,
             pending_payload,
+            recovery: k32(d, O_RECOVERY),
+            pending_by_recovery: d[O_P_BY_RECOVERY],
         };
         if c.guardian_count as usize > MAX_GUARDIANS || len as usize > MAX_PAYLOAD {
             return Err(FloorError::NotAFloorConfig.into());
@@ -196,6 +208,8 @@ impl Config {
         d[O_P_EXPIRES..O_P_EXPIRES + 8].copy_from_slice(&self.pending_expires.to_le_bytes());
         d[O_P_LEN..O_P_LEN + 2].copy_from_slice(&self.pending_payload_len.to_le_bytes());
         d[O_P_PAYLOAD..O_P_PAYLOAD + MAX_PAYLOAD].copy_from_slice(&self.pending_payload);
+        d[O_RECOVERY..O_RECOVERY + 32].copy_from_slice(&self.recovery);
+        d[O_P_BY_RECOVERY] = self.pending_by_recovery;
         Ok(())
     }
 
@@ -230,6 +244,7 @@ impl Config {
         self.pending_expires = 0;
         self.pending_payload_len = 0;
         self.pending_payload = [0; MAX_PAYLOAD];
+        self.pending_by_recovery = 0;
     }
 }
 
@@ -266,6 +281,8 @@ mod tests {
             pending_expires: 2_000,
             pending_payload_len: 3,
             pending_payload: [9; MAX_PAYLOAD],
+            recovery: [10; 32],
+            pending_by_recovery: 1,
         };
         c.guardians[1] = [10; 32];
         let mut buf = [0u8; LEN];

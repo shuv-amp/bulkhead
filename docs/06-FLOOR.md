@@ -92,15 +92,15 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 0 | `register(owner, guardians, threshold, interval, delay)` | the **current** upgrade authority | Creates the config and moves the authority to Floor's PDA **in the same instruction** (CPI `SetAuthority`). There is no window in which Floor holds a key but someone else chose the guardians. Survives a pre-funded config address. |
 | 1 | `stage_abort` | anyone | Accepts a frozen buffer holding exactly a canonical abort binary that fits the programdata account |
 | 2 | `pin_snapshot` | anyone | Accepts a frozen buffer byte-identical to the live code (`sol_memcmp_`) |
-| 3 | `abort` | a live guardian or the owner | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Never fails because of the snapshot. Cancels any pending proposal. |
-| 4 | `propose(kind, target, payload)` | owner | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay. Raising the delay is instant; everything else waits the delay and expires 7 days after it becomes executable. |
+| 3 | `abort` | a live guardian; the owner only while fewer than a quorum of guardians are live | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Never fails because of the snapshot. Cancels any pending proposal. |
+| 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. Raising the delay is instant; everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop. |
 | 5 | `veto` | any live guardian | Blocks the pending proposal. Data may be empty, or the proposal id (u64). A named id that is not the one pending is refused, so a retried veto cannot hit a proposal that replaced it. |
 | 6 | `approve` | live guardians | Approves the pending Restore (its exact buffer) |
 | 7 | `execute` | anyone | Runs the pending proposal once allowed. A Restore runs at once with a quorum's approval. |
 | 8 | `restore_snapshot` | a live guardian quorum | Reinstalls the verified snapshot |
 | 9 | `heartbeat` | a live guardian | Keeps it alive; a dead guardian can't revive itself |
 | 10 | `eject(target)` | a live quorum of the *other* guardians | Removes a guardian at once; never below the threshold |
-| 11 | `cancel` | owner | Withdraws the pending proposal |
+| 11 | `cancel` | whoever proposed it (owner or recovery key) | Withdraws the pending proposal |
 
 ## 7. Measured
 

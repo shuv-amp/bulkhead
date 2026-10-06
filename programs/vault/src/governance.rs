@@ -52,7 +52,15 @@ fn parse(
         change::SET_ADMIN | change::SET_LIFEBOAT_DESTINATION => {
             if *target == [0; 32]
                 || (kind == change::SET_LIFEBOAT_DESTINATION && *target == p.admin)
+                || (kind == change::SET_ADMIN && *target == p.recovery)
             {
+                return Err(VaultError::InvalidInstruction.into());
+            }
+            Parsed::Key(*target)
+        }
+        // The admin and the recovery key stay distinct, or recovery means nothing.
+        change::SET_RECOVERY => {
+            if *target == p.admin {
                 return Err(VaultError::InvalidInstruction.into());
             }
             Parsed::Key(*target)
@@ -62,6 +70,26 @@ fn parse(
     })
 }
 
+/// Who may propose a change of `kind`: the admin, for every kind but a new
+/// recovery key once one exists; the recovery key, only a new admin or a new
+/// recovery key. A stolen admin key therefore cannot stop or pre-empt the
+/// protocol's way of replacing it (docs/15, A4).
+fn require_proposer(p: &Protocol, signer: &AccountView, kind: u8) -> ProgramResult {
+    require_signer(signer)?;
+    let k = key(signer);
+    if p.recovery != [0; 32] && k == p.recovery {
+        if kind == change::SET_ADMIN || kind == change::SET_RECOVERY {
+            return Ok(());
+        }
+        return Err(VaultError::NotAdmin.into());
+    }
+    require_admin(p, signer)?;
+    if kind == change::SET_RECOVERY && p.recovery != [0; 32] {
+        return Err(VaultError::NotAdmin.into());
+    }
+    Ok(())
+}
+
 /// Which `Protocol::versions` slot a protocol-level change kind uses.
 pub(crate) fn version_slot(kind: u8) -> Option<usize> {
     match kind {
@@ -69,6 +97,7 @@ pub(crate) fn version_slot(kind: u8) -> Option<usize> {
         change::SET_ADMIN => Some(1),
         change::SET_LIFEBOAT_DESTINATION => Some(2),
         change::SET_LOOSEN_DELAY => Some(3),
+        change::SET_RECOVERY => Some(4),
         _ => None,
     }
 }
@@ -153,13 +182,20 @@ fn apply(
             Ok(())
         }
         Parsed::Key(k) => {
-            if kind == change::SET_ADMIN {
-                p.admin = k;
-                p.versions[1] = p.versions[1].wrapping_add(1);
-            } else {
-                p.lifeboat_destination = k;
-                p.destination_set_s = t;
-                p.versions[2] = p.versions[2].wrapping_add(1);
+            match kind {
+                change::SET_ADMIN => {
+                    p.admin = k;
+                    p.versions[1] = p.versions[1].wrapping_add(1);
+                }
+                change::SET_RECOVERY => {
+                    p.recovery = k;
+                    p.versions[4] = p.versions[4].wrapping_add(1);
+                }
+                _ => {
+                    p.lifeboat_destination = k;
+                    p.destination_set_s = t;
+                    p.versions[2] = p.versions[2].wrapping_add(1);
+                }
             }
             Ok(())
         }
@@ -193,7 +229,7 @@ pub fn propose_change(
     }
     let protocol = acc(accounts, 2)?;
     let mut p = load_protocol(program_id, protocol)?;
-    require_admin(&p, acc(accounts, 1)?)?;
+    require_proposer(&p, acc(accounts, 1)?, kind)?;
     let abdicated = Abdications(p.abdications).is_abdicated(kind);
     let parsed = parse(&p, kind, &target, payload)?;
     let class = match &parsed {
@@ -254,6 +290,12 @@ pub fn propose_change(
     let payer = acc(accounts, 0)?;
     require_signer(payer)?;
     check_system(acc(accounts, 4)?)?;
+    // The recovery key's new admin takes precedence: proposing it stales every
+    // admin rotation proposed before, so a stolen admin key that proposed its
+    // own first cannot execute first and keep stalling recovery (A4).
+    if kind == change::SET_ADMIN && p.recovery != [0; 32] && key(acc(accounts, 1)?) == p.recovery {
+        p.versions[1] = p.versions[1].wrapping_add(1);
+    }
     let base_version = target_version(program_id, accounts, &p, kind, (2, 5))?;
     let id = p.next_change_id;
     let idb = id.to_le_bytes();
@@ -391,8 +433,16 @@ pub fn execute_change(program_id: &Address, accounts: &mut [AccountView]) -> Pro
 pub fn cancel_change(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
-    require_admin(&p, acc(accounts, 2)?)?;
     let mut c = load_change(program_id, protocol, acc(accounts, 1)?)?;
+    // Each key withdraws only what it proposed: a stolen admin key cannot
+    // cancel the recovery key's rotation (docs/15, A4).
+    let signer = acc(accounts, 2)?;
+    require_signer(signer)?;
+    let k = key(signer);
+    let holds = k == p.admin || (p.recovery != [0; 32] && k == p.recovery);
+    if k != c.proposer || !holds {
+        return Err(VaultError::NotAdmin.into());
+    }
     if c.executed {
         return Err(VaultError::ChangeExecuted.into());
     }

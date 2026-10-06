@@ -199,9 +199,13 @@ pub struct Protocol {
     pub seal_expires_s: i64,
     pub seal_vetoed: bool,
     /// One counter per protocol-level change kind (guardians, admin,
-    /// destination, delay), bumped whenever that value changes. A pending
-    /// change records it and goes stale if it moved. In the old padding.
-    pub versions: [u32; 4],
+    /// destination, delay, recovery), bumped whenever that value changes. A
+    /// pending change records it and goes stale if it moved. In the old padding.
+    pub versions: [u32; 5],
+    /// The recovery key (all zero: none). It may only propose a new admin or
+    /// a new recovery key; each waits the delay, any guardian can veto it, and
+    /// the admin cannot cancel it (docs/15, A4). In the old padding.
+    pub recovery: [u8; 32],
 }
 
 impl Protocol {
@@ -254,7 +258,8 @@ impl Protocol {
             seal_executable_s: r.i64()?,
             seal_expires_s: r.i64()?,
             seal_vetoed: r.bool()?,
-            versions: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
+            versions: [r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?],
+            recovery: r.key()?,
         };
         if p.guardian_count as usize > MAX_GUARDIANS {
             return Err(VaultError::WrongAccountType.into());
@@ -292,6 +297,7 @@ impl Protocol {
         for v in self.versions {
             w.u32(v);
         }
+        w.key(&self.recovery);
         Ok(())
     }
 
@@ -632,7 +638,10 @@ pub mod change {
     pub const SET_LIFEBOAT_DESTINATION: u8 = 4;
     /// Payload: i64 seconds.
     pub const SET_LOOSEN_DELAY: u8 = 5;
-    pub const COUNT: u8 = 6;
+    /// Target: new recovery key (all zero: none). Proposed by the recovery
+    /// key, or by the admin while there is none.
+    pub const SET_RECOVERY: u8 = 6;
+    pub const COUNT: u8 = 7;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -764,7 +773,8 @@ mod tests {
             seal_executable_s: 14,
             seal_expires_s: 15,
             seal_vetoed: true,
-            versions: [7, 8, 9, u32::MAX],
+            versions: [7, 8, 9, u32::MAX, 11],
+            recovery: [12; 32],
         };
         p.guardians[2] = [9; 32];
         let mut buf = [0u8; Protocol::LEN];

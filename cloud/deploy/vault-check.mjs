@@ -88,6 +88,7 @@ const live = p.lastHeartbeat.filter((t) => now - t <= p.heartbeatIntervalS).leng
 check("every guardian is live (heartbeat within 7 days)", live === 3 && p.heartbeatIntervalS === 7 * DAY, `${live}/3`);
 check("loosening waits 72h", p.loosenDelayS === 3 * DAY);
 check("lifeboat destination is keys/lifeboat-destination", p.lifeboatDestination === destination.address);
+console.log(`   info     recovery key (replaces a stolen admin after the delay): ${p.recovery ?? "none set"}`);
 check("one vault: the test USDC mint, 6 decimals, its token account", p.vaultCount === 1 && v.mint === wld.mint && v.decimals === 6 && v.tokenAccount === wld.vaultTokens);
 const L = v.limits;
 check("limits: 2% per 1h, 5% per 24h, 6h queue delay, no floors",

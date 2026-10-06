@@ -412,7 +412,8 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                 let by_owner = rng.below(4) == 0;
                 let (signer, ok_signer) = if by_owner {
                     let who = rng.below(2) as usize;
-                    (ok_[who], who == md.owner)
+                    // The owner stops only while no quorum of guardians is live.
+                    (ok_[who], who == md.owner && md.alive(now).count_ones() < md.threshold as u32)
                 } else {
                     let k = if rng.below(2) == 0 { md.guardians[rng.below(md.guardians.len() as u64) as usize] } else { rng.below(5) as usize };
                     (gk[k], md.live_guardian(k, now).is_some())

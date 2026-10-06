@@ -414,7 +414,7 @@ export function pendingExitVeto(vault, policy, now, already) {
 }
 
 /** Floor proposal kinds (programs/floor/src/state.rs `kind`). */
-const FLOOR_KINDS = { 1: "upgrade", 2: "restore", 3: "release of the upgrade authority", 4: "new guardian set", 5: "new owner", 6: "lower upgrade delay" };
+const FLOOR_KINDS = { 1: "upgrade", 2: "restore", 3: "release of the upgrade authority", 4: "new guardian set", 5: "new owner", 6: "lower upgrade delay", 7: "new recovery key" };
 
 /**
  * Why a Floor proposal must be vetoed, or null if it is pre-approved. Every

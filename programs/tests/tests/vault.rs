@@ -1676,3 +1676,123 @@ fn queued_releases_built_from_the_same_state_do_not_collide() {
     let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
     assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
 }
+
+fn cancel_change_ix(w: &World, id: u64, signer: &Address) -> Instruction {
+    w.m.vault_ix(21, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new_readonly(*signer, true),
+    ])
+}
+
+fn protocol_admin(w: &World) -> Address {
+    let d = w.env.account(&w.m.protocol).data;
+    Address::from(<[u8; 32]>::try_from(&d[8 + 64..8 + 96]).unwrap())
+}
+
+#[test]
+fn a_recovery_key_replaces_a_stolen_admin_key_that_cannot_stop_it() {
+    // A4: a thief holding the admin key could cancel every rotation of the
+    // admin, since only the admin could propose or cancel one. A separate
+    // recovery key (the Morpho V2 owner / curator split) proposes the new
+    // admin; it waits the delay, any guardian can veto it, and the admin
+    // cannot cancel it.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let zero = Address::default();
+    let recovery = w.user();
+    // With no recovery key yet, the admin may set one: a 72h change.
+    let ix = w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+
+    // The admin key is stolen. The recovery key proposes a new admin.
+    let fresh = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    let thief = w.m.admin.pubkey();
+    // The thief cannot cancel it, cannot replace the recovery key, and its own
+    // rival rotation would only race a guardian veto.
+    assert_eq!(w.env.fails(&[cancel_change_ix(&w, 1, &thief)], &[&w.m.admin]), verr::NOT_ADMIN);
+    let ix = w.m.propose_change_ix(&w.env, 6, &Keypair::new().pubkey(), &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NOT_ADMIN);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 1, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh);
+    // The old key is no longer the admin.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let vault = w.usdc.vault;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NOT_ADMIN);
+    let _ = zero;
+}
+
+#[test]
+fn the_recovery_key_can_only_replace_the_admin_or_itself() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let recovery = w.user();
+    let ix = w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    let vault = w.usdc.vault;
+    // Not limits, not guardians: it has no say over risk or the brakes.
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 1_000;
+    let mut ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    ix.accounts[1].pubkey = recovery.pubkey();
+    assert_eq!(w.env.fails(&[ix], &[&recovery]), verr::NOT_ADMIN);
+    // The admin and the recovery key stay distinct, in both directions.
+    let admin = w.m.admin.pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 6, &admin, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    assert_eq!(w.env.fails(&[ix], &[&recovery]), verr::INVALID_INSTRUCTION);
+    let ix = w.m.propose_change_ix(&w.env, 3, &recovery.pubkey(), &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
+    // It may replace itself; the admin may not, once one exists.
+    let next = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 6, &next, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+}
+
+#[test]
+fn a_thief_cannot_pre_empt_the_recovery_key_with_its_own_rotation() {
+    // With no guardian awake to veto, a thief who proposed its own new admin
+    // first would execute first and make the recovery key's change stale,
+    // again and again. A recovery proposal therefore stales every earlier
+    // admin proposal at once, and later ones run after it.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let recovery = w.user();
+    let ix = w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    // The thief proposes first (id 1), then the recovery key (id 2).
+    let accomplice = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &accomplice, &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(60);
+    let fresh = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &protocol)], &[]), verr::CHANGE_STALE);
+    w.env.ok(&[execute_change_ix(&w, 2, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh);
+}

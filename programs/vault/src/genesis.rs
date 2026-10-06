@@ -39,7 +39,8 @@ pub(crate) fn valid_asset(c: &AssetConfig) -> bool {
 // ---------------------------------------------------------------------------
 // Accounts: 0 payer [s,w], 1 protocol PDA [w], 2 protocol program,
 //           3 its programdata, 4 registrar [s], 5 system program.
-// Data: admin[32], guardian set, loosen_delay i64, lifeboat_destination[32].
+// Data: admin[32], guardian set, loosen_delay i64, lifeboat_destination[32],
+//       optional recovery key[32] (absent or all zero: none).
 //
 // The registrar is the protocol program's upgrade authority, or the
 // protocol's own caller PDA signing through a CPI (for programs whose upgrade
@@ -57,6 +58,10 @@ pub fn register_protocol(
     let (guardians, count, threshold, interval) = parse_guardian_set(&mut r, &admin)?;
     let loosen_delay = r.i64()?;
     let destination = r.key()?;
+    let recovery = r.key().unwrap_or([0; 32]);
+    if recovery == admin {
+        return Err(VaultError::InvalidGuardians.into());
+    }
     if loosen_delay < MIN_LOOSEN_DELAY_S {
         return Err(VaultError::DelayBelowMinimum.into());
     }
@@ -126,7 +131,8 @@ pub fn register_protocol(
         seal_executable_s: 0,
         seal_expires_s: 0,
         seal_vetoed: false,
-        versions: [0; 4],
+        versions: [0; 5],
+        recovery,
     };
     save(&mut accounts[1], |d| p.store(d))?;
     sys::event(&[b"vault:registered", &pk, &p.admin]);
