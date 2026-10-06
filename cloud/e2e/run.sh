@@ -46,5 +46,23 @@ for k in admin guardian0 guardian1 guardian2; do
 done
 sleep 2
 
-cloud/e2e/s1.sh "$RPC" "$E"
+# A local webhook: the guardian's alerts land in alerts.jsonl.
+rm -f "$E/alerts.jsonl"
+HOOK_PORT=$((PORT + 2001))
+node -e '
+const fs = require("node:fs");
+require("node:http").createServer((req, res) => {
+  let b = "";
+  req.on("data", (c) => (b += c));
+  req.on("end", () => { fs.appendFileSync(process.argv[1], b + "\n"); res.end("ok"); });
+}).listen(Number(process.argv[2]), "127.0.0.1");
+' "$E/alerts.jsonl" "$HOOK_PORT" &
+HPID=$!
+trap 'kill $VPID $HPID 2>/dev/null || true' EXIT
+
+ALERT_URL="http://127.0.0.1:$HOOK_PORT/hook" cloud/e2e/s1.sh "$RPC" "$E"
+echo "== alerts (cloud/guardian/alert.mjs)"
+grep -q '"title":"Bulkhead guardian: freeze sent"' "$E/alerts.jsonl" 2>/dev/null \
+  || { cat "$E/alerts.jsonl" 2>/dev/null; echo "E2E FAILED: no freeze alert reached the webhook"; exit 1; }
+python3 -c "import json,sys; [print('   ', json.loads(l)['title']) for l in open(sys.argv[1]) if l.strip()]" "$E/alerts.jsonl"
 echo "E2E PASSED"

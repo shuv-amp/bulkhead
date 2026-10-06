@@ -22,13 +22,17 @@ POLL_MS="${POLL_MS:-300}"       # the guardian's polling interval (public RPCs: 
 # (comma-separated ids). Without them, its restart scan vetoes every pending
 # loosening, a guardian renewal or a recovery key included.
 APPROVED_CHANGE_IDS="${APPROVED_CHANGE_IDS:-}"
+# A webhook the guardian posts its alerts to (cloud/guardian/alert.mjs), if any.
+ALERT_URL="${ALERT_URL:-}"
+ALERT_CFG=""
+[ -n "$ALERT_URL" ] && ALERT_CFG=", \"alert\": { \"url\": \"$ALERT_URL\", \"format\": \"json\" }"
 field() { python3 -c "import json,sys; print(json.load(open('$W/world.json'))['$1'])"; }
 VAULT=$(field vaultProgram); HARBOR=$(field harbor)
 
 cat > "$W/guardian.json" <<CFG
 { "rpc": "$RPC", "vaultProgram": "$VAULT", "protocolProgram": "$HARBOR",
   "mints": ["$(field mint)"], "guardianKey": "$W/keys/guardian0.json", "pollMs": $POLL_MS,
-  "policy": { "approvedChangeIds": [$APPROVED_CHANGE_IDS] } }
+  "policy": { "approvedChangeIds": [$APPROVED_CHANGE_IDS] }$ALERT_CFG }
 CFG
 echo "== guardian watching"
 node cloud/guardian/main.mjs "$W/guardian.json" > "$W/guardian.log" 2>&1 &

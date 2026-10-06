@@ -8,7 +8,12 @@
 //     "vaultProgram": "...", "protocolProgram": "...",
 //     "mints": ["..."], "guardianKey": "path/to/keypair.json",
 //     "pollMs": 400, "policy": { ...overrides of DEFAULT_POLICY },
-//     "floorProgram": "...", "floorProtected": ["program id", ...] }
+//     "floorProgram": "...", "floorProtected": ["program id", ...],
+//     "alert": { "url": "https://hooks.slack.com/...", "format": "slack" } }
+//
+// With `alert`, every action, every error and the warnings that need a person
+// (a lifeboat move, a key no longer live, ...) are also posted to that webhook
+// (alert.mjs). Keep the URL secret: it is never logged.
 //
 // With `floorProtected`, the bot also checks each program's Floor config every
 // minute and logs a warning whenever what is missing changes: no abort buffer
@@ -48,6 +53,7 @@ import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, signatureWalkSinceSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
+import { alerter } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
@@ -86,7 +92,15 @@ function saveIncident() {
     console.log(JSON.stringify({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state: ${e.message}` }));
   }
 }
-const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+// Alerts to a webhook (alert.mjs); never on the guardian's critical path.
+const sendAlert = alerter({ ...(cfg.alert ?? {}), protocol: b58encode(vc.protocol) }, {
+  onError: (e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
+});
+const log = (o) => {
+  const line = { t: new Date().toISOString(), ...o };
+  console.log(JSON.stringify(line, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+  sendAlert(line);
+};
 
 // Programs under Floor whose readiness the bot reports (A5).
 const floorWatch = cfg.floorProgram
