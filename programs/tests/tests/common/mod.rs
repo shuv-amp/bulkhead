@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 #![allow(clippy::result_large_err)] // LiteSVM's failure type carries full logs
 
+pub mod sweep;
 pub mod vault;
 
 use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};

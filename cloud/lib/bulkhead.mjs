@@ -92,6 +92,7 @@ export class FloorClient {
   ix(tag, args, accounts) {
     return { programId: this.program, accounts, data: concat(Uint8Array.of(tag), args) };
   }
+  /** Stops the program. `snapshot`: the pinned snapshot buffer, required while one is pinned (docs/09, finding 53). */
   abort(signer, abortBuffer, snapshot = null) {
     const a = [
       w(this.config), s(signer), w(this.programdata), w(this.protected), w(abortBuffer), w(signer),

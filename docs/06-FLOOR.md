@@ -64,7 +64,7 @@ Each was checked in agave's source (master `f771659`, 26 Sep 2026) or on-chain; 
 | `status` | Live or Aborted |
 | `elf_is_v3` | Whether the live code is deployable after SIMD-0500 (updated at every install) |
 | `abort_buffer` | The staged canonical abort binary (frozen buffer) |
-| `snapshot_buffer`, `snapshot_valid` | A frozen buffer pinned as a copy of the live code; "valid" is decided at the moment of an abort |
+| `snapshot_buffer`, `snapshot_valid` | A frozen buffer pinned as a copy of the live code; "valid" is decided at the moment of an abort, which must name the pinned buffer (otherwise whoever stops could leave it out and deny the quorum its restore; `09`, finding 53) |
 | `pending_*` | At most one proposal: kind, target, payload, ETA, expiry, veto flag, approval bitmap, id |
 
 The upgrade authority is a second PDA, `["authority", program]`, with no data: it only signs. Buffers pinned by Floor have that PDA as authority.

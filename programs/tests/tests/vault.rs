@@ -1807,3 +1807,610 @@ fn a_thief_cannot_pre_empt_the_recovery_key_with_its_own_rotation() {
     w.env.ok(&[execute_change_ix(&w, 2, &protocol)], &[]);
     assert_eq!(protocol_admin(&w), fresh);
 }
+
+#[test]
+fn every_account_substitution_is_refused() {
+    use common::sweep::{any, role, Sweep};
+    let mut w = World::new();
+    // A second protocol on the same Vault program, with its own vault.
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let other_vault = other.create_vault(&mut w.env, 6, Limits::default_limits(), USDC_FEED, None);
+    let mut s = Sweep::for_market(&w.env, &w.m, &w.sol, &other, &other_vault);
+
+    let whale = w.user();
+    let whale_acc = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    let sol_whale = w.user();
+    w.deposit("sol", &sol_whale, 100_000 * SOL);
+    // The other market is sealed too, so it can hold a queued ticket.
+    let other_whale = w.user();
+    let other_acc = w.env.token_account(
+        &other_vault.mint,
+        &other_whale.pubkey(),
+        &other_vault.token_program,
+    );
+    w.env.mint_to(
+        &other_vault.mint,
+        &other_vault.mint_authority,
+        &other_acc,
+        10_000_000 * USDC,
+        &other_vault.token_program,
+    );
+    let ix = other.deposit_ix(
+        &w.env,
+        &other_vault,
+        &other_whale.pubkey(),
+        &other_acc,
+        10_000_000 * USDC,
+    );
+    w.env.ok(&[ix], &[&other_whale]);
+    w.env.ok(&[other.propose_seal_ix()], &[&other.admin]);
+    w.seal();
+    let ix = other.execute_seal_ix(&[&other_vault]);
+    w.env.ok(&[ix], &[]);
+    // Look-alikes a missing check would accept: a stranger's token accounts of
+    // both mints, a queued ticket on the other vault, and one in the other market.
+    let stranger = Keypair::new().pubkey();
+    let stranger_usdc = w.account("usdc", &stranger);
+    let stranger_sol = w.account("sol", &stranger);
+    s.decoy("a stranger's USDC account", stranger_usdc);
+    s.decoy("a stranger's SOL account", stranger_sol);
+    let sol_payee = w.account("sol", &stranger);
+    let ix = w.m.admin_payout_ix(
+        &w.env,
+        &w.sol,
+        &sol_payee,
+        &stranger,
+        5_000 * SOL,
+        &[(w.sol.asset, w.sol.price)],
+    );
+    let (_, sol_ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    s.decoy("a ticket on the SOL vault", sol_ticket);
+    let other_payee = w
+        .env
+        .token_account(&other_vault.mint, &stranger, &other_vault.token_program);
+    let ix = other.admin_payout_ix(
+        &w.env,
+        &other_vault,
+        &other_payee,
+        &stranger,
+        500_000 * USDC,
+        &[(other_vault.asset, other_vault.price)],
+    );
+    let (_, other_ticket) = other.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&other.admin]);
+    s.decoy("a ticket in the other market", other_ticket);
+    let (admin, g0, g1, g2) = (
+        w.m.admin.pubkey(),
+        w.m.g[0].pubkey(),
+        w.m.g[1].pubkey(),
+        w.m.g[2].pubkey(),
+    );
+    let guardians = vec![g0, g1, g2];
+    let freezers = vec![admin, g0, g1, g2];
+    let protocol_vaults = vec![w.usdc.vault, w.sol.vault];
+    // Harbor's slots before the Vault's own accounts: program, caller, signer.
+    const H: usize = 3;
+    let payer_free = |at| any(at, "rent payer: any funded signer");
+    let harbor_user = any(
+        2,
+        "Harbor's own user slot (demo integration); the Vault checks its own source authority",
+    );
+    let unqueued = [
+        any(H + 8, "ticket PDA: only used when part of a release is queued"),
+        any(H + 9, "system program: only used to create a ticket"),
+        any(H + 11, "price account: an owner taking back a deposit, or a payee owing nothing, needs no price (G2)"),
+    ];
+
+    // --- custody -----------------------------------------------------------
+    w.env.mint_to(
+        &w.usdc.mint,
+        &w.usdc.mint_authority,
+        &whale_acc,
+        1_000 * USDC,
+        &w.usdc.token_program,
+    );
+    let ix =
+        w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 1_000 * USDC);
+    s.run(
+        &mut w.env,
+        "deposit",
+        ix,
+        &[&whale],
+        &[harbor_user, payer_free(H + 7)],
+    );
+
+    let ix = w.m.withdraw_ix(
+        &w.env,
+        &w.usdc,
+        &whale.pubkey(),
+        &whale_acc,
+        1_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    let mut ok = vec![payer_free(H + 7)];
+    ok.extend(unqueued.iter().map(|a| any(a.at, a.why)));
+    s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &ok);
+
+    let payee = w.user();
+    let payee_acc = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(
+        &w.env,
+        &w.usdc,
+        &payee_acc,
+        &payee.pubkey(),
+        10_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    s.run(&mut w.env, "admin payout (instant)", ix, &[], &ok);
+
+    let ix = w.m.admin_payout_ix(
+        &w.env,
+        &w.usdc,
+        &payee_acc,
+        &payee.pubkey(),
+        1_000_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    let (_, t1) = w.m.next_ticket(&w.env);
+    s.run(
+        &mut w.env,
+        "admin payout (queued)",
+        ix,
+        &[],
+        &[any(H + 11, "price account: the payee owes nothing")],
+    );
+
+    // --- tickets: extend, settle -------------------------------------------
+    let ix = w.m.vault_ix(
+        11,
+        &3_600i64.to_le_bytes(),
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(t1, false),
+            AccountMeta::new_readonly(g2, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "extend ticket",
+        ix,
+        &[],
+        &[
+            role(
+                1,
+                vec![sol_ticket],
+                "any queued ticket of this protocol (another market's is refused)",
+            ),
+            role(2, guardians.clone(), "any live guardian"),
+        ],
+    );
+
+    let ix = w.m.admin_payout_ix(
+        &w.env,
+        &w.usdc,
+        &payee_acc,
+        &payee.pubkey(),
+        100_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    let (_, t2) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    // Past the ticket's ETA, heartbeating on the way (a guardian silent
+    // longer than its 7-day interval stops counting).
+    for _ in 0..4 {
+        w.env.advance(2 * DAY);
+        for g in [&w.m.g[0], &w.m.g[1], &w.m.g[2]] {
+            let hb = w.m.vault_ix(
+                14,
+                &[],
+                vec![
+                    AccountMeta::new(w.m.protocol, false),
+                    AccountMeta::new_readonly(g.pubkey(), true),
+                ],
+            );
+            w.env.ok(&[hb], &[g]);
+        }
+    }
+    w.refresh_prices();
+    let ix =
+        w.m.settle_ix(&w.usdc, &t2, &payee_acc, &w.env.payer.pubkey());
+    s.run(&mut w.env, "settle ticket", ix, &[], &[]);
+
+    // --- brakes -------------------------------------------------------------
+    let ix = w.m.freeze_ix(&g0, Some(&w.usdc), 60);
+    s.run(
+        &mut w.env,
+        "freeze (vault)",
+        ix,
+        &[],
+        &[
+            role(1, freezers.clone(), "a live guardian or the admin"),
+            role(2, protocol_vaults.clone(), "any vault of this protocol"),
+        ],
+    );
+    let ix = w.m.vault_ix(
+        14,
+        &[],
+        vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(g0, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "heartbeat",
+        ix,
+        &[],
+        &[role(
+            1,
+            guardians.clone(),
+            "each guardian heartbeats for itself",
+        )],
+    );
+    let ix = w.m.freeze_ix(&g0, None, 60);
+    s.run(
+        &mut w.env,
+        "freeze (protocol)",
+        ix,
+        &[],
+        &[role(1, freezers.clone(), "a live guardian or the admin")],
+    );
+    let ix = w.m.cancel_ix(&w.usdc, &t1, &g0, &w.env.payer.pubkey());
+    s.run(
+        &mut w.env,
+        "cancel ticket",
+        ix,
+        &[],
+        &[role(3, guardians.clone(), "any live guardian")],
+    );
+    let ix = w.m.unfreeze_ix(None, &[g1, g2]);
+    s.run(
+        &mut w.env,
+        "unfreeze (protocol)",
+        ix,
+        &[],
+        &[
+            any(1, "the vault slot is unused for the protocol scope"),
+            role(2, guardians.clone(), "any quorum"),
+            role(3, guardians.clone(), "any quorum"),
+        ],
+    );
+    let ix = w.m.vault_ix(
+        16,
+        &[],
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new_readonly(admin, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "reset backlog",
+        ix,
+        &[],
+        &[
+            role(1, protocol_vaults.clone(), "any vault of this protocol"),
+            role(2, freezers.clone(), "the admin or a live guardian"),
+        ],
+    );
+
+    // --- governance: propose, veto, cancel, execute -------------------------
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 300;
+    let vault = w.usdc.vault;
+    let ix =
+        w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    s.run(&mut w.env, "propose change", ix, &[], &[payer_free(0)]);
+    let ix = w.m.vault_ix(
+        19,
+        &[],
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.m.change_address(0), false),
+            AccountMeta::new_readonly(g1, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "veto change",
+        ix,
+        &[],
+        &[role(2, guardians.clone(), "any live guardian")],
+    );
+    let ix =
+        w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = cancel_change_ix(&w, 1, &admin);
+    s.run(&mut w.env, "cancel change", ix, &[], &[]);
+    let ix =
+        w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    w.refresh_prices();
+    let ix = execute_change_ix(&w, 2, &vault);
+    s.run(
+        &mut w.env,
+        "execute change",
+        ix,
+        &[],
+        &[
+            payer_free(3),
+            any(4, "mint: read only for an asset change"),
+            any(5, "token program: read only for an asset change"),
+            any(6, "system program: unused here"),
+        ],
+    );
+
+    // --- lifeboat: move, return, propose / veto / execute an exit ----------
+    let lifeboat = pda(
+        &[
+            b"lifeboat-tokens",
+            w.m.protocol.as_ref(),
+            w.usdc.mint.as_ref(),
+        ],
+        &w.m.vault_program,
+    );
+    let mv = |w: &World, tag: u8, signers: Vec<AccountMeta>| {
+        let mut a = vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.usdc.vault_tokens, false),
+            AccountMeta::new(lifeboat, false),
+            AccountMeta::new_readonly(w.usdc.mint, false),
+            AccountMeta::new_readonly(w.usdc.token_program, false),
+        ];
+        a.extend(signers);
+        w.m.vault_ix(tag, &(1_000 * USDC).to_le_bytes(), a)
+    };
+    let ix = mv(
+        &w,
+        24,
+        vec![
+            AccountMeta::new_readonly(admin, true),
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "lifeboat move",
+        ix,
+        &[],
+        &[
+            payer_free(7),
+            any(
+                8,
+                "system program: only used to create the lifeboat account",
+            ),
+        ],
+    );
+    let ix = mv(
+        &w,
+        24,
+        vec![
+            AccountMeta::new_readonly(admin, true),
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = mv(&w, 25, vec![AccountMeta::new_readonly(admin, true)]);
+    s.run(&mut w.env, "lifeboat return (admin)", ix, &[], &[]);
+    let ix = mv(
+        &w,
+        25,
+        vec![
+            AccountMeta::new_readonly(g0, true),
+            AccountMeta::new_readonly(g2, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "lifeboat return (quorum)",
+        ix,
+        &[],
+        &[
+            role(6, guardians.clone(), "any quorum"),
+            role(7, guardians.clone(), "any quorum"),
+        ],
+    );
+    let ix = mv(
+        &w,
+        24,
+        vec![
+            AccountMeta::new_readonly(admin, true),
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let propose_exit = |w: &World| {
+        w.m.vault_ix(
+            26,
+            &(1_000 * USDC).to_le_bytes(),
+            vec![
+                AccountMeta::new_readonly(w.m.protocol, false),
+                AccountMeta::new(w.usdc.vault, false),
+                AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+            ],
+        )
+    };
+    let ix = propose_exit(&w);
+    s.run(&mut w.env, "propose lifeboat exit", ix, &[], &[]);
+    let ix = w.m.vault_ix(
+        28,
+        &[],
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new_readonly(g0, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "veto lifeboat exit",
+        ix,
+        &[],
+        &[
+            role(
+                1,
+                protocol_vaults.clone(),
+                "a veto where no exit is pending changes nothing: the next proposal clears it",
+            ),
+            role(2, guardians.clone(), "any live guardian"),
+        ],
+    );
+    let ix = propose_exit(&w);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let dest_owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &dest_owner);
+    let ix = w.m.vault_ix(
+        27,
+        &[],
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(lifeboat, false),
+            AccountMeta::new_readonly(w.usdc.mint, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new_readonly(w.usdc.token_program, false),
+        ],
+    );
+    s.run(&mut w.env, "execute lifeboat exit", ix, &[], &[]);
+
+    // --- guardians: eject, abdicate ------------------------------------------
+    for g in [&w.m.g[0], &w.m.g[1], &w.m.g[2]] {
+        let hb = w.m.vault_ix(
+            14,
+            &[],
+            vec![
+                AccountMeta::new(w.m.protocol, false),
+                AccountMeta::new_readonly(g.pubkey(), true),
+            ],
+        );
+        w.env.ok(&[hb], &[g]);
+    }
+    let ix = w.m.vault_ix(
+        17,
+        &[4],
+        vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(admin, true),
+            AccountMeta::new_readonly(g0, true),
+            AccountMeta::new_readonly(g1, true),
+        ],
+    );
+    s.run(
+        &mut w.env,
+        "abdicate",
+        ix,
+        &[],
+        &[
+            role(2, guardians.clone(), "any quorum"),
+            role(3, guardians.clone(), "any quorum"),
+        ],
+    );
+    let ix = w.m.vault_ix(
+        15,
+        &[2],
+        vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(g0, true),
+            AccountMeta::new_readonly(g1, true),
+        ],
+    );
+    s.run(&mut w.env, "eject", ix, &[], &[]);
+
+    // --- before the seal: create vault, assets, imports, the seal ------------
+    let mut p = World::new();
+    let other_p = Market::with_ids(&mut p.env, p.m.vault_program, Address::new_unique());
+    let other_pv = other_p.create_vault(&mut p.env, 6, Limits::default_limits(), USDC_FEED, None);
+    let mut sp = Sweep::for_market(&p.env, &p.m, &p.sol, &other_p, &other_pv);
+    let ix = create_vault_ix(&mut p, &Limits::default_limits());
+    let (third_vault, third_tokens, third_mint) = (
+        ix.accounts[3].pubkey,
+        ix.accounts[4].pubkey,
+        ix.accounts[5].pubkey,
+    );
+    sp.run(&mut p.env, "create vault", ix, &[], &[payer_free(0)]);
+    let ix = p.m.upsert_asset_ix(&p.env, &p.usdc, &usdc_cfg());
+    sp.run(
+        &mut p.env,
+        "upsert asset",
+        ix,
+        &[],
+        &[
+            payer_free(0),
+            any(
+                6,
+                "system program: only used when the asset account is created",
+            ),
+        ],
+    );
+    let owner = p.user();
+    p.env.mint_to(
+        &p.usdc.mint,
+        &p.usdc.mint_authority,
+        &p.usdc.vault_tokens,
+        5 * USDC,
+        &p.usdc.token_program,
+    );
+    let ix = import_ix(&p, &owner.pubkey(), 5 * USDC);
+    let p_vaults = vec![p.usdc.vault, p.sol.vault, third_vault];
+    sp.run(&mut p.env, "import backing", ix, &[], &[payer_free(0), role(3, p_vaults, "the admin imports into any vault of its protocol; the seal checks each vault's coverage")]);
+    let ix = p.m.propose_seal_ix();
+    sp.run(&mut p.env, "propose seal", ix, &[], &[]);
+    let ix = p.m.vault_ix(
+        6,
+        &[],
+        vec![
+            AccountMeta::new(p.m.protocol, false),
+            AccountMeta::new_readonly(p.m.g[0].pubkey(), true),
+        ],
+    );
+    let pg: Vec<Address> = p.m.g.iter().map(|k| k.pubkey()).collect();
+    sp.run(
+        &mut p.env,
+        "veto seal",
+        ix,
+        &[],
+        &[role(1, pg, "any live guardian")],
+    );
+    let ix = p.m.propose_seal_ix();
+    p.env.ok(&[ix], &[&p.m.admin]);
+    p.env.advance(3 * DAY);
+    // The seal lists every vault: the two of the world and the one created above.
+    let mut ix = p.m.execute_seal_ix(&[&p.usdc, &p.sol]);
+    let third_lifeboat = pda(
+        &[
+            b"lifeboat-tokens",
+            p.m.protocol.as_ref(),
+            third_mint.as_ref(),
+        ],
+        &p.m.vault_program,
+    );
+    ix.accounts
+        .push(AccountMeta::new_readonly(third_vault, false));
+    ix.accounts
+        .push(AccountMeta::new_readonly(third_tokens, false));
+    ix.accounts
+        .push(AccountMeta::new_readonly(third_lifeboat, false));
+    sp.run(&mut p.env, "execute seal", ix, &[], &[]);
+
+    let total = s.attempts + sp.attempts;
+    println!(
+        "{total} substitutions over 30 transactions; {} needed a key nobody here holds",
+        s.unsignable + sp.unsignable
+    );
+    let mut all = s.unexpected;
+    all.extend(sp.unexpected);
+    assert!(
+        all.is_empty(),
+        "accepted substitutions ({}):\n{}",
+        all.len(),
+        all.join("\n")
+    );
+}

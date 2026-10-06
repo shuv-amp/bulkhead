@@ -630,11 +630,16 @@ fn pin_snapshot(program_id: &Address, accounts: &mut [AccountView]) -> ProgramRe
 //
 // Accounts: 0 config [w], 1 guardian or owner [s], 2 programdata [w],
 //           3 program [w], 4 abort buffer [w], 5 spill [w], 6 rent, 7 clock,
-//           8 authority PDA, 9 loader-v3, 10 snapshot buffer (optional).
+//           8 authority PDA, 9 loader-v3, 10 snapshot buffer (required while
+//           one is pinned).
 //
-// Never fails because of the snapshot: if it is missing or no longer identical
-// to the live code, the abort still happens and only the quorum's fast
-// "restore exactly what ran" path is unavailable.
+// A pinned snapshot must be named: otherwise whoever stops the program would
+// decide, by leaving it out, that the quorum may not restore it (docs/09,
+// finding 53). It always exists while pinned (Floor holds its authority; a
+// restore that consumes it clears the pin), and comparing it costs about one
+// unit per 250 bytes, so naming it cannot keep an honest stop from landing. Its
+// contents never stop the abort: if they ever differed from the live code,
+// only the quorum's fast restore would be unavailable.
 fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
     let t = now()?;
@@ -665,13 +670,14 @@ fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     // Decide, against the exact live bytes, whether the snapshot restores them.
     c.snapshot_valid = 0;
     if c.snapshot_buffer != [0; 32] {
-        if let Some(snap) = accounts.get(10) {
-            if key(snap) == c.snapshot_buffer
-                && check_frozen_buffer(program_id, &c, snap).is_ok()
-                && snapshot_identical(snap, programdata)?
-            {
-                c.snapshot_valid = 1;
-            }
+        let snap = accounts.get(10).ok_or(FloorError::SnapshotMismatch)?;
+        if key(snap) != c.snapshot_buffer {
+            return Err(FloorError::SnapshotMismatch.into());
+        }
+        if check_frozen_buffer(program_id, &c, snap).is_ok()
+            && snapshot_identical(snap, programdata)?
+        {
+            c.snapshot_valid = 1;
         }
     }
 
