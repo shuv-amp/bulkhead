@@ -5,13 +5,13 @@ Every number shown in a video or on a page comes from a scenario that actually e
 Environments:
 - **LiteSVM** (`programs/tests`): the real agave runtime and loader, the mainnet feature set and the mainnet token program; deterministic clock. Every scenario runs here.
 - **Local validator** (`cloud/e2e/run.sh`): `solana-test-validator` with the programs, a sealed market, the Cloud guardian and an attacker.
-- **Devnet**: public signatures ([below](#devnet-signatures)). Deployed 28 Sep 2026 by `scripts/deploy.sh`, rehearsed first by `scripts/deploy-dryrun.sh` on a fresh local validator. The demo market's seal executes from 30 Sep, 20:32 UTC. After it, S1 runs there with `cloud/e2e/s1.sh`, the same script the local end-to-end run uses, on the market that `scripts/deploy.sh` wrote (`world.json`, `keys/`). Floor S10 needs no seal and has already run there.
+- **Devnet**: public signatures ([below](#devnet-signatures)). Deployed 28 Sep 2026 by `scripts/deploy.sh`, rehearsed first by `scripts/deploy-dryrun.sh` on a fresh local validator. The demo market was sealed on 1 Oct, and S1 ran there that day (below) with `cloud/e2e/s1.sh`, the same script the local end-to-end run uses, on the market that `scripts/deploy.sh` wrote (`world.json`, `keys/`). Floor S10 needs no seal and has already run there.
 
 Status (28 Sep 2026):
 
 | Scenario | Where it runs | Status |
 |---|---|---|
-| S1 compromised admin | `tests/vault.rs::s1_…`, `cloud/e2e/run.sh`; devnet: `cloud/e2e/s1.sh` once the seal executes (30 Sep, 20:32 UTC) | **Runs**; on devnet, refused until the seal as it must be |
+| S1 compromised admin | `tests/vault.rs::s1_…`, `cloud/e2e/run.sh`; devnet: `cloud/e2e/s1.sh` | **Runs**; **ran on devnet 1 Oct**: 100,000 of 1,200,000 left, 11 tickets cancelled by the guardian ([signatures](#devnet-signatures)) |
 | S1 with the full Drift asset mix (31 borrows) | model: `reference/drift_model.py` | Model; devnet run planned |
 | S4 bank run | `tests/vault.rs::s4_…` | **Runs** |
 | S7 slow loosening | `tests/vault.rs::s7_…`, `an_unvetoed_loosening…` | **Runs** |
@@ -170,6 +170,11 @@ Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep; all three upgraded 
 | Seal proposed: executable from 30 Sep, 20:32:27 UTC until 7 Oct, 20:32:27 UTC | [`3ZJH4YW4…`](https://explorer.solana.com/tx/3ZJH4YW47LZFbkb51yrDiMmSYaNyzJokYJ8ifRhqUWxcN5A2gbAzibk4BRk7u46kZPurDuJyffMv9oZaFnVoGbQJ?cluster=devnet) |
 | Absolute caps set, 29 Sep: 200,000 per 1h and 500,000 per 24h, 2% and 5% of the 10M (the calibration rule, `07 §4`; `15` A1b). A tightening, applied at once; the worst case is unchanged at 10M | [`63WTyNAF…`](https://explorer.solana.com/tx/63WTyNAFuwodQwKHjmz5feTCGB43z2ErJ9ekDf3sYGeXfhAgA3khdeKiGfqMJqHXJYEtVUBsdUXysuKtsodLAAYa?cluster=devnet) |
 | Guardian 0's heartbeat: the Cloud guardian's first live run | [`2bsgiHmt…`](https://explorer.solana.com/tx/2bsgiHmtjSYkXBgCzwKFmMrkVoGJkgvY5N5Y9vrzXcXg7dGRUT2JKWvWycCP1AxdR38hqgDPLBU7u7sCZCqrbwwR?cluster=devnet) |
+| Seal executed, 1 Oct 15:28:19 UTC (open to anyone once the 72h passed) | [`52ayyXpC…`](https://explorer.solana.com/tx/52ayyXpCuDXibu9aK2zEmxaFQXqFX8FHA6CrpzaWmubEbFRiyCXsLp1nNz2GuUGyNoVoge8Amg1G9sBD3trGv2rk?cluster=devnet) |
+| S1 with the admin key, through Harbor: the first of 12 payouts of 100,000 USDC, 15:28:32; instant, the 2% burst | [`2zBFf6Ho…`](https://explorer.solana.com/tx/2zBFf6Ho6oQLULthoJfHtpqYWGfz3NmJbbxFo3JqbceQFQNeq4d6nnHsfTRYHoPtA7RTmRQAqTTZne4zbg64fUKb?cluster=devnet) |
+| The other 11, 15:28:34 to 15:29:17: each queued as a ticket (nothing moved; a ticket waits at least 6h) | [`1b5zSvhd…`](https://explorer.solana.com/tx/1b5zSvhdgfDrdmoSZGJ1QMtLREDw2LEmwqcSdybYLiJPepzbAFWJ7t8ZLkfL7mXu1YN9TNAUsrGsmwY7nYMihEs?cluster=devnet) … [`2BFBRDBb…`](https://explorer.solana.com/tx/2BFBRDBbUu9X8HK87QJ6F2wETzNr9SjZFMAZcaYDDfzrK3cadCfogFWBE8i2crvPFACHRzYDRs8nA6jRRiLGvBKw?cluster=devnet) |
+| Guardian 0 (the Cloud guardian) heartbeats at 15:41:26 and freezes the protocol at 15:41:51, 12 min 34 s after the first payout: it was started late on devnet (locally it freezes within seconds). The queued payouts could not have settled for 6h | [`vM45ZRV7…`](https://explorer.solana.com/tx/vM45ZRV7v1AW6AGdA2KMk1Wuc2Gsoez4CaPQXLpQsbH6QQU9Dxp82EqeW3y8KRGH1xFzPBufd4Q3h1d4CJ4igvF?cluster=devnet), [`3mjsHTaP…`](https://explorer.solana.com/tx/3mjsHTaPDCu7q5MdtSZyYgBBUCSAxMDtnH4wPe6RPe49GYJWcE266fHbC51pgpyXMKtQGgeNErL4YGpCngSH5nUR?cluster=devnet) |
+| Guardian 0 cancels all 11 tickets, 15:41:52 to 15:42:19. Result: 100,000 USDC out, 9,900,000 in the vault, 0 pending, the same as the local run | [`5zUEB2uj…`](https://explorer.solana.com/tx/5zUEB2ujHs8z1vt4iUGvxhJ3ad6ScMKTwqyK6J7ZPEpcuKZJm82E4XXWsVe4idYhoCYz57hR2H6TgALepqnhETQ1?cluster=devnet) … [`61KFMxEj…`](https://explorer.solana.com/tx/61KFMxEjB2r8NvUannWbRU2zcJuV6oPHRr7QF9BZiSKLL6FSGNNMpFwUipEqVQ2RNjg39PiaaCKdvmRXn2LbK8iu?cluster=devnet) |
 
 Before the seal, `cloud/deploy/vault-check.mjs` (simulations; nothing sent) found:
 - every setting as configured, and since 29 Sep the calibrated absolute caps (200,000 per 1h, 500,000 per 24h);
