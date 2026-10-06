@@ -6,8 +6,8 @@
 # workflow, the toolchains and this script itself select everything. The
 # weekly run does not use this; it runs every job.
 set -euo pipefail
-programs=false fuzz=false kani=false mutants=false deny=false workflows=false
-all() { programs=true fuzz=true kani=true mutants=true deny=true workflows=true; }
+programs=false fuzz=false kani=false mutants=false deny=false workflows=false devnet=false
+all() { programs=true fuzz=true kani=true mutants=true deny=true workflows=true devnet=true; }
 while IFS= read -r f; do
   case "$f" in
     .github/*|scripts/ci-changes.sh|rust-toolchain.toml|*/rust-toolchain.toml)
@@ -38,5 +38,10 @@ while IFS= read -r f; do
     Cargo.toml|Cargo.lock|*/Cargo.toml|*/Cargo.lock|deny.toml|*/deny.toml|scripts/deny.sh)
       deny=true ;;
   esac
+  case "$f" in
+    # Otherwise weekly only: the scripts that check devnet and the build image.
+    scripts/verify-devnet.sh|scripts/verify-deployed.sh|scripts/build-programs-docker.sh|scripts/build-programs.sh)
+      devnet=true ;;
+  esac
 done
-for j in programs fuzz kani mutants deny workflows; do echo "$j=${!j}"; done
+for j in programs fuzz kani mutants deny workflows devnet; do echo "$j=${!j}"; done
