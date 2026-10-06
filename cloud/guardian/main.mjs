@@ -28,6 +28,10 @@
 // chain every cycle; active tickets are scanned at startup, on a freeze, and
 // periodically; truncated logs use the vault's own transfers and balances.
 //
+// Keeper: once due, it executes exactly what is approved below (anyone may
+// execute after the delay; this makes sure someone does), except a release of
+// Floor's upgrade authority.
+//
 // Vetoes: every loosening not in `approvedChangeIds`, every lifeboat exit not
 // in `approvedExits` ("mint:amount"), and every Floor proposal not approved
 // (code by buffer in `approvedUpgradeBuffers`, anything else by "program:id"
@@ -41,8 +45,9 @@ import { readFileSync } from "node:fs";
 import { Rpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
+import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
@@ -534,6 +539,58 @@ async function vetoStillPending(now) {
   nextChangeScanAt = Date.now() + 60_000;
 }
 
+// Keeper: executions already sent ("c<id>" for a change, "e<program>:<id>" for Floor).
+const executedByKeeper = new Set();
+const keeperErrors = new Map();
+
+/** The execute instruction for an approved change (see keeper.mjs). */
+async function executeChangeIx(action) {
+  const mintOwner = action.kind === 1 ? (await rpc.account(key(action.target)))?.owner ?? null : null;
+  return executeChangeIxFor({
+    vaultProgram: cfg.vaultProgram, protocol: vc.protocol, payer: guardian.publicKey, defaultMint: watched[0].mint,
+    changeId: action.changeId, kind: action.kind, target: action.target, mintOwner,
+  });
+}
+
+/**
+ * Execute what the operators approved once it is due. Anyone may; this makes
+ * sure someone does, so an approved guardian renewal or key rotation does not
+ * lapse. A failure is logged once per reason and retried next scan.
+ */
+async function keepApproved(now) {
+  const attempt = async (doneKey, what, ix) => {
+    try {
+      const signature = await send(rpc, guardian, [ix], [], await sendOptions());
+      executedByKeeper.add(doneKey);
+      log({ action: "execute", what, signature });
+    } catch (e) {
+      const reason = e.message.slice(0, 160);
+      if (keeperErrors.get(doneKey) !== reason) log({ level: "warn", msg: `keeper could not execute ${what}: ${reason}` });
+      keeperErrors.set(doneKey, reason);
+    }
+  };
+  try {
+    for (const change of await activeChanges(rpc, cfg.vaultProgram, vc.protocol)) {
+      const action = dueApprovedChange(change, policy, now, executedByKeeper);
+      if (action) await attempt(`c${action.changeId}`, `change ${action.changeId}`, await executeChangeIx(action));
+    }
+  } catch (e) {
+    log({ level: "warn", msg: `keeper change scan failed; retrying: ${e.message}` });
+  }
+  for (const fc of floorWatch) {
+    try {
+      const acc = await rpc.account(fc.config);
+      if (!acc) continue;
+      const action = dueApprovedFloor(decodeFloor(acc.bytes), policy, now, executedByKeeper);
+      if (!action) continue;
+      const ix = action.kind === 1 || action.kind === 2 ? fc.executeUpgrade(key(action.target), guardian.publicKey) : fc.executeConfig();
+      await attempt(`e${action.program}:${action.proposalId}`, `floor ${action.program} proposal ${action.proposalId}`, ix);
+    } catch (e) {
+      log({ level: "warn", msg: `keeper floor scan failed; retrying: ${e.message}` });
+    }
+  }
+}
+
 // Mints whose replayed startup window has not been judged yet (no attest).
 let unjudged = new Set();
 
@@ -617,7 +674,10 @@ async function main() {
         if (unjudged.size) await judgeStartupWindow(decisionTime(wallNow(), state.outflows));
       });
     }
-    if (Date.now() >= nextChangeScanAt) await step("pending proposals", () => vetoStillPending(wallNow()));
+    if (Date.now() >= nextChangeScanAt) {
+      await step("pending proposals", () => vetoStillPending(wallNow()));
+      await step("keeper", () => keepApproved(wallNow()));
+    }
     if (floorWatch.length && Date.now() - lastFloorCheck > 60_000) {
       lastFloorCheck = Date.now();
       await step("floor check", checkFloor);
