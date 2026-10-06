@@ -100,7 +100,7 @@ fn a_fix_goes_live_fast_only_with_quorum_approval_of_that_exact_buffer() {
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let (f, gs) = (&p.f, p.guardians());
-    env.ok(&[f.abort(&gs[0], &p.abort_buffer, None)], &[&p.g[0]]);
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
     env.next_slot();
 
     let fix = env.write_buffer(&honest_fix(), &p.owner);
@@ -132,7 +132,7 @@ fn a_proposed_fix_without_approvals_waits_the_full_delay() {
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let (f, gs) = (&p.f, p.guardians());
-    env.ok(&[f.abort(&gs[0], &p.abort_buffer, None)], &[&p.g[0]]);
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
     let fix = env.write_buffer(&honest_fix(), &p.owner);
     env.set_buffer_authority(&fix, &p.owner, &f.authority);
     env.ok(
@@ -188,12 +188,12 @@ fn only_live_guardians_or_the_owner_can_stop_the_program() {
     let f = &p.f;
     let stranger = Keypair::new();
     env.fund(&stranger);
-    let ix = f.abort(&stranger.pubkey(), &p.abort_buffer, None);
+    let ix = f.abort(&stranger.pubkey(), &p.abort_buffer, Some(&p.snapshot));
     assert_eq!(env.fails(&[ix], &[&stranger]), err::NOT_LIVE_GUARDIAN);
 
     // Guardians that miss their 7-day heartbeat lose their powers.
     env.advance(7 * DAY + 1);
-    let ix = f.abort(&p.g[0].pubkey(), &p.abort_buffer, None);
+    let ix = f.abort(&p.g[0].pubkey(), &p.abort_buffer, Some(&p.snapshot));
     assert_eq!(env.fails(&[ix], &[&p.g[0]]), err::NOT_LIVE_GUARDIAN);
     let hb = f.heartbeat(&p.g[0].pubkey());
     assert_eq!(
@@ -204,7 +204,7 @@ fn only_live_guardians_or_the_owner_can_stop_the_program() {
 
     // With no live quorum, the owner can still stop its own program.
     env.ok(
-        &[f.abort(&p.owner.pubkey(), &p.abort_buffer, None)],
+        &[f.abort(&p.owner.pubkey(), &p.abort_buffer, Some(&p.snapshot))],
         &[&p.owner],
     );
 }
@@ -218,7 +218,7 @@ fn heartbeats_keep_guardians_alive() {
     env.ok(&[f.heartbeat(&p.g[0].pubkey())], &[&p.g[0]]);
     env.advance(2 * DAY);
     env.ok(
-        &[f.abort(&p.g[0].pubkey(), &p.abort_buffer, None)],
+        &[f.abort(&p.g[0].pubkey(), &p.abort_buffer, Some(&p.snapshot))],
         &[&p.g[0]],
     );
 }
@@ -370,7 +370,7 @@ fn only_the_exact_canonical_abort_binary_can_be_staged() {
     );
     // Consume the staged one, then try a lookalike.
     env.ok(
-        &[f.abort(&p.g[0].pubkey(), &p.abort_buffer, None)],
+        &[f.abort(&p.g[0].pubkey(), &p.abort_buffer, Some(&p.snapshot))],
         &[&p.g[0]],
     );
     let mut fake = ABORT_ELF.to_vec();
@@ -416,7 +416,7 @@ fn abort_cancels_pending_proposals() {
         &[&p.owner],
     );
     env.ok(
-        &[f.abort(&p.g[0].pubkey(), &p.abort_buffer, None)],
+        &[f.abort(&p.g[0].pubkey(), &p.abort_buffer, Some(&p.snapshot))],
         &[&p.g[0]],
     );
     assert_eq!(read_config(&env, f).pending_kind, 0);
@@ -748,4 +748,143 @@ fn the_floor_recovery_key_can_only_replace_the_owner_or_itself() {
     env.ok(&[f.propose(&recovery.pubkey(), SET_RECOVERY, &other, &[], None)], &[&recovery]);
     // Its own proposal is its own to withdraw.
     env.ok(&[f.cancel(&recovery.pubkey())], &[&recovery]);
+}
+
+/// Account substitution over Floor's instructions (common/sweep.rs): program
+/// A is the target, program B (registered with its own owner and guardians)
+/// supplies look-alike accounts, and a stranger owns one more buffer. Every
+/// swap must fail except where Floor leaves a position free on purpose.
+#[test]
+fn every_floor_account_substitution_is_refused() {
+    use common::sweep::{any, role, Sweep};
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let stranger = Keypair::new();
+    env.fund(&stranger);
+    let stranger_buffer = env.write_buffer(&honest_fix(), &stranger);
+    let (f, gs) = (&p.f, p.guardians());
+    let payer = env.payer.pubkey();
+    let mut decoys = vec![
+        ("B's config".to_string(), q.f.config),
+        ("B's program".into(), q.f.program),
+        ("B's programdata".into(), q.f.programdata),
+        ("B's Floor authority".into(), q.f.authority),
+        ("B's abort buffer".into(), q.abort_buffer),
+        ("B's snapshot".into(), q.snapshot),
+        ("a stranger's buffer".into(), stranger_buffer),
+        ("A's abort buffer".into(), p.abort_buffer),
+        ("A's snapshot".into(), p.snapshot),
+        ("A's Floor authority".into(), f.authority),
+    ];
+    decoys.push(("Floor program".into(), env.floor));
+    let mut keys: Vec<&Keypair> = vec![&p.owner, &q.owner, &p.team, &q.team, &stranger];
+    keys.extend(p.g.iter());
+    keys.extend(q.g.iter());
+    let mut s = Sweep::new(&env, decoys, &keys);
+    let guardians = gs.clone();
+    let spill = |at| any(at, "spill: whoever executes receives the buffer's rent");
+    let heartbeat_all = |env: &mut Env| {
+        for g in &p.g {
+            env.ok(&[f.heartbeat(&g.pubkey())], &[g]);
+        }
+    };
+
+    s.run(&mut env, "heartbeat", f.heartbeat(&gs[0]), &[], &[role(1, guardians.clone(), "each guardian heartbeats for itself")]);
+
+    // An upgrade: propose, veto, cancel; propose again, execute after the delay.
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    s.run(&mut env, "propose upgrade", f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2)), &[], &[]);
+    s.run(&mut env, "veto", f.veto(&gs[1]), &[], &[role(1, guardians.clone(), "any live guardian")]);
+    s.run(&mut env, "cancel", f.cancel(&p.owner.pubkey()), &[], &[]);
+    env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    env.advance(3 * DAY);
+    heartbeat_all(&mut env);
+    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &payer), &[], &[spill(4)]);
+    env.next_slot();
+
+    // The snapshot no longer matches: pin one of the new code; stage a fresh abort buffer.
+    let snap2 = env.write_buffer(&honest_fix(), &stranger);
+    env.set_buffer_authority(&snap2, &stranger, &f.authority);
+    s.run(&mut env, "pin snapshot", f.pin_snapshot(&snap2), &[], &[]);
+    env.next_slot();
+
+    // Stop, then restore the snapshot with a quorum.
+    s.run(&mut env, "abort (stop)", f.abort(&gs[0], &p.abort_buffer, Some(&snap2)), &[], &[
+        role(1, guardians.clone(), "any live guardian"),
+        spill(5),
+    ]);
+    env.next_slot();
+    s.run(&mut env, "restore snapshot", f.restore_snapshot(&snap2, &payer, &gs[0..2]), &[], &[
+        spill(4),
+        role(9, guardians.clone(), "any quorum"),
+        role(10, guardians.clone(), "any quorum"),
+    ]);
+    env.next_slot();
+
+    // The stop used the abort buffer: anyone stages a fresh one.
+    let abort2 = env.write_buffer(&bulkhead_core::floor::ABORT_ELF, &stranger);
+    env.set_buffer_authority(&abort2, &stranger, &f.authority);
+    s.run(&mut env, "stage abort", f.stage_abort(&abort2), &[], &[]);
+    env.next_slot();
+
+    // Stopped again: a fix the quorum approves goes live at once.
+    env.ok(&[f.abort(&gs[0], &abort2, None)], &[&p.g[0]]);
+    env.next_slot();
+    let fix = env.write_buffer(&honest_v1(), &p.owner);
+    env.set_buffer_authority(&fix, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), RESTORE, &fix, &[], Some(&fix))], &[&p.owner]);
+    s.run(&mut env, "approve", f.approve(&gs[1..3]), &[], &[
+        role(1, guardians.clone(), "any quorum"),
+        role(2, guardians.clone(), "any quorum"),
+    ]);
+    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &payer), &[], &[spill(4)]);
+    env.next_slot();
+
+    // A raised delay applies at once; a quorum of the others ejects one guardian.
+    let zero = solana_address::Address::default();
+    let longer = (7 * DAY).to_le_bytes();
+    s.run(&mut env, "propose a longer delay", f.propose(&p.owner.pubkey(), SET_DELAY, &zero, &longer, None), &[], &[]);
+    s.run(&mut env, "eject", f.eject(2, &gs[0..2]), &[], &[]);
+
+    // Registering another program; releasing A's authority (closes A's config).
+    let team3 = Keypair::new();
+    env.fund(&team3);
+    let (program3, _) = env.deploy(&honest_v1(), &team3, 8192);
+    let f3 = Floor::new(env.floor, program3);
+    s.key(&team3);
+    let gs3: Vec<_> = p.g.iter().map(|k| k.pubkey()).collect();
+    let reg = f3.register(&payer, &team3.pubkey(), &p.owner.pubkey(), &gs3, 2, 7 * DAY, 3 * DAY);
+    s.run(&mut env, "register", reg, &[], &[any(0, "rent payer: any funded signer")]);
+    let new_auth = Keypair::new().pubkey();
+    env.ok(&[f.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &new_auth, &[], None)], &[&p.owner]);
+    env.advance(7 * DAY);
+    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth)), &[], &[]);
+
+    println!("{} substitutions over 14 Floor transactions; {} needed a key nobody here holds", s.attempts, s.unsignable);
+    assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
+}
+
+#[test]
+fn a_stop_must_name_the_pinned_snapshot() {
+    // Finding 53: the snapshot account was optional, and a stop without it
+    // left the snapshot unusable, so whoever stopped the program decided that
+    // the guardian quorum could not restore it by itself. While a snapshot is
+    // pinned, the stop must now name it.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let without = f.abort(&gs[0], &p.abort_buffer, None);
+    assert_eq!(env.fails(&[without], &[&p.g[0]]), err::SNAPSHOT_MISMATCH);
+    let wrong = f.abort(&gs[0], &p.abort_buffer, Some(&p.abort_buffer));
+    assert_eq!(env.fails(&[wrong], &[&p.g[0]]), err::SNAPSHOT_MISMATCH);
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    assert_eq!(read_config(&env, f).snapshot_valid, 1);
+    // So the quorum restores by itself, as G8 says.
+    env.next_slot();
+    let r = f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &gs[1..3]);
+    env.ok(&[r], &[&p.g[1], &p.g[2]]);
+    env.next_slot();
+    assert!(env.call(&f.program).is_ok());
 }

@@ -418,11 +418,18 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     let k = if rng.below(2) == 0 { md.guardians[rng.below(md.guardians.len() as u64) as usize] } else { rng.below(5) as usize };
                     (gk[k], md.live_guardian(k, now).is_some())
                 };
-                let snap = if rng.below(4) == 0 { None } else { snapshot_buffer };
+                // The snapshot account: none, a wrong one, or the pinned one.
+                let snap = match rng.below(8) {
+                    0 => None,
+                    1 => Some(abort_buffer),
+                    _ => snapshot_buffer,
+                };
                 let r = env.send(&[f.abort(&signer.pubkey(), &abort_buffer, snap.as_ref())], &[signer]);
-                let ok = ok_signer && !md.aborted && md.abort_staged;
+                // While a snapshot is pinned, the stop must name it (finding 53).
+                let named = md.snapshot.is_none() || (snap.is_some() && snap == snapshot_buffer);
+                let ok = ok_signer && !md.aborted && md.abort_staged && named;
                 if ok {
-                    md.snapshot_valid = md.snapshot.is_some() && snap.is_some() && md.snapshot == Some(md.live);
+                    md.snapshot_valid = md.snapshot.is_some() && md.snapshot == Some(md.live);
                     md.live = Code::Abort;
                     md.aborted = true;
                     md.abort_staged = false;
