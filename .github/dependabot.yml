@@ -1,0 +1,18 @@
+# Keeps the SHA-pinned actions in .github/workflows current: one grouped pull
+# request a month, and only for releases at least a week old (a compromised
+# release is usually caught and pulled within days). Rust dependencies are
+# pinned on purpose (the program binaries must stay reproducible); RustSec
+# advisories against them fail the `deny` job instead, weekly.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

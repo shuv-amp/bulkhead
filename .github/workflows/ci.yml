@@ -1,16 +1,92 @@
 name: ci
+# Every pull request, and a deep run every Monday on main.
+#
+# Minutes. The repository is private, so GitHub-hosted minutes come from the
+# plan's monthly quota (Linux runners only, 1x rate). To spend them only where
+# they buy assurance:
+# - a new push to a pull request cancels the run it supersedes;
+# - draft pull requests run only `check`; the rest runs when marked ready;
+# - each job runs only when something it reads changed (scripts/ci-changes.sh);
+#   a skipped job counts as passed, and the weekly run does everything;
+# - nothing runs again on main after a merge: the pull request was tested as
+#   merged with an up-to-date main (the branch ruleset requires it);
+# - dependency builds and the fuzz corpus are cached (actions/cache, within
+#   the 10 GB per repository that is not billed).
+#
+# The required check is `ci`, which passes only if every job passed or was
+# skipped by the rules above.
 on:
-  push:
-    branches: [main]
   pull_request:
-permissions:
-  contents: read
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      deep:
+        description: "Run every job at weekly depth (25 min of fuzzing per target, devnet check)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY: nightly-2026-08-21
+  # The weekly run, or one started by hand with `deep`.
+  DEEP: ${{ github.event_name == 'schedule' || inputs.deep == true }}
+
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # the list of changed files
+    outputs:
+      heavy: ${{ steps.jobs.outputs.heavy }}
+      programs: ${{ steps.jobs.outputs.programs }}
+      fuzz: ${{ steps.jobs.outputs.fuzz }}
+      kani: ${{ steps.jobs.outputs.kani }}
+      mutants: ${{ steps.jobs.outputs.mutants }}
+      deny: ${{ steps.jobs.outputs.deny }}
+      workflows: ${{ steps.jobs.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci-changes.sh
+          sparse-checkout-cone-mode: false
+      - name: Jobs this change can affect
+        id: jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            # The files of the pull request, from the API (no history to fetch).
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > files.txt
+            echo "changed files: $(wc -l < files.txt)"
+            scripts/ci-changes.sh < files.txt | tee -a "$GITHUB_OUTPUT"
+            echo "heavy=$([ "$DRAFT" = true ] && echo false || echo true)" | tee -a "$GITHUB_OUTPUT"
+          else
+            for j in programs fuzz kani mutants deny workflows heavy; do echo "$j=true"; done | tee -a "$GITHUB_OUTPUT"
+          fi
+
   check:
+    # The core's tests, the Python reference against the Rust core
+    # (differential), golden vectors, the model, and the Cloud code.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Toolchains (Rust pinned by rust-toolchain.toml; Python and Node from the image)
@@ -21,64 +97,273 @@ jobs:
         run: cargo build --release -p bulkhead-diff
       - name: All checks
         env:
-          CASES: "100000"
-          BULKHEAD_CASES: "20000"
+          CASES: ${{ env.DEEP == 'true' && '1000000' || '100000' }}
+          BULKHEAD_CASES: ${{ env.DEEP == 'true' && '200000' || '20000' }}
         run: scripts/check.sh
 
   programs:
     # Floor, Vault and Harbor built for sBPF v3 and run in LiteSVM (the real
     # agave runtime and loader), then the validator end-to-end run with the
     # Cloud guardian. Unaudited programs; nothing here touches a public cluster.
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.programs == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Toolchains
         run: |
           rustup toolchain install 1.92.0 --profile minimal --component rustfmt,clippy
-          rustup toolchain install nightly-2026-08-21 --profile minimal
+          rustup toolchain install "$NIGHTLY" --profile minimal
       - name: Agave CLI v4.3.0 (cargo-build-sbf, solana-test-validator)
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      # The LiteSVM harness's dependencies (agave) take most of this job to
+      # compile. Cached by exact lockfile, never restored from an older one, so
+      # the cache cannot grow; the programs themselves are always built fresh.
+      - name: Cache the LiteSVM harness build and platform-tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cache/solana/v1.57
+            programs/tests/target
+          key: programs-${{ runner.os }}-${{ hashFiles('programs/tests/Cargo.lock', 'programs/tests/rust-toolchain.toml', 'Cargo.lock') }}
       - name: Build, LiteSVM tests, end to end
         env:
           E2E: "1"
         run: scripts/check-programs.sh
+      - name: Program hashes
+        run: |
+          (cd target/deploy && sha256sum ./*.so) | tee SHA256SUMS
+          { echo '### Program builds (Linux x86_64, Agave v4.3.0, platform-tools v1.57)'; echo '```'; cat SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cp SHA256SUMS target/deploy/
+      - name: Keep the binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: programs
+          path: |
+            target/deploy/*.so
+            target/deploy/SHA256SUMS
+          retention-days: 14
 
   fuzz:
     # Coverage-guided fuzzing of the byte parsers and the full-width limiter
-    # and ledger (fuzz/): 60 s per target, every target in parallel.
+    # and ledger (fuzz/), every target in parallel: 60 s each on a pull
+    # request, 25 min each weekly. The corpus carries over between runs, so
+    # each run starts where the last one stopped; the weekly run minimizes it.
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Toolchain and cargo-fuzz
-        run: |
-          rustup toolchain install nightly-2026-08-21 --profile minimal
-          cargo install --locked cargo-fuzz@0.13.2
+      - name: Nightly toolchain
+        run: rustup toolchain install "$NIGHTLY" --profile minimal
+      - name: Cache cargo-fuzz
+        id: cargo-fuzz
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-0.13.2-${{ runner.os }}
+      - name: Install cargo-fuzz
+        if: steps.cargo-fuzz.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-fuzz@0.13.2
+      - name: Restore the corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
       - name: Fuzz
+        env:
+          SECONDS_PER: ${{ env.DEEP == 'true' && '1500' || '60' }}
         run: scripts/fuzz.sh
+      - name: Minimize the corpus
+        if: env.DEEP == 'true'
+        run: |
+          cd fuzz
+          for t in corpus/*; do cargo +"$NIGHTLY" fuzz cmin -O "$(basename "$t")" "$t" >/dev/null 2>&1; done
+          du -sh corpus/* | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the corpus
+        if: always() && !cancelled()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
       - name: Keep crashing inputs
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
+          retention-days: 30
 
   kani:
+    # Bounded model checking of the core's 14 harnesses (proofs.rs). Kani is
+    # installed at a pinned version from crates.io, not through an action.
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.kani == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Kani 0.68.0
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          cargo install --locked kani-verifier@0.68.0
+          cargo kani setup
       - name: Kani bounded proofs (bulkhead-core)
-        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        run: cargo kani -p bulkhead-core -j 2 --output-format terse
+
+  mutants:
+    # Mutation testing of the lines a pull request changes in the core: every
+    # mutant there must fail a test. Known equivalent mutants are excluded in
+    # .cargo/mutants.toml, each with its reason in docs/09 §6.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.changes.outputs.heavy == 'true' && needs.changes.outputs.mutants == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: read # the diff to mutate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          working-directory: .
-          args: -p bulkhead-core
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Cache cargo-mutants
+        id: cargo-mutants
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-27.1.0-${{ runner.os }}
+      - name: Install cargo-mutants
+        if: steps.cargo-mutants.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-mutants@27.1.0
+      - name: Mutants on the changed lines
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" > pr.diff
+          JOBS=2 scripts/mutants.sh --in-diff pr.diff
+      - name: Report
+        if: always()
+        run: |
+          [ -d mutants.out ] || exit 0
+          for f in caught missed timeout unviable; do
+            echo "$f: $(wc -l < "mutants.out/$f.txt" 2>/dev/null || echo 0)"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -s mutants.out/missed.txt ]; then
+            { echo '### Missed mutants'; echo '```'; cat mutants.out/missed.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deny:
+    # Supply chain: RustSec advisories, licences, crate sources, on all three
+    # lockfiles. Weekly as well, since new advisories appear without a change here.
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Cache cargo-deny
+        id: cargo-deny
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.20.2-${{ runner.os }}
+      - name: Install cargo-deny
+        if: steps.cargo-deny.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-deny@0.20.2
+      - name: cargo deny
+        run: scripts/deny.sh
+
+  workflows:
+    # The workflows themselves: actionlint (syntax, expressions, shell) and
+    # zizmor (injection, credential persistence, unpinned actions, excessive
+    # permissions).
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint 1.7.12
+        run: |
+          GOBIN="$HOME/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$HOME/bin/actionlint" -color
+      - name: zizmor 1.30.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pipx run zizmor==1.30.1 --format plain .github/workflows
+
+  devnet:
+    # Weekly: build the programs here and require devnet to run exactly
+    # these bytes (scripts/verify-deployed.sh), and the Solana Foundation's
+    # pinned build image to produce them too. Catches an upgrade that did not
+    # come from main, or a build that stopped being reproducible.
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true' && (github.event_name == 'schedule' || inputs.deep == true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Agave CLI v4.3.0
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Devnet runs main's build
+        run: scripts/verify-devnet.sh
+      - name: The Solana verifiable-build image gives the same bytes
+        run: |
+          scripts/build-programs-docker.sh
+          diff <(cd target/deploy && sha256sum ./*.so) target/docker/SHA256SUMS
+
+  ci:
+    # The one required check: every job passed, or was skipped because the
+    # change cannot affect it.
+    if: always()
+    needs: [changes, check, programs, fuzz, kani, mutants, deny, workflows, devnet]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job passed or was not needed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null

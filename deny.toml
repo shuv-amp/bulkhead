@@ -1,0 +1,44 @@
+# cargo-deny (embarkstudios.github.io/cargo-deny): known vulnerabilities,
+# licences, banned crates and where every crate comes from. CI runs it on the
+# three lockfiles (scripts/deny.sh); this policy covers the root workspace
+# (the core and the programs that ship) and fuzz/. The LiteSVM test harness,
+# which never ships, has its own: programs/tests/deny.toml.
+
+[advisories]
+unmaintained = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "Unlicense",
+  "Unicode-3.0",
+  "NCSA",
+]
+confidence-threshold = 0.9
+# One policy for several lockfiles: a licence one of them lacks is fine.
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

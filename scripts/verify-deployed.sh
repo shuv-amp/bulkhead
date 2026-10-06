@@ -5,8 +5,9 @@
 #   scripts/verify-deployed.sh https://api.devnet.solana.com <floor-id>=bulkhead_floor <vault-id>=bulkhead_vault
 #
 # Builds with scripts/build-programs.sh (pinned Agave v4.3.0, platform-tools
-# v1.57, sBPF v3; the build is deterministic, so a clean rebuild reproduces
-# the same bytes), dumps each deployed program, and requires the on-chain
+# v1.57, sBPF v3; the build is deterministic on a given host, so a clean
+# rebuild reproduces the same bytes; released binaries are Linux x86_64
+# builds, see scripts/verify-devnet.sh), dumps each deployed program, and requires the on-chain
 # code to be the local binary followed only by zero padding (the same rule as
 # Floor's snapshot check, bulkhead_core::floor::snapshot_matches).
 set -euo pipefail
