@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ingestSignatures, morePages, pageQuery, requireTransaction, signatureWalk } from "../guardian/follow.mjs";
+import { cursorGone, ingestSignatures, morePages, pageQuery, requireTransaction, signatureWalk, signatureWalkSinceSlot } from "../guardian/follow.mjs";
 
 test("a full page is not the end of a live walk", () => {
   const page = Array.from({ length: 100 }, (_, i) => ({ signature: `s${i}`, blockTime: 1_000 - i }));
@@ -74,4 +74,44 @@ test("a null getTransaction result is retried instead of treated as empty logs",
   await assert.rejects(requireTransaction(rpc, "missing"), /returned no transaction/);
   assert.deepEqual(await requireTransaction(rpc, "missing"), { meta: { logMessages: [] } });
   assert.equal(calls, 2);
+});
+
+// Finding 49: on a quiet protocol the node forgets the cursor signature and
+// every `until: <cursor>` query fails; the guardian then read nothing new.
+
+test("cursorGone: only the node's 'not found' for this cursor", () => {
+  const gone = new Error('getSignaturesForAddress: {"code":-32020,"message":"Transaction SIGX not found"}');
+  gone.rpcError = { code: -32020, message: "Transaction SIGX not found" };
+  assert.equal(cursorGone(gone, "SIGX"), true);
+  assert.equal(cursorGone(gone, "OTHER"), false, "another signature's error");
+  assert.equal(cursorGone(new Error("getSignaturesForAddress: fetch failed"), "SIGX"), false, "a network failure");
+  assert.equal(cursorGone(gone, undefined), false, "no cursor");
+});
+
+test("reading on from the cursor's slot: newer slots, and the unseen rest of its own", async () => {
+  // Newest-first, two per page; the cursor was slot 10, where A was ingested.
+  const all = [
+    { signature: "E", slot: 13 }, { signature: "D", slot: 12 },
+    { signature: "C", slot: 10 }, { signature: "A", slot: 10 },
+    { signature: "Z", slot: 9 }, { signature: "Y", slot: 8 },
+  ];
+  const queries = [];
+  const fetchPage = async (q) => {
+    queries.push(q);
+    assert.equal(q.until, undefined, "no until: the node has forgotten it");
+    const from = q.before ? all.findIndex((s) => s.signature === q.before) + 1 : 0;
+    return all.slice(from, from + q.limit);
+  };
+  const got = await signatureWalkSinceSlot(fetchPage, { slot: 10, seen: new Set(["A"]), limit: 2 });
+  assert.deepEqual(got.map((s) => s.signature), ["E", "D", "C"]);
+  assert.equal(queries.length, 3, "stops at the page that reaches before slot 10");
+  // Nothing new: nothing returned, and one short read.
+  const quiet = await signatureWalkSinceSlot(async () => [{ signature: "A", slot: 10 }], { slot: 10, seen: new Set(["A"]) });
+  assert.deepEqual(quiet, []);
+});
+
+test("checkpoints carry the signature's slot", async () => {
+  const seen = [];
+  await ingestSignatures([{ signature: "B", slot: 5 }, { signature: "A", slot: 4 }], async () => {}, (sig, s) => seen.push([sig, s.slot]));
+  assert.deepEqual(seen, [["A", 4], ["B", 5]]);
 });

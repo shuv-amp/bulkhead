@@ -20,6 +20,15 @@ export const DEFAULT_POLICY = {
    * ceiling, so 5% / 1.5 ≈ 3.3% a day). */
   freezeFractionOfWorst24h: 0.5,
   freezeSecs: 86_400,
+  /** Incident hold: after this guardian freezes for a breach, renew the
+   * freeze before it ends, until a guardian quorum unfreezes (the program's
+   * only early unfreeze) or this many seconds pass. A stolen admin key stays
+   * stolen when a 24h freeze ends; without the hold, a patient attacker takes
+   * one more burst every day. Owners withdraw their own deposits while frozen
+   * (G2). 0 turns it off. */
+  holdIncidentS: 7 * 86_400,
+  /** Renew when the freeze has less than this left. */
+  holdRenewBeforeS: 3_600,
   /** Owners whose unbacked payouts are expected (fee collectors, market makers). */
   allowlistedOwners: [],
   /** While frozen, cancel tickets to non-allowlisted owners. */
@@ -79,7 +88,7 @@ export function floorAlerts(fl) {
 }
 
 export function newState() {
-  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false };
+  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false, incidentSince: null };
 }
 
 /** Keep ticket cancellation state outside the rolling outflow windows. */
@@ -476,6 +485,39 @@ export function pendingUpgradeVeto(floor, policy, already) {
 }
 
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
+/** A guardian freeze landed: an incident is open from then (renewals keep its start). */
+export function openIncident(state, now) {
+  if (state.incidentSince == null) state.incidentSince = now;
+}
+
+/**
+ * The protocol's freeze moved from `prevUntil` to `until`. A freeze that ended
+ * before it was due was lifted by a guardian quorum: that closes the incident.
+ * One that simply ran out does not.
+ */
+export function observeFreezeEnd(state, prevUntil, until, now) {
+  if (prevUntil > now && until <= now) state.incidentSince = null;
+}
+
+/**
+ * The renewal the incident hold needs now, or null: once the freeze has less
+ * than `holdRenewBeforeS` left (or has already run out, say while this
+ * guardian was down), freeze again, never past the hold's end. The program
+ * extends a freeze to the later end, so a renewal never shortens one.
+ */
+export function incidentHold(state, chainFrozenUntil, now, policy = DEFAULT_POLICY) {
+  const holdS = policy.holdIncidentS ?? 0;
+  if (!holdS || state.incidentSince == null || state.freezing) return null;
+  const end = state.incidentSince + holdS;
+  if (now >= end) {
+    state.incidentSince = null;
+    return null;
+  }
+  if (chainFrozenUntil - now > (policy.holdRenewBeforeS ?? 3_600)) return null;
+  const secs = Math.min(policy.freezeSecs, end - now);
+  return { type: "freeze", secs, reason: `incident hold: frozen since ${state.incidentSince}; renewed until a guardian quorum unfreezes, at most until ${end}` };
+}
+
 export function observeProtocolFreeze(state, until, now, policy = DEFAULT_POLICY, act = true) {
   state.frozenUntil = Math.max(state.frozenUntil, until);
   state.freezing = false;
@@ -528,6 +570,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       if ((e.scope ?? 0) !== 0) break;
       state.frozenUntil = 0;
       state.freezing = false;
+      state.incidentSince = null; // only a guardian quorum unfreezes
       break;
     case "ticket_closed":
       state.pendingTickets.delete(e.ticketId);

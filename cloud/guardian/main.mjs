@@ -41,12 +41,12 @@
 // guards, each inside its chain interval. A failed one is retried on a
 // backoff; a key that is already stale or absent is reported, not resent.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { Rpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
-import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
+import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { ingestSignatures, signatureWalk, signatureWalkSinceSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 
@@ -66,6 +66,26 @@ const vaultOf = new Map(watched.map((v) => [v.mint, b58encode(v.vault)]));
 // Only these programs' events count: any program can write "Program data:".
 const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
 const state = newState();
+// The incident hold must survive a restart (a deploy, a crash): its start is
+// kept beside the config, per protocol.
+const stateFile = cfg.stateFile ?? `${process.argv[2]}.state.json`;
+let savedIncident = null;
+try {
+  const saved = JSON.parse(readFileSync(stateFile, "utf8"));
+  if (saved.protocol === b58encode(vc.protocol) && Number.isFinite(saved.incidentSince)) state.incidentSince = savedIncident = saved.incidentSince;
+} catch {
+  // no saved state: no incident open
+}
+function saveIncident() {
+  if (state.incidentSince === savedIncident) return;
+  try {
+    writeFileSync(`${stateFile}.tmp`, JSON.stringify({ protocol: b58encode(vc.protocol), incidentSince: state.incidentSince }), { mode: 0o600 });
+    renameSync(`${stateFile}.tmp`, stateFile);
+    savedIncident = state.incidentSince;
+  } catch (e) {
+    console.log(JSON.stringify({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state: ${e.message}` }));
+  }
+}
 const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
 
 // Programs under Floor whose readiness the bot reports (A5).
@@ -279,6 +299,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
     }
     const sig = await guardianSend(ixs);
     const confirmed = Date.now();
+    if (action.type === "freeze") openIncident(state, wallNow());
     log({
       action: action.type,
       reason: action.reason,
@@ -463,6 +484,8 @@ async function syncFromChain(act, { startup = false } = {}) {
   if (!acc) return;
   const p = decodeProtocol(acc.bytes);
   const now = wallNow();
+  observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil, now);
+  lastChainFrozenUntil = p.frozenUntil;
   state.frozenUntil = p.frozenUntil;
   pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now);
   if (p.frozenUntil > now) state.freezing = false;
@@ -485,7 +508,17 @@ async function syncFromChain(act, { startup = false } = {}) {
   } else if (sweptFreezeUntil && sweptFreezeUntil <= now) {
     sweptFreezeUntil = 0;
   }
+  const hold = act ? incidentHold(state, p.frozenUntil, now, policy) : null;
+  if (hold) {
+    state.freezing = true;
+    await applyActions([hold], { reason: hold.reason }, now);
+  }
+  saveIncident();
 }
+
+// The protocol's freeze end at the last sync: an end that moves earlier, before
+// it was due, is a guardian quorum's unfreeze (observeFreezeEnd).
+let lastChainFrozenUntil = 0;
 
 /** Log each Floor program's missing pieces, once per change (A5). */
 async function checkFloor() {
@@ -625,6 +658,7 @@ async function step(name, run) {
 
 async function main() {
   log({ msg: "guardian started", guardian: guardian.address, protocol: b58encode(vc.protocol), policy });
+  if (state.incidentSince != null) log({ msg: "incident hold resumed from saved state", incidentSince: state.incidentSince, stateFile });
   await refreshWorstCase();
   let heartbeatAt = await beat();
   const oldest = wallNow() - DAY_S;
@@ -642,6 +676,11 @@ async function main() {
   log({ msg: "caught up", signatures: inWindow.length });
   await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
+  // The cursor's slot, and what was ingested in it: enough to read on if the
+  // node forgets the cursor signature (cursorGone).
+  let cursorSlot = history[0]?.slot ?? 0;
+  let cursorSeen = new Set(history.filter((s) => s.slot === cursorSlot).map((s) => s.signature));
+  let goneLogged = null;
   let lastAttest = Date.now();
   let lastFloorCheck = Date.now();
   for (;;) {
@@ -661,8 +700,25 @@ async function main() {
       }
     });
     await step("ingest", async () => {
-      const sigs = await signatures(cursor, null);
-      await ingest(sigs, true, (signature) => { cursor = signature; });
+      let sigs;
+      try {
+        sigs = await signatures(cursor, null);
+      } catch (e) {
+        if (!cursorGone(e, cursor)) throw e;
+        if (goneLogged !== cursor) {
+          goneLogged = cursor;
+          log({ level: "warn", msg: "the node no longer has the cursor signature; reading on from its slot", cursor, slot: cursorSlot });
+        }
+        sigs = await signatureWalkSinceSlot((q) => rpc.call("getSignaturesForAddress", [b58encode(vc.protocol), q]), { slot: cursorSlot, seen: cursorSeen });
+      }
+      await ingest(sigs, true, (signature, s) => {
+        cursor = signature;
+        if (s.slot !== cursorSlot) {
+          cursorSlot = s.slot;
+          cursorSeen = new Set();
+        }
+        cursorSeen.add(signature);
+      });
     });
     if (pendingVetoes.length && Date.now() >= vetoNotBefore) {
       await step("veto retry", async () => {
