@@ -47,7 +47,7 @@
 // backoff; a key that is already stale or absent is reported, not resent.
 
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { Rpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
@@ -58,7 +58,15 @@ import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedO
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
-const rpc = new Rpc(cfg.rpc);
+// With backup endpoints, reads and sends move to the next endpoint when one
+// cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
+// only in the log: RPC URLs often carry an API key.
+const hostOf = (url) => { try { return new URL(url).host; } catch { return "(endpoint)"; } };
+const rpc = cfg.rpcs?.length
+  ? new FailoverRpc([cfg.rpc, ...cfg.rpcs], {
+    onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, cause: e?.message?.slice(0, 160) }),
+  })
+  : new Rpc(cfg.rpc);
 // Extra endpoints every guardian transaction is also sent to (optional).
 const extraRpcs = (cfg.rpcs ?? []).map((url) => new Rpc(url));
 const guardian = Keypair.load(cfg.guardianKey);
