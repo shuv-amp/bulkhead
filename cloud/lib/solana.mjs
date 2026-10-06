@@ -367,8 +367,34 @@ export function decodeVault(d) {
       exitExpiresS: Number(r.i64()),
       exitVetoed: r.u8() === 1,
     });
+    // The limits' change-version counter (older builds: padding, so 0).
+    if (d.length >= r.o + 4) v.limitsVersion = r.u32();
   }
   return v;
+}
+
+/** A Vault `Change` account (programs/vault/src/state.rs): a proposed loosening. */
+export function decodeChange(d) {
+  if (d.length < 448 || text(d.slice(0, 8)) !== "BHCHNG01") throw new Error("not a Bulkhead change account");
+  const r = new Reader(d, 8);
+  const c = { protocol: b58encode(r.key()), id: r.u64(), kind: r.u8(), vetoed: r.u8() === 1, executed: r.u8() === 1 };
+  r.u8(); // bump
+  Object.assign(c, {
+    target: b58encode(r.key()),
+    proposer: b58encode(r.key()),
+    createdS: Number(r.i64()),
+    executableS: Number(r.i64()),
+    expiresS: Number(r.i64()),
+  });
+  r.o += 2 + 300; // payload length and payload
+  c.baseVersion = r.u32();
+  return c;
+}
+
+/** The change-version counter of a Vault `Asset` account (`["asset", protocol, mint]`). */
+export function assetVersion(d) {
+  if (text(d.slice(0, 8)) !== "BHASSET1") throw new Error("not a Bulkhead asset account");
+  return new DataView(d.buffer, d.byteOffset, d.byteLength).getUint32(8 + 64 + 53 + 2, true);
 }
 
 export function decodeFloor(d) {

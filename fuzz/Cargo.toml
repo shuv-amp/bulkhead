@@ -1,0 +1,80 @@
+[package]
+name = "bulkhead-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Coverage-guided fuzzing (cargo-fuzz / libFuzzer) of Bulkhead's byte parsers and core arithmetic."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+bulkhead-core = { path = "../crates/bulkhead-core" }
+bulkhead-vault = { path = "../programs/vault" }
+bulkhead-floor = { path = "../programs/floor" }
+
+# Its own workspace: cargo-fuzz needs nightly and sanitizer flags.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "mint_policy"
+path = "fuzz_targets/mint_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_account"
+path = "fuzz_targets/token_account.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "price_update"
+path = "fuzz_targets/price_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_state"
+path = "fuzz_targets/vault_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "floor_config"
+path = "fuzz_targets/floor_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "loader_parsers"
+path = "fuzz_targets/loader_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "limiter"
+path = "fuzz_targets/limiter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ledger"
+path = "fuzz_targets/ledger.rs"
+test = false
+doc = false
+bench = false

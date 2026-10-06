@@ -6,6 +6,7 @@
 import { Rpc, decodeProtocol, decodeVault } from "../lib/solana.mjs";
 import { VaultClient } from "../lib/bulkhead.mjs";
 import { attestLocal } from "../lib/limits.mjs";
+import { readOpenChanges, openExit, duration } from "../lib/changes.mjs";
 import { Keypair } from "../lib/signer.mjs";
 
 const [url, vaultProgram, protocolProgram, mints, payerPath] = process.argv.slice(2);
@@ -17,6 +18,17 @@ const now = await rpc.call("getBlockTime", [slot]);
 const live = p.guardians.filter((_, i) => now - p.lastHeartbeat[i] <= p.heartbeatIntervalS).length;
 const fmt = (raw, d) => (Number(raw) / 10 ** d).toLocaleString("en-US", { maximumFractionDigits: 0 });
 console.log(`protocol  sealed ${p.sealed}, frozen ${p.frozenUntil > now ? `for ${((p.frozenUntil - now) / 3600).toFixed(1)}h` : "no"}, live guardians ${live}/${p.guardians.length} (quorum ${p.threshold}), loosening waits ${p.loosenDelayS / 3600}h`);
+// Every loosening has a countdown (docs/02 §4).
+try {
+  const open = await readOpenChanges(rpc, vc, p, now);
+  if (!open.length) console.log("          pending loosenings: none");
+  for (const c of open) {
+    const when = c.state === "stale" ? "stale (can never execute)" : c.state === "waiting" ? `executable in ${duration(c.secondsLeft)}` : `executable NOW, for ${duration(c.secondsLeft)} more`;
+    console.log(`          pending loosening #${c.id} ${c.kindName}: ${when}; ${live} live guardian(s) can veto`);
+  }
+} catch (e) {
+  console.log(`          pending loosenings: unknown (${e.message})`);
+}
 let mismatches = 0;
 for (const mint of mints.split(",")) {
   const { vault, vaultTokens } = await vc.vault(mint);
@@ -26,6 +38,8 @@ for (const mint of mints.split(",")) {
   const d = v.decimals;
   console.log(`vault     ${mint.slice(0, 8)}… balance ${fmt(a.balance, d)}`);
   console.log(`          worst case right now: ${fmt(a.availableNow, d)} instantly, at most ${fmt(a.worst1h, d)} in 1h, ${fmt(a.worst24h, d)} in 24h`);
+  const exit = openExit(v, now);
+  if (exit) console.log(`          lifeboat exit of ${fmt(exit.amount, d)}: ${exit.state === "waiting" ? `executable in ${duration(exit.secondsLeft)}` : `executable NOW, for ${duration(exit.secondsLeft)} more`}; any live guardian can veto`);
   console.log(`          pending tickets ${a.pendingTickets} (${fmt(a.queued, d)}); paid out backed ${fmt(v.backedOut, d)} / unbacked ${fmt(v.unbackedOut, d)}; cancelled ${fmt(v.cancelled, d)}`);
   if (payerPath) {
     const onchain = await vc.attest(rpc, Keypair.load(payerPath).publicKey, mint);

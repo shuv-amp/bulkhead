@@ -37,15 +37,22 @@ pub fn account_info(a: &AccountView) -> Result<([u8; 32], [u8; 32], u64), Progra
         return Err(VaultError::WrongTokenProgram.into());
     }
     let d = a.try_borrow()?;
+    token_account_fields(&d, a.owner() == &TOKEN_2022)
+}
+
+/// `account_info` over the raw bytes of an account a token program owns
+/// (`token_2022`: owned by Token-2022). Pure, so it is fuzzed (`fuzz/`).
+pub fn token_account_fields(
+    d: &[u8],
+    token_2022: bool,
+) -> Result<([u8; 32], [u8; 32], u64), ProgramError> {
     if d.len() < ACCOUNT_BASE_LEN || d.len() == MULTISIG_LEN || d[108] == 0 {
         return Err(VaultError::WrongAccountType.into());
     }
     // A classic token account is exactly 165 bytes. Anything longer is
     // Token-2022 and must be an Account (type 2), not a mint or a multisig:
     // those pass a length check and then fail, or worse, get misread.
-    if d.len() > ACCOUNT_BASE_LEN
-        && (a.owner() != &TOKEN_2022 || d[ACCOUNT_BASE_LEN] != ACCOUNT_TYPE_ACCOUNT)
-    {
+    if d.len() > ACCOUNT_BASE_LEN && (!token_2022 || d[ACCOUNT_BASE_LEN] != ACCOUNT_TYPE_ACCOUNT) {
         return Err(VaultError::WrongAccountType.into());
     }
     let mint: [u8; 32] = d[0..32].try_into().unwrap();
@@ -76,16 +83,20 @@ pub fn checked_mint_decimals(
         return Err(VaultError::WrongTokenProgram.into());
     }
     let d = mint.try_borrow()?;
+    mint_policy_decimals(&d, token_program == &TOKEN_2022)
+}
+
+/// `checked_mint_decimals` over the raw bytes of a mint a token program owns
+/// (`token_2022`: owned by Token-2022). Pure, so the extension walk is fuzzed
+/// against an independent statement of the policy (`fuzz/`).
+pub fn mint_policy_decimals(d: &[u8], token_2022: bool) -> Result<u8, ProgramError> {
     if d.len() < MINT_BASE_LEN || d.len() == MULTISIG_LEN || d[45] != 1 {
         return Err(VaultError::WrongMint.into());
     }
     let decimals = d[44];
     if d.len() > MINT_BASE_LEN {
         // Token-2022 mint with extensions: padding to 165, account type, TLV.
-        if token_program != &TOKEN_2022
-            || d.len() <= ACCOUNT_BASE_LEN
-            || d[ACCOUNT_BASE_LEN] != ACCOUNT_TYPE_MINT
-        {
+        if !token_2022 || d.len() <= ACCOUNT_BASE_LEN || d[ACCOUNT_BASE_LEN] != ACCOUNT_TYPE_MINT {
             return Err(VaultError::WrongMint.into());
         }
         let mut o = ACCOUNT_BASE_LEN + 1;

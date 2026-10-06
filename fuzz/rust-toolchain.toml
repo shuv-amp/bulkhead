@@ -1,0 +1,3 @@
+# cargo-fuzz needs nightly (sanitizer flags); the same pin as programs/tests.
+[toolchain]
+channel = "nightly-2026-08-21"

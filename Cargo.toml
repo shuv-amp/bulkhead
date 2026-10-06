@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/bulkhead-core", "crates/bulkhead-diff", "programs/floor", "programs/vault", "programs/harbor"]
-exclude = ["programs/tests"]
+exclude = ["programs/tests", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
