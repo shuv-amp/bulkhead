@@ -263,7 +263,11 @@ export class Rpc {
         await new Promise((res) => setTimeout(res, 1_000 * 2 ** Math.min(attempt, 3)));
         continue;
       }
-      if (j.error) throw new Error(`${method}: ${JSON.stringify(j.error)}`);
+      if (j.error) {
+        const err = new Error(`${method}: ${JSON.stringify(j.error)}`);
+        err.rpcError = j.error; // { code, message, data }: -32002 is a refused preflight
+        throw err;
+      }
       return j.result;
     }
   }

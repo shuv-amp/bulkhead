@@ -95,4 +95,27 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
   throw new Error(`transaction ${signature} not confirmed`);
 }
 
+/** JSON-RPC code for "Transaction simulation failed": the node refused it before it ran. */
+export const PREFLIGHT_REFUSED = -32002;
+
+/**
+ * `send`, but a compute budget can never be what stops the transaction. If a
+ * node refuses it in simulation, the same instructions go once more without
+ * the budget, and `onFallback(error)` is told. The budget only buys priority
+ * under load. On 1 Oct on devnet, a mistyped Compute Budget id made every
+ * guardian freeze fail simulation for 5½ minutes while an attack was queued
+ * (`docs/09`, finding 47). When the instructions themselves are refused (a
+ * stale guardian, say) the second attempt fails too, and its error is thrown.
+ */
+export async function sendWithFallback(rpc, payer, instructions, extraSigners = [], opts = {}, onFallback = () => {}) {
+  try {
+    return await send(rpc, payer, instructions, extraSigners, opts);
+  } catch (e) {
+    if (!(opts.computeUnits > 0) || e.rpcError?.code !== PREFLIGHT_REFUSED) throw e;
+    const signature = await send(rpc, payer, instructions, extraSigners, { ...opts, computeUnits: 0, microLamports: 0 });
+    onFallback(e);
+    return signature;
+  }
+}
+
 export { key };
