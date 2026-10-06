@@ -69,6 +69,7 @@
 <script type="module">
 import { Rpc, decodeProtocol, decodeVault, decodeFloor } from "../lib/solana.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
+import { readOpenChanges, openExit, duration, FLOOR_PROPOSAL_KINDS } from "../lib/changes.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 
 const form = document.getElementById("f");
@@ -89,6 +90,47 @@ const until = (s) => {
   return d <= 0 ? "no" : d < 5400 ? `yes, ${Math.round(d / 60)} more minutes` : `yes, ${Math.round(d / 3600)} more hours`;
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+// Every loosening has a countdown, and says who can stop it (docs/02 §4).
+async function changesRows(rpc, vc, protocol, now, live) {
+  let open;
+  try {
+    open = await readOpenChanges(rpc, vc, protocol, now);
+  } catch (e) {
+    return `<div class="row"><span>Pending loosenings</span><span class="warn">unknown: ${esc(e.message)}</span></div>`;
+  }
+  if (!open.length) return `<div class="row"><span>Pending loosenings</span><span class="ok">none</span></div>`;
+  const veto = live === 0 ? "no guardian is live to veto it" : live === 1 ? "the one live guardian can veto" : `any one of ${live} live guardians can veto`;
+  return open.map((c) => {
+    // The all-zero key: a kind whose value is in the payload (guardians, delay).
+    const to = c.target === "11111111111111111111111111111111" ? "" : ` → <span class="mono">${esc(c.target.slice(0, 6))}…</span>`;
+    const what = `#${c.id} ${esc(c.kindName)}${to}`;
+    const when = c.state === "stale"
+      ? `<span class="ok">stale: something changed after it was proposed, so it can never execute</span>`
+      : c.state === "waiting"
+        ? `<span class="warn">executable in ${duration(c.secondsLeft)}</span> (${new Date(c.executableS * 1000).toLocaleString()}); ${veto}`
+        : `<span class="bad">executable now by anyone</span>, for ${duration(c.secondsLeft)} more; ${veto}`;
+    return `<div class="row"><span>Pending loosening ${what}</span><span>${when}</span></div>`;
+  }).join("");
+}
+
+function exitRow(exit, decimals) {
+  if (!exit) return "";
+  const when = exit.state === "waiting"
+    ? `<span class="warn">executable in ${duration(exit.secondsLeft)}</span>`
+    : `<span class="bad">executable now</span>, for ${duration(exit.secondsLeft)} more`;
+  return `<div class="row"><span>Lifeboat exit of ${fmt(exit.amount, decimals)}</span><span>${when}; any live guardian can veto</span></div>`;
+}
+
+function floorPending(fl, now) {
+  if (!fl.pendingKind) return "none";
+  const name = esc(FLOOR_PROPOSAL_KINDS[fl.pendingKind] ?? `kind ${fl.pendingKind}`);
+  if (fl.pendingVetoed) return `${name}, vetoed`;
+  const left = fl.pendingEta - now;
+  return left > 0
+    ? `${name}, <span class="warn">executable in ${duration(left)}</span> (${new Date(fl.pendingEta * 1000).toLocaleString()}); any live guardian can veto`
+    : `${name}, <span class="bad">executable now</span>; any live guardian can veto`;
+}
 
 async function render() {
   const f = Object.fromEntries(new FormData(form));
@@ -119,10 +161,12 @@ async function render() {
       <div class="row"><span>Pending tickets</span><span>${a.pendingTickets} (${fmt(a.queued, d)})</span></div>
       <div class="row"><span>Limits</span><span>${v.limits.shortBps / 100}% / ${v.limits.shortWindowS / 3600}h · ${v.limits.longBps / 100}% / ${v.limits.longWindowS / 3600}h</span></div>
       <div class="row"><span>Paid out (backed / unbacked)</span><span>${fmt(v.backedOut, d)} / ${fmt(v.unbackedOut, d)}</span></div>
+      ${exitRow(openExit(v, now), d)}
     </div>`;
   }
   html = `<div class="card">
       <h2>Protocol</h2>
+      ${await changesRows(rpc, vc, protocol, now, live)}
       <div class="row"><span>Sealed</span><span class="${protocol.sealed ? "ok" : "warn"}">${protocol.sealed ? "yes" : "no (releases disabled)"}</span></div>
       <div class="row"><span>Frozen</span><span class="${protocol.frozenUntil > now ? "warn" : "ok"}">${until(protocol.frozenUntil)}</span></div>
       <div class="row"><span>Live guardians</span><span class="${live >= protocol.threshold ? "ok" : "bad"}">${live} of ${protocol.guardians.length} (quorum ${protocol.threshold})</span></div>
@@ -147,7 +191,7 @@ async function render() {
         <div class="row"><span>sBPF v3 (SIMD-0500 ready)</span><span class="${fl.elfIsV3 ? "ok" : "warn"}">${fl.elfIsV3 ? "yes" : "no: build and test a v3 binary"}</span></div>
         <div class="row"><span>Live guardians</span><span>${fl.guardians.filter((_, i) => now - fl.lastHeartbeat[i] <= fl.heartbeatIntervalS).length} of ${fl.guardians.length} (quorum ${fl.threshold})</span></div>
         <div class="row"><span>L2BEAT Security Council bar</span><span class="${councilBar ? "ok" : "warn"}">${councilBar ? "met" : "not met"}: ${n} guardians, quorum ${fl.threshold} (bar: ≥ 8, ≥ 75%; outside members not visible on-chain)</span></div>
-        <div class="row"><span>Pending proposal</span><span>${fl.pendingKind ? `kind ${fl.pendingKind}, ${fl.pendingVetoed ? "vetoed" : "executable " + new Date(fl.pendingEta * 1000).toLocaleString()}` : "none"}</span></div>
+        <div class="row"><span>Pending proposal</span><span>${floorPending(fl, now)}</span></div>
       </div>`;
     }
   }

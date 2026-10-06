@@ -48,6 +48,28 @@ jobs:
           E2E: "1"
         run: scripts/check-programs.sh
 
+  fuzz:
+    # Coverage-guided fuzzing of the byte parsers and the full-width limiter
+    # and ledger (fuzz/): 60 s per target, every target in parallel.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Toolchain and cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-08-21 --profile minimal
+          cargo install --locked cargo-fuzz@0.13.2
+      - name: Fuzz
+        run: scripts/fuzz.sh
+      - name: Keep crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   kani:
     runs-on: ubuntu-24.04
     timeout-minutes: 60

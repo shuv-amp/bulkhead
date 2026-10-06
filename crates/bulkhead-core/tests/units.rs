@@ -703,3 +703,48 @@ fn rescale_windows_leaves_what_it_cannot_scale() {
     rescale_windows(&mut s, &p(100, 100), &p(400, 400), now);
     assert_eq!(s, idle);
 }
+
+/// Found by the coverage-guided limiter fuzzer: a backlog of ~6.7 days in a
+/// 1-second window, then the window lengthened to u32::MAX seconds, scales
+/// past `COST_MAX_MS` and saturates there. The used fraction then drops a
+/// little (from ~578 000 windows to ~537 000), but saturation only happens far
+/// beyond one full window, so the bucket stays full: no instant room, new
+/// requests refused, and shortening the window back gives no room either.
+#[test]
+fn rescale_windows_saturation_keeps_the_bucket_full() {
+    use bulkhead_core::consts::COST_MAX_MS;
+    use bulkhead_core::limiter::available_now;
+    let p = |w_ms: i64| LimiterParams {
+        short: Bucket {
+            capacity: 31_885_837_205_504,
+            window_ms: w_ms,
+        },
+        long: Bucket {
+            capacity: 31_885_837_205_504,
+            window_ms: w_ms,
+        },
+        min_queue_delay_ms: 0,
+        horizon_ms: 604_800_000,
+    };
+    let (short, huge) = (1_000, u32::MAX as i64 * 1_000);
+    let now = 1_700_000_000_000;
+    let mut s = LimiterState::default();
+    let r = request(&mut s, &p(short), now, 18_446_744_073_709_539_080, 0);
+    assert!(matches!(r, Ok(Decision::Queued { .. })));
+    rescale_windows(&mut s, &p(short), &p(huge), now);
+    assert_eq!(s.tat_long_ms, now + COST_MAX_MS, "saturated");
+    assert!(
+        s.tat_long_ms - now > huge,
+        "still more than one full window"
+    );
+    assert_eq!(available_now(&s, &p(huge), now), 0);
+    let before = s;
+    assert_eq!(
+        request(&mut s, &p(huge), now, 1, 0),
+        Err(LimiterError::QueueFull)
+    );
+    assert_eq!(s, before);
+    rescale_windows(&mut s, &p(huge), &p(short), now);
+    assert!(s.tat_long_ms - now > short);
+    assert_eq!(available_now(&s, &p(short), now), 0);
+}

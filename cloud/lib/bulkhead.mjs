@@ -21,6 +21,11 @@ export class VaultClient {
     const [t] = await findPda(["vault-tokens", this.protocol, key(mint)], this.program);
     return { vault: v, vaultTokens: t };
   }
+  /** The asset record of `mint` (`["asset", protocol, mint]`). */
+  async asset(mint) {
+    const [a] = await findPda(["asset", this.protocol, key(mint)], this.program);
+    return a;
+  }
   ix(tag, args, accounts) {
     return { programId: this.program, accounts, data: concat(Uint8Array.of(tag), args) };
   }

@@ -35,6 +35,9 @@ mod views;
 
 pub use error::VaultError;
 pub use state::{change, Asset, Backing, Change, Protocol, Ticket, Vault, MAX_GUARDIANS};
+// Pure byte parsers, exported for the fuzz targets (`fuzz/`).
+pub use pyth::{parse as parse_price_update, PriceUpdate};
+pub use token::{mint_policy_decimals, token_account_fields};
 
 use bulkhead_core::ema::ema_update;
 use bulkhead_core::governance::{
