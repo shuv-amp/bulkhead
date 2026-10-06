@@ -35,9 +35,25 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK: glibc's getaddrinfo lists interfaces with it (AI_ADDRCONFIG);
+# without it an RPC or webhook named by host would never resolve.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 CapabilityBoundingSet=
 UMask=0077
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+# Node's syscalls; anything else fails with EPERM (libuv falls back) rather
+# than killing the guardian. No MemoryDenyWriteExecute: V8 compiles code.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

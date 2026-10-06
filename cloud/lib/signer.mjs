@@ -85,7 +85,14 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
   // transaction when the primary's send fails, and a hanging one cannot delay
   // confirmation. The primary decides.
   void Promise.allSettled(rpcs.map(async (r) => r.call("sendTransaction", [tx, { ...opts, skipPreflight: true }])));
-  const signature = await rpc.call("sendTransaction", [tx, opts]);
+  let signature;
+  try {
+    signature = await rpc.call("sendTransaction", [tx, opts]);
+  } catch (e) {
+    // The transaction's own signature (its first): a backup may still land it.
+    e.signature = b58encode(sigs[0]);
+    throw e;
+  }
   for (let i = 0; i < 120; i++) {
     const st = (await rpc.call("getSignatureStatuses", [[signature]])).value[0];
     if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);
@@ -112,9 +119,33 @@ export async function sendWithFallback(rpc, payer, instructions, extraSigners = 
     return await send(rpc, payer, instructions, extraSigners, opts);
   } catch (e) {
     if (!(opts.computeUnits > 0) || e.rpcError?.code !== PREFLIGHT_REFUSED) throw e;
+    // The backups were sent the same transaction without a preflight: if one
+    // landed it, that is the answer. A second transaction would freeze twice,
+    // or fail as a duplicate veto and be reported as a failure.
+    if (opts.rpcs?.length && e.signature) {
+      const landed = await landedBy(rpc, e.signature, opts.landedWaitMs ?? 2_000);
+      if (landed) return e.signature;
+    }
     const signature = await send(rpc, payer, instructions, extraSigners, { ...opts, computeUnits: 0, microLamports: 0 });
     onFallback(e);
     return signature;
+  }
+}
+
+/** Whether `signature` confirmed (true), failed (throws), or did not show up within `waitMs` (false). */
+async function landedBy(rpc, signature, waitMs) {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    let st = null;
+    try {
+      st = (await rpc.call("getSignatureStatuses", [[signature], { searchTransactionHistory: false }])).value?.[0];
+    } catch {
+      st = null;
+    }
+    if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);
+    if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((r) => setTimeout(r, 400));
   }
 }
 

@@ -279,8 +279,9 @@ test("the replayed window is judged once per mint, so a quorum's unfreeze sticks
   s.frozenUntil = 1_100 + 86_400;
   assess(s, { kind: "unfrozen", scope: 0 }, { now: 1_700 }, policy);
   assert.equal(s.frozenUntil, 0);
-  // The same window, still over the threshold, is not judged a second time.
-  assert.notEqual(breach(s, mint, { ...figure(), now: 1_710 }, policy), null);
+  // The quorum weighed the window: it no longer counts, so nothing freezes
+  // again, neither here nor in a restart that replays it.
+  assert.equal(breach(s, mint, { ...figure(), now: 1_710 }, policy), null);
   assert.equal(judgeReplayedWindow(s, judged.unjudged, figure, 1_710, policy).action, null);
   // A protocol already frozen at startup settles every mint.
   const frozen = newState();
@@ -289,7 +290,7 @@ test("the replayed window is judged once per mint, so a quorum's unfreeze sticks
 });
 
 test("a restart vetoes a loosening that is still pending and leaves a closed one", () => {
-  const bytes = new Uint8Array(140);
+  const bytes = new Uint8Array(448) /* Change::LEN */;
   bytes.set(new TextEncoder().encode("BHCHNG01"));
   new DataView(bytes.buffer).setBigUint64(40, 9n, true);
   bytes[48] = 4;
@@ -329,11 +330,12 @@ test("a retried vault veto stops once the change is closed", () => {
   assert.equal(vetoRetryDisposition(action, { vetoed: true, executed: false }), "drop");
   assert.equal(vetoRetryDisposition(action, { vetoed: false, executed: true }), "drop");
   assert.equal(vetoRetryDisposition(action, null), "keep");
-  const bytes = new Uint8Array(51);
+  const bytes = new Uint8Array(448); // Change::LEN
   bytes.set(new TextEncoder().encode("BHCHNG01"));
   bytes[50] = 1;
   assert.deepEqual(readChangeVeto(bytes), { vetoed: false, executed: true });
-  assert.equal(readChangeVeto(new Uint8Array(51)), null);
+  assert.equal(readChangeVeto(new Uint8Array(448)), null, "not a change account");
+  assert.equal(readChangeVeto(bytes.subarray(0, 447)), null, "too short");
 });
 
 test("a lifeboat exit is vetoed unless pre-approved, once per proposal", () => {
@@ -438,7 +440,7 @@ test("the keeper executes exactly the approved changes, only while they are due"
   assert.equal(dueApprovedChange(change, policy, 1_500, new Set(["c3"])), null, "sent once");
   assert.equal(dueApprovedChange(change, { ...policy, executeApproved: false }, 1_500, new Set()), null);
   // Readable straight from a change account.
-  const bytes = new Uint8Array(140);
+  const bytes = new Uint8Array(448) /* Change::LEN */;
   bytes.set(new TextEncoder().encode("BHCHNG01"));
   const v = new DataView(bytes.buffer);
   v.setBigUint64(40, 3n, true);
@@ -528,12 +530,21 @@ test("incident hold: a freeze in flight is not doubled; 0 turns the hold off", (
 test("incident hold: a quorum unfreeze ends it; a freeze that runs out does not", () => {
   const s = newState();
   openIncident(s, 0);
-  // Ran out between two syncs: the old end is in the past at the second one.
-  observeFreezeEnd(s, 86_400, 86_400, 90_000);
+  // Ran out: the end stays where it was. Renewed: the end moves later.
+  observeFreezeEnd(s, 86_400, 86_400);
+  observeFreezeEnd(s, 86_400, 172_800);
   assert.equal(s.incidentSince, 0);
-  // Lifted early: the end moved to before it was due.
-  observeFreezeEnd(s, 86_400, 50_000, 50_010);
+  // Lifted early by a quorum: the end moved earlier (to the moment it ran).
+  observeFreezeEnd(s, 86_400, 50_000);
   assert.equal(s.incidentSince, null);
+  // A guardian restarted long after, having missed that unfreeze, still sees
+  // it from the saved end: comparing ends, not clocks (a restart at 200,000
+  // with the old rule froze again against the quorum's decision).
+  const restarted = newState();
+  openIncident(restarted, 0);
+  observeFreezeEnd(restarted, 86_400, 50_000);
+  assert.equal(restarted.incidentSince, null);
+  assert.equal(incidentHold(restarted, 50_000, 200_000), null);
   assert.equal(incidentHold(s, 50_000, 50_010), null);
   // The unfrozen event closes it the same way.
   openIncident(s, 60_000);

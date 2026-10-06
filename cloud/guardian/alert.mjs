@@ -23,19 +23,25 @@ const ACTIONS = new Set(["freeze", "cancel", "veto_change", "veto_exit", "floor_
 
 /**
  * The alert for one log line, or null. `line` is the object the guardian
- * logs. A freeze is never suppressed; anything else repeats at most once per
- * `windowMs` for the same kind (`seen` remembers when each kind was last sent).
+ * logs. A freeze that landed always alerts. Anything else repeats at most once
+ * per `windowMs` for the same kind (`seen` remembers when each kind was last
+ * sent); a kind is what an action acts on (a change, a proposal, a mint), so
+ * two different vetoes are two alerts, while the cancels of one sweep are one.
+ * A failed freeze, retried every poll, alerts at most once a `failedFreezeMs`
+ * per cause. A line that skipped its action is not an alert.
  */
-export function alertFor(line, seen, nowMs, { windowMs = 600_000 } = {}) {
+export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs = 60_000 } = {}) {
   const action = line.action;
+  if (line.skipped) return null;
   const level = line.level ?? "info";
   const message = line.msg ?? line.error ?? "";
   const urgent = level === "error" || ACTIONS.has(action) || (level === "warn" && URGENT_WARNINGS.some((r) => r.test(message)));
   if (!urgent) return null;
-  // A failed freeze is an error line with action "freeze": also never suppressed.
-  const always = action === "freeze";
-  const kind = `${level}:${action ?? ""}:${message.slice(0, 60)}`;
-  if (!always && nowMs - (seen.get(kind) ?? -Infinity) < windowMs) return null;
+  const subject = [line.changeId, line.proposalId, line.program, line.mint, line.what].filter((x) => x != null).join("/");
+  const kind = `${level}:${action ?? ""}:${subject}:${message.slice(0, 60)}`;
+  const landedFreeze = action === "freeze" && line.signature;
+  const window = action === "freeze" ? failedFreezeMs : windowMs;
+  if (!landedFreeze && nowMs - (seen.get(kind) ?? -Infinity) < window) return null;
   seen.set(kind, nowMs);
   const what = action ? `${action}${line.signature ? " sent" : " failed"}` : level;
   const detail = [line.reason, message, line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]

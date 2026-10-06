@@ -102,7 +102,7 @@ The guardian (`cloud/guardian/main.mjs`, Node 20+, no dependencies) is what turn
 
 - **Endpoints from different providers.** With `rpcs`, reads and sends move to the next endpoint when one fails, and every transaction also goes to all of them (`09`, findings 49 and 51). Prefer endpoints that keep transaction history.
 - **Alerts.** Freezes, failures and lifeboat moves need people: only a guardian quorum unfreezes or returns the lifeboat. Set `alert`, and keep its URL secret.
-- **Supervision.** The guardian exits on anything it cannot recover from, after logging and alerting it. Run it under `cloud/guardian/bulkhead-guardian@.service` (systemd: restarts it, never gives up, read-only filesystem except its state directory). `stateFile` keeps an incident hold across restarts (`09`, finding 48).
+- **Supervision.** The guardian exits on anything it cannot recover from, after logging and alerting it. Run it under `cloud/guardian/bulkhead-guardian@.service` (systemd: restarts it, never gives up, read-only filesystem except its state directory). The incident hold is kept across restarts in `stateFile` (under the unit, its state directory by default; `09`, findings 48 and 54).
 - **Liveness.** It heartbeats every 24h; a key that misses its on-chain interval stops counting toward the quorum. The status page shows each guardian's standing.
 - **Approvals are explicit.** It vetoes every loosening, lifeboat exit and Floor proposal not listed in its policy. Add a change's id to `approvedChangeIds` once the operators agree, and restart it.
 
