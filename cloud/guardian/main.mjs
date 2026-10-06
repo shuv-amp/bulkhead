@@ -43,7 +43,7 @@
 
 import { readFileSync } from "node:fs";
 import { Rpc, b58encode, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
-import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
+import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
@@ -129,6 +129,15 @@ async function sendOptions() {
   return { computeUnits: policy.computeUnits, microLamports: Number(microLamports) || 0, rpcs: extraRpcs };
 }
 
+/**
+ * Every guardian transaction: with the compute budget and priority price, and,
+ * if a node refuses that in simulation, again without them (`sendWithFallback`).
+ */
+async function guardianSend(ixs) {
+  return sendWithFallback(rpc, guardian, ixs, [], await sendOptions(), (e) =>
+    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", refused: e.message.slice(0, 300) }));
+}
+
 /** Decoded account, null when it does not exist, undefined when it could not be read. */
 async function readDecoded(address, decodeBytes) {
   try {
@@ -161,7 +170,7 @@ async function beatOne(id, read, ix, logged) {
   let outcome = standing;
   if (standing === "live" || standing === "unknown") {
     try {
-      const signature = await send(rpc, guardian, [ix()], [], await sendOptions());
+      const signature = await guardianSend([ix()]);
       log({ ...logged, signature });
       outcome = "sent";
     } catch (e) {
@@ -268,7 +277,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       default:
         return false;
     }
-    const sig = await send(rpc, guardian, ixs, [], await sendOptions());
+    const sig = await guardianSend(ixs);
     const confirmed = Date.now();
     log({
       action: action.type,
@@ -560,7 +569,7 @@ async function executeChangeIx(action) {
 async function keepApproved(now) {
   const attempt = async (doneKey, what, ix) => {
     try {
-      const signature = await send(rpc, guardian, [ix], [], await sendOptions());
+      const signature = await guardianSend([ix]);
       executedByKeeper.add(doneKey);
       log({ action: "execute", what, signature });
     } catch (e) {
