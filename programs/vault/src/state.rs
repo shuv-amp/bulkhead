@@ -563,7 +563,7 @@ impl Backing {
 }
 
 // ---------------------------------------------------------------------------
-// Ticket: ["ticket", protocol, id_le]
+// Ticket: ["ticket", protocol, payer, nonce_le] (the payer names its own)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -682,9 +682,7 @@ impl Change {
         let expires_s = r.i64()?;
         let payload_len = r.u16()?;
         let mut payload = [0u8; MAX_PAYLOAD];
-        for b in payload.iter_mut() {
-            *b = r.u8()?;
-        }
+        payload.copy_from_slice(r.take(MAX_PAYLOAD)?);
         let base_version = r.u32()?;
         if payload_len as usize > MAX_PAYLOAD {
             return Err(VaultError::WrongAccountType.into());
@@ -721,9 +719,7 @@ impl Change {
         w.i64(self.executable_s);
         w.i64(self.expires_s);
         w.u16(self.payload_len);
-        for b in &self.payload {
-            w.u8(*b);
-        }
+        w.put(&self.payload);
         w.u32(self.base_version);
         w.zeros(2);
         Ok(())

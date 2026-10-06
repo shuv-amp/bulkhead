@@ -685,9 +685,11 @@ async function keepApproved(now) {
     try {
       const acc = await rpc.account(fc.config);
       if (!acc) continue;
-      const action = dueApprovedFloor(decodeFloor(acc.bytes), policy, now, executedByKeeper);
+      const fl = decodeFloor(acc.bytes);
+      const action = dueApprovedFloor(fl, policy, now, executedByKeeper);
       if (!action) continue;
-      const ix = action.kind === 1 || action.kind === 2 ? fc.executeUpgrade(key(action.target), guardian.publicKey) : fc.executeConfig();
+      // The buffer's rent returns to the owner (Floor requires it as spill).
+      const ix = action.kind === 1 || action.kind === 2 ? fc.executeUpgrade(key(action.target), key(fl.owner)) : fc.executeConfig();
       await attempt(`e${action.program}:${action.proposalId}`, `floor ${action.program} proposal ${action.proposalId}`, ix);
     } catch (e) {
       log({ level: "warn", msg: `keeper floor scan failed; retrying: ${e.message}` });

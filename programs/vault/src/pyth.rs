@@ -65,7 +65,12 @@ pub fn parse(d: &[u8]) -> Option<PriceUpdate> {
 
 /// How the ledger may value `asset` right now, given an optional price account.
 ///
-/// - Not allowlisted: `NotAllowlisted` (worth 0, never backs a loan).
+/// - A record that is not allowlisted (delisted): `Unpriced`, not
+///   `NotAllowlisted`. Delisting stops new borrowing at once, but the mint
+///   may still secure a loan: as `NotAllowlisted` its owner could take it back
+///   while the loan stayed open (`docs/09`, finding 56). Fail closed instead:
+///   it counts 0 until what its owner owes is repaid. A mint with no record at
+///   all never backed anything and stays `NotAllowlisted` (custody.rs).
 /// - Allowlisted, but no price account, a stale or too-wide price, or a
 ///   non-positive price: `Unpriced` (fail closed: collateral counts 0,
 ///   liabilities make health unknown).
@@ -78,7 +83,7 @@ pub fn pricing(
 ) -> Result<Pricing, ProgramError> {
     let cfg = &asset.config;
     if !cfg.allowlisted {
-        return Ok(Pricing::NotAllowlisted);
+        return Ok(Pricing::Unpriced);
     }
     let acc = match price {
         Some(a) if a.owner() == &RECEIVER || a.owner() == &RECEIVER_PRO => a,
