@@ -230,10 +230,11 @@ export class Rpc {
    * (429), failing (5xx) or dropped request is retried with backoff; a timeout
    * is not, so a stuck method fails instead of looping.
    */
-  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000 } = {}) {
+  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000, retries = 6 } = {}) {
     this.url = url;
     this.minGapMs = minGapMs;
     this.timeoutMs = timeoutMs;
+    this.retries = retries;
     this.nextAt = 0;
   }
   async call(method, params = []) {
@@ -252,14 +253,14 @@ export class Rpc {
           signal: AbortSignal.timeout(this.timeoutMs), // never hang on a stuck endpoint
         });
       } catch (e) {
-        if (e.name === "TimeoutError" || attempt >= 6) throw new Error(`${method}: ${e.message}`);
+        if (e.name === "TimeoutError" || attempt >= this.retries) throw new Error(`${method}: ${e.message}`);
         await new Promise((res) => setTimeout(res, 500 * 2 ** attempt)); // dropped connection: back off
         continue;
       }
       // 429 and 5xx (often an HTML page, not JSON) are transient: back off and retry.
       const busy = r.status === 429 || r.status >= 500;
       const j = busy ? { error: { code: r.status } } : await r.json();
-      if (busy && attempt < 6) {
+      if (busy && attempt < this.retries) {
         await new Promise((res) => setTimeout(res, 1_000 * 2 ** Math.min(attempt, 3)));
         continue;
       }
@@ -292,6 +293,53 @@ export class Rpc {
     const opts = { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" };
     if (accounts.length) opts.accounts = { encoding: "base64", addresses: accounts.map((a) => b58encode(key(a))) };
     return (await this.call("simulateTransaction", [b64, opts])).value;
+  }
+}
+
+/**
+ * JSON-RPC errors that are about the endpoint, not the request: another node
+ * may answer. Node unhealthy (-32005), min context slot not reached (-32016),
+ * long-term storage unreachable (-32019), and HTTP 429 / 5xx.
+ */
+export function endpointTrouble(e) {
+  const code = e?.rpcError?.code;
+  if (code === undefined) return true; // no answer: refused, dropped, timed out
+  return code === -32005 || code === -32016 || code === -32019 || code === 429 || (code >= 500 && code < 600);
+}
+
+/**
+ * Several endpoints behind one `Rpc` interface. Each call goes to the endpoint
+ * that answered last; when it cannot answer (`endpointTrouble`), the next one
+ * is tried at once, after one quick retry instead of the single endpoint's
+ * minute of backoff. An answer is never retried elsewhere: a refused
+ * simulation is the same on every node. `onSwitch(from, to, error)` reports a
+ * change of endpoint.
+ */
+export class FailoverRpc extends Rpc {
+  constructor(urls, { onSwitch = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
+    super(urls[0], { timeoutMs, retries, ...opts });
+    this.endpoints = urls.map((url) => new Rpc(url, { timeoutMs, retries, ...opts }));
+    this.active = 0;
+    this.onSwitch = onSwitch;
+  }
+  async call(method, params = []) {
+    let last;
+    for (let i = 0; i < this.endpoints.length; i++) {
+      const at = (this.active + i) % this.endpoints.length;
+      try {
+        const result = await this.endpoints[at].call(method, params);
+        if (at !== this.active) {
+          this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, last);
+          this.active = at;
+          this.url = this.endpoints[at].url;
+        }
+        return result;
+      } catch (e) {
+        if (!endpointTrouble(e)) throw e;
+        last = e;
+      }
+    }
+    throw last;
   }
 }
 

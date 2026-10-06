@@ -154,3 +154,74 @@ test("an RPC error keeps its JSON-RPC code, so a refused preflight can be told a
     globalThis.fetch = real;
   }
 });
+
+// A dead primary used to cost about a minute per call (6 retries with
+// backoff), and the guardian read only from it: blind while backups were up.
+import { FailoverRpc, endpointTrouble } from "../lib/solana.mjs";
+
+function stubFetch(routes) {
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const { method } = JSON.parse(init.body);
+    calls.push([new URL(url).host, method]);
+    const r = routes[new URL(url).host];
+    if (r === "down") throw new TypeError("fetch failed");
+    if (typeof r === "number") return new Response("busy", { status: r });
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, ...r(method) }), { status: 200 });
+  };
+  return { calls, restore: () => { globalThis.fetch = real; } };
+}
+
+test("failover: a dead primary hands over to the backup at once, and the backup sticks", async () => {
+  const f = stubFetch({ "a.invalid": "down", "b.invalid": () => ({ result: 7 }) });
+  const switches = [];
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { onSwitch: (from, to) => switches.push([from, to]) });
+    const t0 = Date.now();
+    assert.equal(await rpc.call("getSlot"), 7);
+    assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
+    assert.deepEqual(switches, [["http://a.invalid", "http://b.invalid"]]);
+    f.calls.length = 0;
+    assert.equal(await rpc.call("getSlot"), 7);
+    assert.deepEqual(f.calls, [["b.invalid", "getSlot"]], "the working endpoint is used first");
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: an answer is final; an unhealthy node or a 5xx is not", async () => {
+  const refused = { error: { code: -32002, message: "Transaction simulation failed" } };
+  let f = stubFetch({ "a.invalid": () => refused, "b.invalid": () => ({ result: "never" }) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"]);
+    const err = await rpc.call("sendTransaction", ["x"]).then(() => null, (e) => e);
+    assert.equal(err.rpcError.code, -32002, "the refusal comes back as is");
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid"], "and is not asked of another node");
+  } finally {
+    f.restore();
+  }
+  f = stubFetch({ "a.invalid": () => ({ error: { code: -32005, message: "Node is unhealthy" } }), "b.invalid": () => ({ result: 1 }) });
+  try {
+    assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot"), 1);
+  } finally {
+    f.restore();
+  }
+  f = stubFetch({ "a.invalid": 503, "b.invalid": () => ({ result: 2 }) });
+  try {
+    assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot"), 2);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: every endpoint down fails with the last error", async () => {
+  const f = stubFetch({ "a.invalid": "down", "b.invalid": "down" });
+  try {
+    await assert.rejects(new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot"), /getSlot: fetch failed/);
+  } finally {
+    f.restore();
+  }
+  assert.equal(endpointTrouble(new Error("x")), true);
+  assert.equal(endpointTrouble(Object.assign(new Error("x"), { rpcError: { code: -32602 } })), false, "a bad request is the caller's");
+});
