@@ -200,7 +200,7 @@ A line-by-line pass over every program, the core, the Cloud guardian and the too
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
-| A7 | **Medium** | The Vault's loosen delay had no upper bound; raising it is a tightening, so one key could put every later loosening (admin and guardian replacement included) out of reach | **Fixed** 1 Oct (#8): a 30-day cap in the core, the Vault and Floor; devnet upgrade pending |
+| A7 | **Medium** | The Vault's loosen delay had no upper bound; raising it is a tightening, so one key could put every later loosening (admin and guardian replacement included) out of reach | **Fixed** 1 Oct (#8): a 30-day cap in the core, the Vault and Floor; on devnet since 6 Oct |
 | A8 | Low | The mint policy allowed `MintCloseAuthority` with an authority set; a zero-supply mint can then be closed and created again with extensions the policy refuses | **Fixed** 1 Oct (#8): extension 3 only with no close authority |
 | A9 | **Medium** | Pyth's trust root changed on 26 Aug 2026 (3 of the Pyth Pro set's 5 keys); backed borrowing trusts a verified price completely | Documented in `04` (assumption 2, T5); a rate limit on new backed liabilities is a design item for the audit build |
 | A10 | **Medium** | The seal compared imported backing with balances but not the backing pre-seal deposits create, so total claims could exceed the tokens held | **Fixed** 1 Oct (#8): `imported + total_in ≤ balance + lifeboat_amount` |
