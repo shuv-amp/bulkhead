@@ -12,7 +12,7 @@
 //   node cloud/deploy/vault-check.mjs <rpc> <market-dir>
 
 import { readFileSync } from "node:fs";
-import { Rpc, key, findPda, u64le, IDS, decodeProtocol, decodeVault } from "../lib/solana.mjs";
+import { Rpc, key, findPda, concat, u64le, IDS, decodeProtocol, decodeVault } from "../lib/solana.mjs";
 import { VaultClient } from "../lib/bulkhead.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 import { Keypair } from "../lib/signer.mjs";
@@ -64,9 +64,10 @@ async function expect(what, ixs, expected) {
 /** A release through Harbor: 2 = a user withdrawing to themselves, 3 = the admin paying anyone. */
 async function harborRelease(tag, signer, recipientTokens, recipientOwner, amount, p) {
   const [backing] = await findPda(["backing", m.protocol, key(recipientOwner)], m.vaultProgram);
-  const [ticket] = await findPda(["ticket", m.protocol, u64le(p.nextTicketId)], m.vaultProgram);
+  const nonce = BigInt(p.nextTicketId); // any unused nonce of this payer
+  const [ticket] = await findPda(["ticket", m.protocol, key(signer), u64le(nonce)], m.vaultProgram);
   const [asset] = await findPda(["asset", m.protocol, key(wld.mint)], m.vaultProgram);
-  return harborIx(m, tag, u64le(amount), [s(signer)], [
+  return harborIx(m, tag, concat(u64le(amount), u64le(nonce)), [s(signer)], [
     w(m.protocol), w(wld.vault), w(wld.vaultTokens), r(wld.mint), w(recipientTokens), w(backing), r(wld.tokenProgram),
     s(signer, true), w(ticket), r(IDS.system), r(asset), r(IDS.system), // asset PDA (unlisted) and no price
   ]);
@@ -87,6 +88,7 @@ const live = p.lastHeartbeat.filter((t) => now - t <= p.heartbeatIntervalS).leng
 check("every guardian is live (heartbeat within 7 days)", live === 3 && p.heartbeatIntervalS === 7 * DAY, `${live}/3`);
 check("loosening waits 72h", p.loosenDelayS === 3 * DAY);
 check("lifeboat destination is keys/lifeboat-destination", p.lifeboatDestination === destination.address);
+console.log(`   info     recovery key (replaces a stolen admin after the delay): ${p.recovery ?? "none set"}`);
 check("one vault: the test USDC mint, 6 decimals, its token account", p.vaultCount === 1 && v.mint === wld.mint && v.decimals === 6 && v.tokenAccount === wld.vaultTokens);
 const L = v.limits;
 check("limits: 2% per 1h, 5% per 24h, 6h queue delay, no floors",

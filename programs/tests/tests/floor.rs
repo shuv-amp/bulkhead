@@ -202,7 +202,7 @@ fn only_live_guardians_or_the_owner_can_stop_the_program() {
         "a dead guardian can't revive itself"
     );
 
-    // The owner can always stop its own program (denial of service at worst).
+    // With no live quorum, the owner can still stop its own program.
     env.ok(
         &[f.abort(&p.owner.pubkey(), &p.abort_buffer, None)],
         &[&p.owner],
@@ -568,7 +568,9 @@ fn an_abort_binary_that_would_not_fit_is_refused_and_the_minimal_one_is_accepted
     let (program, _) = env.deploy(&honest_v1(), &team, 200);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new();
-    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let guardian = Keypair::new();
+    env.fund(&guardian);
+    let gs = [guardian.pubkey(), Keypair::new().pubkey()];
     let ix = f.register(
         &env.payer.pubkey(),
         &team.pubkey(),
@@ -590,7 +592,7 @@ fn an_abort_binary_that_would_not_fit_is_refused_and_the_minimal_one_is_accepted
     let small = env.write_buffer(&bulkhead_core::floor::ABORT_ELF_MINIMAL, &stager); // 136 bytes
     env.set_buffer_authority(&small, &stager, &f.authority);
     env.ok(&[f.stage_abort(&small)], &[]);
-    env.ok(&[f.abort(&owner.pubkey(), &small, None)], &[&owner]);
+    env.ok(&[f.abort(&guardian.pubkey(), &small, None)], &[&guardian]);
     env.next_slot();
     let e = env.call(&f.program).expect_err("stopped");
     assert_eq!(custom_code(&e), Some(FLOOR_ABORT_CODE));
@@ -652,4 +654,98 @@ fn a_named_veto_does_not_apply_to_a_different_proposal() {
     assert_eq!(read_config(&env, f).pending_vetoed, 0);
     env.ok(&[f.veto_id(&p.g[0].pubkey(), Some(id))], &[&p.g[0]]);
     assert_eq!(read_config(&env, f).pending_vetoed, 1);
+}
+
+#[test]
+fn an_older_guardian_set_cannot_bring_back_an_ejected_guardian() {
+    // The owner proposes a guardian set that still names g2; a quorum of the
+    // others then ejects g2. Executing the older set must not restore it.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let set = Floor::guardian_set(&gs, 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &solana_address::Address::default(), &set, None)], &[&p.owner]);
+    env.ok(&[f.eject(2, &[gs[0], gs[1]])], &[&p.g[0], &p.g[1]]);
+    env.advance(3 * DAY + 1);
+    // Whatever is still pending, executing it must not bring g2 back.
+    let _ = env.send(&[f.execute_config()], &[]);
+    let d = env.account(&f.config).data;
+    let n = d[424] as usize;
+    let back = (0..n).any(|i| d[104 + 32 * i..136 + 32 * i] == gs[2].to_bytes());
+    assert!(!back, "the ejected guardian came back through an older proposal");
+}
+
+const SET_OWNER: u8 = 5;
+const SET_RECOVERY: u8 = 7;
+
+fn floor_owner(env: &Env, f: &Floor) -> [u8; 32] {
+    env.account(&f.config).data[72..104].try_into().unwrap()
+}
+
+/// The owner sets a recovery key: a delayed change like any other.
+fn with_recovery(env: &mut Env, p: &Protected) -> solana_keypair::Keypair {
+    let recovery = solana_keypair::Keypair::new();
+    env.fund(&recovery);
+    let f = &p.f;
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_RECOVERY, &recovery.pubkey(), &[], None)], &[&p.owner]);
+    env.advance(3 * DAY + 1);
+    env.ok(&[f.execute_config()], &[]);
+    recovery
+}
+
+#[test]
+fn a_recovery_key_replaces_a_stolen_owner_key_that_cannot_stop_it() {
+    // A4 on Floor: only the owner could propose a new owner, and only one
+    // proposal can wait at a time, so a thief holding the owner key could keep
+    // the slot busy, cancel any rotation, or stop the program to wipe it.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let recovery = with_recovery(&mut env, &p);
+    // The thief holds the slot with its own proposal (a guardian set that
+    // waits; raising the delay would apply at once and hold nothing).
+    let set = Floor::guardian_set(&gs, 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &solana_address::Address::default(), &set, None)], &[&p.owner]);
+    let fresh = solana_keypair::Keypair::new().pubkey();
+    // The recovery key's proposal takes the slot anyway.
+    env.ok(&[f.propose(&recovery.pubkey(), SET_OWNER, &fresh, &[], None)], &[&recovery]);
+    // The thief cannot cancel it, cannot propose over it, and stopping the
+    // program does not wipe it.
+    assert_eq!(env.fails(&[f.cancel(&p.owner.pubkey())], &[&p.owner]), err::NOT_OWNER);
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &solana_address::Address::default(), &set, None)], &[&p.owner]), err::PROPOSAL_PENDING);
+    // While the guardians are live, the thief cannot stop the program; a
+    // guardian's stop does not wipe the recovery proposal either.
+    assert_eq!(env.fails(&[f.abort(&p.owner.pubkey(), &p.abort_buffer, Some(&p.snapshot))], &[&p.owner]), err::NOT_LIVE_GUARDIAN);
+    env.ok(&[f.abort(&gs[2], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[2]]);
+    env.next_slot();
+    assert_eq!(read_config(&env, f).pending_kind, SET_OWNER);
+    env.advance(3 * DAY + 1);
+    env.ok(&[f.execute_config()], &[]);
+    assert_eq!(floor_owner(&env, f), fresh.to_bytes());
+    // The quorum restores the program; the old owner key is now nobody.
+    env.ok(&[f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &[gs[0], gs[1]])], &[&p.g[0], &p.g[1]]);
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_DELAY, &solana_address::Address::default(), &(4 * DAY).to_le_bytes(), None)], &[&p.owner]), err::NOT_OWNER);
+}
+
+#[test]
+fn the_floor_recovery_key_can_only_replace_the_owner_or_itself() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let recovery = with_recovery(&mut env, &p);
+    let buf = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&buf, &p.owner, &f.authority);
+    // No code, no guardians, no delay: it has no say over the program.
+    assert_eq!(env.fails(&[f.propose(&recovery.pubkey(), UPGRADE, &buf, &[], Some(&buf))], &[&recovery]), err::NOT_OWNER);
+    // Owner and recovery stay distinct, in both directions.
+    assert_eq!(env.fails(&[f.propose(&recovery.pubkey(), SET_OWNER, &recovery.pubkey(), &[], None)], &[&recovery]), err::INVALID_INSTRUCTION);
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_OWNER, &recovery.pubkey(), &[], None)], &[&p.owner]), err::INVALID_INSTRUCTION);
+    // Once a recovery key exists, only it replaces itself.
+    let other = solana_keypair::Keypair::new().pubkey();
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_RECOVERY, &other, &[], None)], &[&p.owner]), err::NOT_OWNER);
+    env.ok(&[f.propose(&recovery.pubkey(), SET_RECOVERY, &other, &[], None)], &[&recovery]);
+    // Its own proposal is its own to withdraw.
+    env.ok(&[f.cancel(&recovery.pubkey())], &[&recovery]);
 }

@@ -18,12 +18,17 @@ COUNT="${COUNT:-12}"            # payouts
 AMOUNT="${AMOUNT:-100000000000}" # 100,000 USDC each
 INTERVAL="${INTERVAL:-800}"     # ms between payouts
 POLL_MS="${POLL_MS:-300}"       # the guardian's polling interval (public RPCs: 1000)
+# Pending changes the market's owners want, which the guardian must not veto
+# (comma-separated ids). Without them, its restart scan vetoes every pending
+# loosening, a guardian renewal or a recovery key included.
+APPROVED_CHANGE_IDS="${APPROVED_CHANGE_IDS:-}"
 field() { python3 -c "import json,sys; print(json.load(open('$W/world.json'))['$1'])"; }
 VAULT=$(field vaultProgram); HARBOR=$(field harbor)
 
 cat > "$W/guardian.json" <<CFG
 { "rpc": "$RPC", "vaultProgram": "$VAULT", "protocolProgram": "$HARBOR",
-  "mints": ["$(field mint)"], "guardianKey": "$W/keys/guardian0.json", "pollMs": $POLL_MS }
+  "mints": ["$(field mint)"], "guardianKey": "$W/keys/guardian0.json", "pollMs": $POLL_MS,
+  "policy": { "approvedChangeIds": [$APPROVED_CHANGE_IDS] } }
 CFG
 echo "== guardian watching"
 node cloud/guardian/main.mjs "$W/guardian.json" > "$W/guardian.log" 2>&1 &

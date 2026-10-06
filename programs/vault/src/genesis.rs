@@ -3,17 +3,29 @@
 
 use crate::state::{Asset, Protocol, Vault, R};
 use crate::*;
-use bulkhead_core::classify::{AssetConfig, LimitConfig};
+use bulkhead_core::classify::{classify_asset, AssetConfig, Class, LimitConfig};
 use bulkhead_core::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 use bulkhead_core::floor::{program_programdata, programdata_header};
 use bulkhead_core::governance::{can_execute, schedule, Schedule};
-use bulkhead_core::limiter::config_is_valid;
+use bulkhead_core::limiter::{config_is_valid, lane_always_closed};
 
 /// `BPFLoaderUpgradeab1e11111111111111111111111`
 const LOADER_V3: Address = Address::new_from_array([
     2, 168, 246, 145, 78, 136, 161, 176, 226, 16, 21, 62, 247, 99, 174, 43, 0, 194, 185, 61, 22,
     193, 36, 210, 192, 83, 122, 16, 4, 128, 0, 0,
 ]);
+
+/// Before the seal, configuration applies at once. Once a seal is proposed, a
+/// loosening would change what the public is reviewing, so until the seal
+/// executes, is vetoed or expires, only tightenings apply (T19). A minute
+/// before the seal an admin could otherwise swap in its own guardians (nobody
+/// left to veto), open the limits, and seal that unreviewed.
+pub(crate) fn require_no_seal_review(p: &Protocol, now_s: i64) -> ProgramResult {
+    if !p.sealed && p.seal_executable_s != 0 && !p.seal_vetoed && now_s < p.seal_expires_s {
+        return Err(VaultError::SealUnderReview.into());
+    }
+    Ok(())
+}
 
 pub(crate) fn valid_asset(c: &AssetConfig) -> bool {
     c.haircut_bps <= 10_000
@@ -27,7 +39,8 @@ pub(crate) fn valid_asset(c: &AssetConfig) -> bool {
 // ---------------------------------------------------------------------------
 // Accounts: 0 payer [s,w], 1 protocol PDA [w], 2 protocol program,
 //           3 its programdata, 4 registrar [s], 5 system program.
-// Data: admin[32], guardian set, loosen_delay i64, lifeboat_destination[32].
+// Data: admin[32], guardian set, loosen_delay i64, lifeboat_destination[32],
+//       optional recovery key[32] (absent or all zero: none).
 //
 // The registrar is the protocol program's upgrade authority, or the
 // protocol's own caller PDA signing through a CPI (for programs whose upgrade
@@ -45,6 +58,10 @@ pub fn register_protocol(
     let (guardians, count, threshold, interval) = parse_guardian_set(&mut r, &admin)?;
     let loosen_delay = r.i64()?;
     let destination = r.key()?;
+    let recovery = r.key().unwrap_or([0; 32]);
+    if recovery == admin {
+        return Err(VaultError::InvalidGuardians.into());
+    }
     if loosen_delay < MIN_LOOSEN_DELAY_S {
         return Err(VaultError::DelayBelowMinimum.into());
     }
@@ -114,6 +131,8 @@ pub fn register_protocol(
         seal_executable_s: 0,
         seal_expires_s: 0,
         seal_vetoed: false,
+        versions: [0; 5],
+        recovery,
     };
     save(&mut accounts[1], |d| p.store(d))?;
     sys::event(&[b"vault:registered", &pk, &p.admin]);
@@ -145,6 +164,16 @@ pub fn create_vault(
     require_signer(payer)?;
     let mut p = load_protocol(program_id, protocol)?;
     require_admin(&p, acc(accounts, 1)?)?;
+    // A vault that exists says so first, whatever the seal's state.
+    if !vault.is_data_empty() {
+        return Err(VaultError::AlreadyInitialized.into());
+    }
+    // A new vault is a loosening: under review it waits, and after the seal it
+    // starts with its unbacked lane closed (opening it is a delayed change).
+    require_no_seal_review(&p, now()?)?;
+    if p.sealed && !lane_always_closed(&limits) {
+        return Err(VaultError::GenesisOnly.into());
+    }
     let decimals = token::checked_mint_decimals(mint, token_program.address())?;
 
     let (pk, mk) = (key(protocol), key(mint));
@@ -212,6 +241,7 @@ pub fn create_vault(
         exit_executable_s: 0,
         exit_expires_s: 0,
         exit_vetoed: false,
+        limits_version: 0,
     };
     save(&mut accounts[3], |d| v.store(d))?;
     p.vault_count = p.vault_count.checked_add(1).ok_or(VaultError::Overflow)?;
@@ -239,6 +269,15 @@ pub fn upsert_asset(
     if p.sealed {
         return Err(VaultError::GenesisOnly.into());
     }
+    let asset = acc(accounts, 3)?;
+    let old = if asset.is_data_empty() {
+        None
+    } else {
+        Some(load(program_id, asset, Asset::load)?.config)
+    };
+    if classify_asset(old.as_ref(), &config) == Class::Loosen {
+        require_no_seal_review(&p, now()?)?;
+    }
     write_asset(program_id, accounts, 0, 2, 3, 4, 5, &config)
 }
 
@@ -261,6 +300,14 @@ pub(crate) fn write_asset(
     )?;
     let asset = acc(accounts, asset_i)?;
     let bump = expect_pda(&[seeds::ASSET, &pk, &mk], program_id, asset)?;
+    // An absent record reads as version 0, so creating one is a change too.
+    let version = if asset.is_data_empty() {
+        1
+    } else {
+        load(program_id, asset, Asset::load)?
+            .version
+            .wrapping_add(1)
+    };
     if asset.is_data_empty() {
         let b = [bump];
         create_pda(
@@ -282,6 +329,7 @@ pub(crate) fn write_asset(
         config: *config,
         decimals,
         bump,
+        version,
     };
     save(&mut accounts[asset_i], |d| a.store(d))?;
     sys::event(&[b"vault:asset", &pk, &mk, &[config.allowlisted as u8]]);
@@ -309,6 +357,7 @@ pub fn import_backing(
     if p.sealed {
         return Err(VaultError::GenesisOnly.into());
     }
+    require_no_seal_review(&p, now()?)?;
     let mut v = load_vault(program_id, protocol, acc(accounts, 3)?)?;
     let owner = key(acc(accounts, 5)?);
     let mut b = custody::load_or_create_backing(program_id, accounts, 0, 2, 4, &owner)?;

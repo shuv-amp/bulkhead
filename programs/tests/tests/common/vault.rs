@@ -24,6 +24,7 @@ pub fn pyth_receiver() -> Address {
 pub mod verr {
     pub const WRONG_ACCOUNT_TYPE: u32 = 8001;
     pub const WRONG_ADDRESS: u32 = 8002;
+    pub const INVALID_INSTRUCTION: u32 = 8000;
     pub const NOT_ADMIN: u32 = 8005;
     pub const NOT_GUARDIAN: u32 = 8006;
     pub const NO_QUORUM: u32 = 8007;
@@ -36,6 +37,8 @@ pub mod verr {
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
     pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
     pub const INSUFFICIENT_BALANCE: u32 = 8049;
+    pub const SEAL_UNDER_REVIEW: u32 = 8050;
+    pub const CHANGE_STALE: u32 = 8051;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;
@@ -45,6 +48,7 @@ pub mod verr {
     pub const TICKETS_PENDING: u32 = 8032;
     pub const CHANGE_NOT_EXECUTABLE: u32 = 8033;
     pub const CHANGE_VETOED: u32 = 8034;
+    pub const CHANGE_EXPIRED: u32 = 8035;
     pub const ABDICATED: u32 = 8037;
     pub const DUPLICATE_ACCOUNT: u32 = 8041;
     pub const CANNOT_EJECT: u32 = 8042;
@@ -200,6 +204,13 @@ pub struct VaultRef {
     pub price: Address,
     pub feed: [u8; 32],
     pub decimals: u8,
+}
+
+/// Release data: amount, then the payer's ticket nonce.
+pub fn release_args(amount: u64, nonce: u64) -> Vec<u8> {
+    let mut d = amount.to_le_bytes().to_vec();
+    d.extend_from_slice(&nonce.to_le_bytes());
+    d
 }
 
 pub fn pda(seeds: &[&[u8]], program: &Address) -> Address {
@@ -431,14 +442,27 @@ impl Market {
         // 4 bytes, 3 × i64, abdications u32, vault_count u32.
         let o = 8 + 96 + 256 + 64 + 4 + 24 + 8;
         let id = u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
-        (id, pda(&[b"ticket", self.protocol.as_ref(), &id.to_le_bytes()], &self.vault_program))
+        // The helpers use the next id as the payer's nonce: unique per protocol.
+        (id, self.ticket_pda(&env.payer.pubkey(), id))
+    }
+
+    /// A ticket's address: `["ticket", protocol, payer, nonce]`. The payer
+    /// picks the nonce, so concurrent queued releases never race for one address.
+    pub fn ticket_pda(&self, payer: &Address, nonce: u64) -> Address {
+        pda(&[b"ticket", self.protocol.as_ref(), payer.as_ref(), &nonce.to_le_bytes()], &self.vault_program)
     }
 
     /// The release accounts after the caller (Vault indices 1..).
     /// `prices`: (asset PDA, price account) for the released mint and every
     /// other mint in the recipient's ledger, in ledger order.
     pub fn release_accounts(&self, env: &Env, v: &VaultRef, recipient: &Address, owner: &Address, prices: &[(Address, Address)]) -> Vec<AccountMeta> {
-        let (_, ticket) = self.next_ticket(env);
+        let (nonce, _) = self.next_ticket(env);
+        self.release_accounts_with(env, v, recipient, owner, prices, nonce)
+    }
+
+    /// As `release_accounts`, with the ticket for `nonce`.
+    pub fn release_accounts_with(&self, env: &Env, v: &VaultRef, recipient: &Address, owner: &Address, prices: &[(Address, Address)], nonce: u64) -> Vec<AccountMeta> {
+        let ticket = self.ticket_pda(&env.payer.pubkey(), nonce);
         let mut a = vec![
             AccountMeta::new(self.protocol, false),
             AccountMeta::new(v.vault, false),
@@ -460,12 +484,20 @@ impl Market {
 
     /// A user withdraws `amount` to their own token account through Harbor.
     pub fn withdraw_ix(&self, env: &Env, v: &VaultRef, user: &Address, to: &Address, amount: u64, prices: &[(Address, Address)]) -> Instruction {
-        self.harbor_ix(2, &amount.to_le_bytes(), vec![AccountMeta::new_readonly(*user, true)], self.release_accounts(env, v, to, user, prices))
+        let (nonce, _) = self.next_ticket(env);
+        self.harbor_ix(2, &release_args(amount, nonce), vec![AccountMeta::new_readonly(*user, true)], self.release_accounts_with(env, v, to, user, prices, nonce))
     }
 
     /// Harbor's admin orders a payout to anyone (the Drift path).
     pub fn admin_payout_ix(&self, env: &Env, v: &VaultRef, to: &Address, to_owner: &Address, amount: u64, prices: &[(Address, Address)]) -> Instruction {
-        self.harbor_ix(3, &amount.to_le_bytes(), vec![AccountMeta::new_readonly(self.admin.pubkey(), true)], self.release_accounts(env, v, to, to_owner, prices))
+        let (nonce, _) = self.next_ticket(env);
+        self.admin_payout_with(env, v, to, to_owner, amount, prices, nonce)
+    }
+
+    /// An admin payout whose ticket (if any part is queued) uses `nonce`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admin_payout_with(&self, env: &Env, v: &VaultRef, to: &Address, to_owner: &Address, amount: u64, prices: &[(Address, Address)], nonce: u64) -> Instruction {
+        self.harbor_ix(3, &release_args(amount, nonce), vec![AccountMeta::new_readonly(self.admin.pubkey(), true)], self.release_accounts_with(env, v, to, to_owner, prices, nonce))
     }
 
     pub fn propose_seal_ix(&self) -> Instruction {

@@ -102,6 +102,14 @@ pub fn config_is_valid(cfg: &LimitConfig) -> bool {
         && cfg.long_window_s > 0
 }
 
+/// Whether `cfg` keeps the unbacked lane closed at every balance: one bucket
+/// has no bps and no floor, so its capacity is 0 whatever the reference (a cap
+/// only ever lowers it). A vault created after the seal must start this way;
+/// opening it is then a loosening, which waits.
+pub fn lane_always_closed(cfg: &LimitConfig) -> bool {
+    (cfg.short_bps == 0 && cfg.short_floor == 0) || (cfg.long_bps == 0 && cfg.long_floor == 0)
+}
+
 /// The base that capacities are computed from: the lower of the reference (a
 /// 24h average that rises slowly, so a deposit just before an attack buys
 /// almost nothing) and the live balance (so money that has left, for example
@@ -207,6 +215,48 @@ pub fn reset_backlog(
         state.tat_long_ms = cap_long;
     }
     Ok(())
+}
+
+/// When a vault's windows change (a new `LimitConfig`), keep each bucket's
+/// *used fraction*: the backlog becomes `ceil(backlog * W_new / W_old)`.
+///
+/// A TAT is a backlog in milliseconds, and the same backlog is a smaller
+/// fraction of a longer window. Without this, lengthening a window (a
+/// tightening, so it applies at once) would make a just-drained bucket look
+/// partly empty, and a stolen admin key could repeat it to take the burst
+/// again and again in one second (docs/09 §4, found by the program-vs-model
+/// review). With the fraction kept, a tightening never raises the instant
+/// room: `(1 - f) * C_new <= (1 - f) * C_old`. Rounding up only ever keeps
+/// more of the bucket used. A bucket with no backlog is unchanged.
+pub fn rescale_windows(
+    state: &mut LimiterState,
+    old: &LimiterParams,
+    new: &LimiterParams,
+    now_ms: i64,
+) {
+    fn one(tat: i64, old_w: i64, new_w: i64, now: i64) -> i64 {
+        // No backlog, or a window no valid config has (a defensive guard).
+        if tat <= now || old_w <= 0 || new_w <= 0 {
+            return tat;
+        }
+        // backlog < 2^63 and new_w < 2^63, so the product fits in u128.
+        let backlog = (tat - now) as u128;
+        let scaled = ceil_div_u128(backlog * new_w as u128, old_w as u128);
+        // Saturate like `cost_ms`, so a later request's TAT + cost cannot overflow.
+        now.saturating_add(scaled.min(COST_MAX_MS as u128) as i64)
+    }
+    state.tat_short_ms = one(
+        state.tat_short_ms,
+        old.short.window_ms,
+        new.short.window_ms,
+        now_ms,
+    );
+    state.tat_long_ms = one(
+        state.tat_long_ms,
+        old.long.window_ms,
+        new.long.window_ms,
+        now_ms,
+    );
 }
 
 /// Largest amount that would be paid instantly right now (ignoring freezes).

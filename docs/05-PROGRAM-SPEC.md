@@ -38,7 +38,7 @@ Conventions:
 | Vault token account | `["vault-tokens", protocol, mint]` | 165 B + extensions | A token account whose authority is the `Vault` PDA. The protocol can't transfer, close or delegate it. |
 | `Asset` | `["asset", protocol, mint]` | 159 B | `AssetConfig` (allowlisted, haircut, liability weight, confidence multiple, max age, max confidence, Pyth feed id) + decimals |
 | `Backing` | `["backing", protocol, owner]` | 464 B | Up to 8 `(mint, net: i128)` positions: the owner's shadow ledger |
-| `Ticket` | `["ticket", protocol, id]` | 216 B | vault, recipient token account and owner, amount, created, ETA, extension, payer; closed on settle or cancel |
+| `Ticket` | `["ticket", protocol, payer, nonce]` (the payer picks the nonce; the id inside is the protocol counter) | 216 B | vault, recipient token account and owner, amount, created, ETA, extension, payer; closed on settle or cancel |
 | `Change` | `["change", protocol, id]` | 448 B | kind, target, payload, proposer, executable, expiry, vetoed, executed |
 | Lifeboat token account | `["lifeboat-tokens", protocol, mint]` | 165 B + ext. | Authority = the `Vault` PDA |
 
@@ -53,22 +53,22 @@ register_protocol → create_vault / upsert_asset / import_backing        (genes
                   → propose_change (tighten: now; loosen: 72h + veto) / freeze / cancel / lifeboat …
 ```
 
-The seal waits 72h so anyone can compare the imported backing (public events) with the protocol's own books before money can leave (T19).
+The seal waits 72h so anyone can compare the imported backing (public events) with the protocol's own books before money can leave (T19). While the seal is under review (proposed, not vetoed, not expired), no loosening applies: a new vault, an import, a looser asset, limits, guardians, admin, destination or delay are refused with `SealUnderReview`. Tightenings still apply at once. A guardian's veto ends the review; the next proposal waits a full 72h.
 
 ## 4. Instructions
 
 | Tag | Instruction | Signer | Checks | Effect |
 |---|---|---|---|---|
 | 0 | `register_protocol` | the protocol's upgrade authority, **or** its caller PDA via CPI | delay ≥ 72h; 2 ≤ threshold ≤ count ≤ 8; guardians unique, ≠ admin; interval 1–30 days; destination ≠ admin | Creates `Protocol` (survives a pre-funded address) |
-| 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7) | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
+| 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7); not while the seal is under review; after the seal, the limits must keep the unbacked lane closed (one bucket with no bps and no floor), and opening it is a 72h change | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
 | 2 | `upsert_asset(config)` | admin | genesis only (afterwards: `propose_change`) | Creates or updates `Asset` |
 | 3 | `import_backing(amount)` | admin | genesis only | Credits `Backing[owner]`; `vault.imported += amount` |
 | 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault, vault token account, and lifeboat token PDA passed exactly once; `imported + total_in ≤ vault balance + actual spendable lifeboat balance` | `sealed = true` |
 | 7 | `deposit(amount)` | caller + source authority | accounts match the vault; source ≠ vault account | EMA update; `transfer_checked`; credits the amount actually **received** (transfer fees) to `Backing[source authority]`; returns `received` |
-| 8 | `release(amount)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
+| 8 | `release(amount, nonce)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
 | 23 | `quote_release(amount)` | none | as `release` | The same outcome as return data, no writes (for `simulateTransaction`) |
 | 9 | `settle_ticket` | anyone | `now ≥ ETA`; not frozen (protocol or vault); the stored recipient and payer | Pays the ticket; closes it (rent to its payer) |
-| 10 | `cancel_ticket` | live guardian or admin | ticket of this vault | Closes it; **no refund** of the reservation (G1 depends on it) |
+| 10 | `cancel_ticket` | live guardian (not the admin: a stolen admin key could cancel every queued withdrawal, A4) | ticket of this vault | Closes it; **no refund** of the reservation (G1 depends on it) |
 | 11 | `extend_ticket(secs)` | live guardian | ≤ 24h per call, ≤ 7 days in total | ETA later |
 | 12 | `freeze(scope, secs)` | live guardian or admin | ≤ 24h; never shortens | Protocol or vault `frozen_until` |
 | 13 | `unfreeze(scope)` | live quorum | — | Freeze ends now (the admin can't unfreeze) |
@@ -82,7 +82,7 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 | 24 / 25 | `lifeboat_move` / `lifeboat_return` | admin / admin or live quorum | — | Vault ↔ lifeboat (a Bulkhead-held account) |
 | 26 / 28 / 27 | `propose_lifeboat_exit` / `veto_lifeboat_exit` / `execute_lifeboat_exit` | admin / live guardian / anyone | destination set ≥ 72h before the proposal; exit waits ≥ 72h; destination account owned by the committed destination | Lifeboat → the committed destination |
 
-Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin`, `SetLifeboatDestination`, `SetLoosenDelay`. Guardians, admin and destination changes are always loosenings; a delay below 72h is refused even before the seal.
+Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin`, `SetLifeboatDestination`, `SetLoosenDelay`, `SetRecovery`. The optional **recovery key** (set at registration, or later by the admin while none exists) may propose only `SetAdmin` and `SetRecovery`; the admin cannot cancel those, each key cancels only what it proposed, and a recovery `SetAdmin` makes every earlier admin rotation stale. A change records the version of what it replaces (the vault's limits, the asset record, or the protocol-level value) and executes only if that version has not moved: any change to the same thing since the proposal, an ejection included, makes it `ChangeStale`, and it must be proposed again. Guardians, admin and destination changes are always loosenings; a delay below 72h is refused even before the seal.
 
 **Return data of `release`** (40 bytes, little-endian): `backed u64 | instant u64 | queued u64 | ticket_id u64 | eta_s i64`.
 - It is set after the last CPI, because every CPI clears return data.
@@ -133,7 +133,7 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 
 Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and the abort code:
 
-`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048), `InsufficientBalance` (8049).
+`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048), `InsufficientBalance` (8049), `SealUnderReview` (8050), `ChangeStale` (8051).
 
 ## 9. The Solana attack classes (`sealevel-attacks`)
 

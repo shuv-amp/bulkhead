@@ -141,7 +141,7 @@ Not done: the same run on the programs (LiteSVM), and a replay of a real crash d
 
 ## Devnet signatures
 
-Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep. Every transaction below is finalized and succeeded. Program ids, hashes and the upgrade authority are in `SECURITY.md`.
+Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep; all three upgraded in place on 6 Oct (#8, #12, #16). Every transaction below is finalized and succeeded. Program ids, hashes and the upgrade authority are in `SECURITY.md`.
 
 **Programs**
 
@@ -151,6 +151,12 @@ Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep. Every transaction b
 | Vault deployed ([`HK5FbaLt…`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet)) | [`GvwetgZP…`](https://explorer.solana.com/tx/GvwetgZPFJiXbPTLB63CaRAc96T5cxKt8QwMUwdcmXPi6VCAKjJNZHvwDUwvEh8Dfr3FnkdW6a6L4U9KzHjgoez?cluster=devnet) |
 | Harbor deployed ([`6w9t76W2…`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet)) | [`3mB9Uy9i…`](https://explorer.solana.com/tx/3mB9Uy9iwEdfCmDKFXNkLU1U9dvnYKwM7mRUE2mSLesaQeuWakYxzjjAgwYUen4tJjZYxAUcq44v5Y4fwEXNhGwY?cluster=devnet) |
 | Vault upgraded in place, 29 Sep: capacities from `min(reference, live balance)`, abdication needs a guardian quorum (`15`, A1 and A3). Same id, market and seal time; `79b0a47f…a62d9c93`, verified byte-identical | [`5vRRUkGd…`](https://explorer.solana.com/tx/5vRRUkGdJJoX5jBxiERWBDSJDy5L7tugqKZJcauTqZNSLAPWEiLqNWbMx5NRzwC7fk3EUhkvvXuc9Gaywzc7Gmgj?cluster=devnet) |
+| Vault upgraded in place, 6 Oct (A7–A13, findings 30–39): `e1961181…`, verified byte-identical; the existing market reads unchanged | [`57uVm7WA…`](https://explorer.solana.com/tx/57uVm7WA3p7wHkHSDKaLgYDMdLLKemVRcLR55weXtc2F2T1t5QE5LdXySNov2mLNj13iVMGwfhHzNfkLQWkmLcu4?cluster=devnet) |
+| Floor upgraded in place, 6 Oct: `844f4678…`, verified byte-identical | [`rYB7M4Er…`](https://explorer.solana.com/tx/rYB7M4ErEBTA2yKFGi3Dr4XKt72ChZhSUxpriGjZAoAwnAFv1ss5FBKf2HphqoeyQPwEozXxDsxxHNa5ovaG3HM?cluster=devnet) |
+| Harbor upgraded in place, 6 Oct (built-in Vault id, A11): `543be60b…`, verified byte-identical | [`ZkpJvwHA…`](https://explorer.solana.com/tx/ZkpJvwHARZ7EpjSdNnYvP8EaEgcyeF8HMKMXC3gSSWpCMH1fGpz89swWac4so9FBfnJi7KUa1jqSkxHNxSSJFqL?cluster=devnet) |
+| Guardians 1 and 2 had gone stale (last heartbeat 27 Sep). The admin proposed the same guardian set again (change 0, executable from 9 Oct 06:17 UTC; anyone executes it with `market.mjs execute-change`) | [`5vkjPJKP…`](https://explorer.solana.com/tx/5vkjPJKP5UUM2F5ektPRfQtANLtXTFcEujdMdfo9Z4cfYhjuy44ws5ga7a3W55qQXcM42xZiMx32A167Bddz3iT7?cluster=devnet) |
+| The admin proposed a recovery key for the market (change 1, executable from 9 Oct 06:17 UTC; `09 §4`, finding 38). Until both execute, run S1 on devnet with `APPROVED_CHANGE_IDS=0,1`, or its guardian vetoes them | [`3TGZtTtk…`](https://explorer.solana.com/tx/3TGZtTtkMKyQVzf2heEEnXFs1exrvshWqnkqRz3ne6q1gu9Xq7gN4pkSjp3HqnTpqRLKLafWWG2frzbSM1xNh8Ee?cluster=devnet) |
+| Floor S10 target: all three guardians stale; the owner proposed the same set again (executable from 9 Oct 06:17 UTC) | [`GMAF37tw…`](https://explorer.solana.com/tx/GMAF37twXPr9o3DqKm7aw3nX4GvcBvN6zm7NxpU8bHE6CSZJX1s71bTUAQccXWKSuZvMuZHK3hDzYajKNNbS4UM?cluster=devnet) |
 
 **The demo market**: protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet), vault [`7qrrXwX5…`](https://explorer.solana.com/address/7qrrXwX5uYeCDTfdQbbRNJC7tdLYRFCLfq6sswKuZqZw?cluster=devnet), test USDC mint [`CBK36QrH…`](https://explorer.solana.com/address/CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB?cluster=devnet); 3 guardians, quorum 2; 2% per hour, 5% per day.
 

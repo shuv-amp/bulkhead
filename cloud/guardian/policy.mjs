@@ -27,8 +27,17 @@ export const DEFAULT_POLICY = {
   /** Veto every loosening that isn't pre-approved by id. */
   vetoLoosenings: true,
   approvedChangeIds: [],
-  /** Floor: veto upgrade proposals whose buffer isn't pre-approved. */
+  /** Floor: veto every proposal not pre-approved. Upgrades and restores are
+   * approved by buffer; anything else (release authority, owner, guardians, a
+   * lower delay) by "program:proposalId". A quorum's approval still runs an
+   * honest restore over a veto. */
   approvedUpgradeBuffers: [],
+  approvedFloorProposals: [],
+  /** Veto every lifeboat exit that isn't pre-approved as "mint:amount" (base
+   * units). An exit goes to a destination committed 72h earlier; vetoing it
+   * is the guardian's answer to a compromised destination (T18). */
+  vetoLifeboatExits: true,
+  approvedExits: [],
   heartbeatEveryS: 86_400,
   /** Compute-unit limit on every guardian transaction (a freeze, cancel,
    * veto or heartbeat uses a small fraction of it). */
@@ -79,6 +88,8 @@ export function rememberTicket(state, ticket) {
     vault: ticket.vault ?? old.vault ?? null,
     owner: ticket.owner ?? ticket.recipientOwner ?? old.owner ?? "(unknown)",
     amount: ticket.amount ?? old.amount ?? null,
+    // A ticket is named by its payer and nonce, not its id: keep its address.
+    address: ticket.address ?? ticket.ticket ?? old.address ?? null,
   });
 }
 
@@ -103,7 +114,9 @@ export function decode(ev) {
   switch (ev.name) {
     case "vault:released": {
       const r = new Reader(f[2]);
-      return { kind: "released", mint: b58encode(f[0]), owner: b58encode(f[1]), backed: r.u64(), instant: r.u64(), queued: r.u64(), ticketId: r.u64(), etaS: Number(r.i64()) };
+      // f[3]: the ticket's address when part was queued (all zero otherwise).
+      const ticket = f[3]?.length === 32 && f[3].some((b) => b !== 0) ? b58encode(f[3]) : null;
+      return { kind: "released", mint: b58encode(f[0]), owner: b58encode(f[1]), backed: r.u64(), instant: r.u64(), queued: r.u64(), ticketId: r.u64(), etaS: Number(r.i64()), ticket };
     }
     // Scope 0 is the whole protocol, 1 a single vault. The event does not say
     // which vault, so a vault-scoped freeze must not be read as protocol-wide.
@@ -113,6 +126,10 @@ export function decode(ev) {
       return { kind: "unfrozen", scope: f[0]?.[0] ?? 0 };
     case "vault:change_proposed":
       return { kind: "change_proposed", id: u64(f[0]), changeKind: f[1][0], target: b58encode(f[2]) };
+    case "vault:exit_proposed":
+      return { kind: "exit_proposed", mint: b58encode(f[0]), amount: u64(f[1]), executableS: Number(new Reader(f[2]).i64()) };
+    case "vault:lifeboat_in":
+      return { kind: "lifeboat_in", mint: b58encode(f[0]), amount: u64(f[1]) };
     case "floor:proposed":
       return { kind: "floor_proposed", program: b58encode(f[0]), proposalKind: f[1][0], id: u64(f[2]), target: b58encode(f[3]) };
     case "vault:settled":
@@ -176,6 +193,7 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
       actions.push({
         type: "cancel",
         ticketId: ticket.ticketId,
+        address: ticket.address,
         mint: ticket.mint,
         vault: ticket.vault,
         reason: `incident: ticket to ${ticket.owner}`,
@@ -230,6 +248,7 @@ export function judgeReplayedWindow(state, unjudged, worst, now, policy = DEFAUL
 
 export function vetoKey(action) {
   if (action.type === "veto_change") return `c${action.changeId}`;
+  if (action.type === "veto_exit") return `x${action.mint}:${action.executableS}`;
   if (action.type === "floor_veto") return `f${action.program}:${action.proposalId}`;
   return null;
 }
@@ -253,13 +272,19 @@ export function queueFailedVeto(pending, action) {
 export function vetoRetryDisposition(action, chain) {
   if (action.type === "floor_veto") {
     if (!chain) return "keep";
-    if (chain.pendingKind !== 1 || chain.pendingVetoed) return "drop";
+    if (!chain.pendingKind || chain.pendingVetoed) return "drop";
     if (BigInt(chain.pendingId) !== BigInt(action.proposalId)) return "drop";
     return "send";
   }
   if (action.type === "veto_change") {
     if (!chain) return "keep";
     if (chain.vetoed || chain.executed) return "drop";
+    return "send";
+  }
+  if (action.type === "veto_exit") {
+    if (!chain) return "keep";
+    // A new proposal has a new executable time and gets its own veto.
+    if (!chain.exitAmount || chain.exitVetoed || chain.exitExecutableS !== action.executableS) return "drop";
     return "send";
   }
   return "drop";
@@ -373,15 +398,50 @@ export function pendingChangeVeto(change, policy, now, already) {
   return { type: "veto_change", changeId: id, reason: `loosening ${id} (kind ${change.kind}) is still pending` };
 }
 
-/** Veto a Floor upgrade that is still pending. Same rule as a live
- * `floor:proposed` event: only kind 1, and not a pre-approved buffer.
+function exitApproved(policy, mint, amount) {
+  return (policy.approvedExits ?? []).includes(`${mint}:${BigInt(amount)}`);
+}
+
+/** Veto a lifeboat exit that is still pending (a decoded vault). Same rule as
+ * a live `vault:exit_proposed` event. `already` is `state.vetoed`.
+ */
+export function pendingExitVeto(vault, policy, now, already) {
+  if (!policy.vetoLifeboatExits || !vault?.exitAmount || vault.exitVetoed) return null;
+  if (Number.isFinite(vault.exitExpiresS) && now >= vault.exitExpiresS) return null;
+  if (exitApproved(policy, vault.mint, vault.exitAmount)) return null;
+  const action = { type: "veto_exit", mint: vault.mint, executableS: vault.exitExecutableS, reason: `lifeboat exit of ${vault.exitAmount} is still pending` };
+  return already?.has(vetoKey(action)) ? null : action;
+}
+
+/** Floor proposal kinds (programs/floor/src/state.rs `kind`). */
+const FLOOR_KINDS = { 1: "upgrade", 2: "restore", 3: "release of the upgrade authority", 4: "new guardian set", 5: "new owner", 6: "lower upgrade delay", 7: "new recovery key" };
+
+/**
+ * Why a Floor proposal must be vetoed, or null if it is pre-approved. Every
+ * kind waits the delay and is vetoable, and every one can hand the program
+ * to whoever holds the owner key: new code, the upgrade authority itself, the
+ * owner, the guardians, or a shorter delay for all of those.
+ */
+export function floorProposalVeto({ program, kind, id, target }, policy) {
+  const what = FLOOR_KINDS[kind] ?? `kind ${kind}`;
+  if (kind === 1 || kind === 2) {
+    if ((policy.approvedUpgradeBuffers ?? []).includes(target)) return null;
+    return `${what} to unapproved buffer ${target}`;
+  }
+  if ((policy.approvedFloorProposals ?? []).includes(`${program}:${BigInt(id)}`)) return null;
+  return `${what} (target ${target}) is not pre-approved`;
+}
+
+/** Veto a Floor proposal that is still pending. Same rule as a live
+ * `floor:proposed` event (`floorProposalVeto`).
  */
 export function pendingUpgradeVeto(floor, policy, already) {
-  if (!floor || floor.pendingKind !== 1 || floor.pendingVetoed) return null;
+  if (!floor || !floor.pendingKind || floor.pendingVetoed) return null;
   const id = BigInt(floor.pendingId);
   if (already?.has(`f${floor.program}:${id}`)) return null;
-  if ((policy.approvedUpgradeBuffers ?? []).includes(floor.pendingTarget)) return null;
-  return { type: "floor_veto", program: floor.program, proposalId: id, reason: `upgrade to unapproved buffer ${floor.pendingTarget} is still pending` };
+  const why = floorProposalVeto({ program: floor.program, kind: floor.pendingKind, id, target: floor.pendingTarget }, policy);
+  if (!why) return null;
+  return { type: "floor_veto", program: floor.program, proposalId: id, reason: `${why} is still pending` };
 }
 
 /** Record a protocol-wide freeze observed on chain and cancel known queued tickets. */
@@ -408,7 +468,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       // for tickets whose event was missed): its queued amount counts once.
       const ticket = e.queued > 0n ? e.ticketId : null;
       const queued = ticket !== null && state.tickets.has(ticket) ? 0n : e.queued;
-      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued });
+      if (ticket !== null) rememberTicket(state, { ticketId: ticket, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued, address: e.ticket });
       const unbacked = e.instant + queued;
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       // `e.at` is when the outflow happened. `ctx.now` is when the decision is made.
@@ -449,11 +509,22 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
         actions.push({ type: "veto_change", changeId: e.id, reason: `loosening ${e.id} (kind ${e.changeKind}) is not pre-approved` });
       }
       break;
+    case "exit_proposed": {
+      if (!act || !policy.vetoLifeboatExits || exitApproved(policy, e.mint, e.amount)) break;
+      const action = { type: "veto_exit", mint: e.mint, executableS: e.executableS, reason: `lifeboat exit of ${e.amount} is not pre-approved` };
+      if (state.vetoed.has(vetoKey(action))) break;
+      state.vetoed.add(vetoKey(action));
+      actions.push(action);
+      break;
+    }
     case "floor_proposed":
       if (!act) break;
-      if (e.proposalKind === 1 && !policy.approvedUpgradeBuffers.includes(e.target) && !state.vetoed.has(`f${e.program}:${e.id}`)) {
-        state.vetoed.add(`f${e.program}:${e.id}`);
-        actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: `upgrade to unapproved buffer ${e.target}` });
+      {
+        const why = floorProposalVeto({ program: e.program, kind: e.proposalKind, id: e.id, target: e.target }, policy);
+        if (why && !state.vetoed.has(`f${e.program}:${e.id}`)) {
+          state.vetoed.add(`f${e.program}:${e.id}`);
+          actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: why });
+        }
       }
       break;
   }

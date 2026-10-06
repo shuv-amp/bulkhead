@@ -5,7 +5,7 @@
 //   node cloud/e2e/attack.mjs <world.json> <keys dir> <rpc> <count> <amount> <interval_ms>
 
 import { readFileSync } from "node:fs";
-import { Rpc, key, findPda, concat, u64le, IDS, decodeProtocol } from "../lib/solana.mjs";
+import { Rpc, key, findPda, concat, u64le, IDS } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 
 const [worldPath, keys, url, count, amount, interval] = process.argv.slice(2);
@@ -18,12 +18,13 @@ const [asset] = await findPda(["asset", key(w.protocol), key(w.mint)], w.vaultPr
 const [backing] = await findPda(["backing", key(w.protocol), key(w.attacker)], w.vaultProgram);
 
 for (let i = 0; i < Number(count); i++) {
-  const p = decodeProtocol((await rpc.account(w.protocol)).bytes);
-  const [ticket] = await findPda(["ticket", key(w.protocol), u64le(p.nextTicketId)], w.vaultProgram);
+  // The payer (the admin here) names its own ticket with a fresh nonce.
+  const nonce = new DataView(crypto.getRandomValues(new Uint8Array(8)).buffer).getBigUint64(0, true);
+  const [ticket] = await findPda(["ticket", key(w.protocol), key(admin.publicKey), u64le(nonce)], w.vaultProgram);
   const acc = (pubkey, writable = false, signer = false) => ({ pubkey: key(pubkey), writable, signer });
   const ix = {
     programId: key(w.harbor),
-    data: concat(Uint8Array.of(3), u64le(amount)), // Harbor ADMIN_PAYOUT
+    data: concat(Uint8Array.of(3), u64le(amount), u64le(nonce)), // Harbor ADMIN_PAYOUT: amount, ticket nonce
     accounts: [
       acc(w.vaultProgram), acc(w.caller), acc(admin.publicKey, false, true),
       acc(w.protocol, true), acc(w.vault, true), acc(w.vaultTokens, true), acc(w.mint),

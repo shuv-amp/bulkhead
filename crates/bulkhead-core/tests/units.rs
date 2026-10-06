@@ -7,7 +7,7 @@ use bulkhead_core::classify::{classify_asset, classify_limits, AssetConfig, Clas
 use bulkhead_core::floor::{deployable_after_simd0500, elf_info};
 use bulkhead_core::governance::Abdications;
 use bulkhead_core::ledger::{Ledger, Mint, PricedAsset, Pricing};
-use bulkhead_core::limiter::capacity_base;
+use bulkhead_core::limiter::{capacity_base, rescale_windows};
 
 fn mint(i: u8) -> Mint {
     [i; 32]
@@ -654,4 +654,52 @@ fn capacity_base_is_the_lower_of_reference_and_live_balance() {
     assert_eq!(capacity_base(0, u64::MAX), 0);
     assert_eq!(capacity_base(u64::MAX, 0), 0);
     assert_eq!(capacity_base(u64::MAX, u64::MAX), u64::MAX);
+}
+
+/// `rescale_windows` touches only a bucket with a backlog, and refuses a
+/// window no valid config has (zero or negative) instead of dividing by it or
+/// wrapping it to a huge unsigned value. An unchanged window keeps the backlog.
+#[test]
+fn rescale_windows_leaves_what_it_cannot_scale() {
+    let p = |short, long| LimiterParams {
+        short: Bucket {
+            capacity: 1,
+            window_ms: short,
+        },
+        long: Bucket {
+            capacity: 1,
+            window_ms: long,
+        },
+        min_queue_delay_ms: 0,
+        horizon_ms: 0,
+    };
+    let now = 1_000;
+    let busy = LimiterState {
+        tat_short_ms: now + 500,
+        tat_long_ms: now + 700,
+    };
+    let mut s = busy;
+    rescale_windows(&mut s, &p(0, -5), &p(100, 100), now);
+    assert_eq!(s, busy);
+    let mut s = busy;
+    rescale_windows(&mut s, &p(100, 100), &p(0, -5), now);
+    assert_eq!(s, busy);
+    // Same windows: the same backlog. Twice as long: twice the backlog.
+    let mut s = busy;
+    rescale_windows(&mut s, &p(100, 100), &p(100, 200), now);
+    assert_eq!(
+        s,
+        LimiterState {
+            tat_short_ms: now + 500,
+            tat_long_ms: now + 1_400
+        }
+    );
+    // No backlog: nothing to scale.
+    let idle = LimiterState {
+        tat_short_ms: now,
+        tat_long_ms: 0,
+    };
+    let mut s = idle;
+    rescale_windows(&mut s, &p(100, 100), &p(400, 400), now);
+    assert_eq!(s, idle);
 }

@@ -60,8 +60,12 @@ def gen_limiter_session(r: random.Random) -> list:
             amt = r.choice([0, 1, base // 10, base // 2, base, base * 2, base * 50, edge_u64(r)])
             amt = min(max(amt, 0), U64)
             lines.append(f"R {now} {amt} {frozen}")
-        elif roll < 0.88:
+        elif roll < 0.84:
             lines.append(f"Z {now} {r.choice([0, 0, 0, 1, 5])}")
+        elif roll < 0.88:
+            # A new LimitConfig: windows longer (a tightening), shorter, or the same.
+            lines.append(f"W {now} {r.choice([1, 1000, 60_000, hour, 4 * hour, 30 * day, r.randrange(1, 1 << 32) * 1000])} "
+                         f"{r.choice([hour, day, 7 * day, 30 * day, r.randrange(1, 1 << 32) * 1000])}")
         else:
             lines.append(f"A {now}")
     return lines
@@ -298,7 +302,7 @@ def run_worker(lines: list) -> list:
 def fixture_for(lines: list, idx: int) -> list:
     """Smallest replayable prefix: the command, plus its limiter session if stateful."""
     cmd = lines[idx].split()[0]
-    if cmd in ("R", "Z", "A"):
+    if cmd in ("R", "Z", "A", "W"):
         start = idx
         while start > 0 and lines[start].split()[0] != "L":
             start -= 1

@@ -26,9 +26,11 @@ Devnet only; test tokens only. The upgrade authority of all three programs is a 
 
 | Program | Devnet id | sha256 of the deployed code (Agave v4.3.0, platform-tools v1.57, sBPF v3) |
 |---|---|---|
-| Floor | `HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E` | `ef2b349b77473643e942afe23e190e7a3ae0e9eda2636d78c58c3b719c324dba` |
-| Vault | `HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b` | `79b0a47ff3086fe2389e5ac089560f530a7d4089fcd5d12814a30132a62d9c93` (upgraded in place 29 Sep; until then `466cc17beb71ebb1f342cec5bc6ac10c333b58e7d537d675fd57bc3a6eca22eb`) |
-| Harbor (demo) | `6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh` | `d91a8ac28a3d2bffe07de80f20028a09a1f15c8e7639e5551250c9b54cb712f2` |
+| Floor | `HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E` | `844f46784b5831bea63b7d775dc43ad28a9044a588416f0ae9f002eca901f623` (upgraded in place 6 Oct; until then `ef2b349b77473643e942afe23e190e7a3ae0e9eda2636d78c58c3b719c324dba`) |
+| Vault | `HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b` | `e1961181e062cc6641da9940354cab7cea8f22809d89fe76b97708d26ff2592c` (upgraded in place 6 Oct; 29 Sep to 6 Oct `79b0a47ff3086fe2389e5ac089560f530a7d4089fcd5d12814a30132a62d9c93`; until 29 Sep `466cc17beb71ebb1f342cec5bc6ac10c333b58e7d537d675fd57bc3a6eca22eb`) |
+| Harbor (demo) | `6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh` | `543be60b25b557ea0a58f0c4d2133f67954172006d2a21490217cb4010adeb40` (upgraded in place 6 Oct; until then `d91a8ac28a3d2bffe07de80f20028a09a1f15c8e7639e5551250c9b54cb712f2`) |
+
+`scripts/verify-deployed.sh` matched all three byte for byte on 6 Oct.
 
 The demo market's admin and guardian keys are also team-held. On devnet that is the point: S1 plays the attacker with the admin key.
 

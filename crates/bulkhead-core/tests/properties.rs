@@ -14,8 +14,8 @@ use bulkhead_core::floor::{
 use bulkhead_core::governance::{self, Abdications, GovError, Schedule, CHANGE_EXPIRY_S};
 use bulkhead_core::ledger::{contribution, Ledger, LedgerError, Mint, PricedAsset, Pricing};
 use bulkhead_core::limiter::{
-    available_now, capacity_from_ref, max_unbacked_over, request, reset_backlog, Bucket, Decision,
-    LimiterError, LimiterParams, LimiterState,
+    available_now, capacity_from_ref, max_unbacked_over, request, rescale_windows, reset_backlog,
+    Bucket, Decision, LimiterError, LimiterParams, LimiterState,
 };
 use bulkhead_core::price::conservative;
 use bulkhead_core::value::value_v;
@@ -738,6 +738,134 @@ fn tighten_never_raises_the_bound() {
     assert!(
         tightened > 100,
         "generator produced too few tightenings ({tightened})"
+    );
+}
+
+/// A random tightening of `old`: a few fields moved, kept only if Tighten.
+fn tightened(r: &mut Rng, old: &LimitConfig) -> Option<LimitConfig> {
+    let mut new = *old;
+    for _ in 0..r.range(1, 3) {
+        match r.range(0, 5) {
+            0 => new.short_window_s = new.short_window_s.saturating_mul(r.range(1, 1_000) as u32),
+            1 => new.long_window_s = new.long_window_s.saturating_mul(r.range(1, 1_000) as u32),
+            2 => new.short_bps = r.range(0, new.short_bps as u64) as u16,
+            3 => new.long_bps = r.range(0, new.long_bps as u64) as u16,
+            _ => {
+                new.min_queue_delay_s = new
+                    .min_queue_delay_s
+                    .saturating_add(r.range(0, 86_400) as u32)
+            }
+        }
+    }
+    (classify_limits(old, &new) == Class::Tighten).then_some(new)
+}
+
+/// A tightening, applied with `rescale_windows`, never raises the instant
+/// room: not at the moment it applies, and not at any later time with no
+/// request in between (the room then refills no faster than before). This
+/// is the property a longer window broke before backlogs were rescaled.
+#[test]
+fn a_tightening_never_raises_the_instant_room_now_or_later() {
+    let mut r = Rng(0x7167_4E5E);
+    let mut checked = 0u64;
+    let mut drained = 0u64;
+    for _ in 0..cases() * 4 {
+        let old = random_limits(&mut r);
+        let Some(new) = tightened(&mut r, &old) else {
+            continue;
+        };
+        let reference = r.next() >> r.range(0, 40);
+        let (po, pn) = (params_of(&old, reference), params_of(&new, reference));
+        // A realistic state: requests under the old limits.
+        let mut s = LimiterState::default();
+        let mut t = r.range(0, 1 << 40) as i64;
+        if po.short.capacity > 0 && po.long.capacity > 0 {
+            for _ in 0..r.range(0, 6) {
+                t += r.range(0, 2 * po.short.window_ms as u64) as i64;
+                let amount = match r.range(0, 3) {
+                    0 => available_now(&s, &po, t).max(1),
+                    1 => r.range(1, po.short.capacity.max(1)),
+                    _ => {
+                        let shift = r.range(0, 63);
+                        r.range(1, u64::MAX >> shift)
+                    }
+                };
+                let _ = request(&mut s, &po, t, amount, 0);
+            }
+        }
+        if available_now(&s, &po, t) == 0 {
+            drained += 1;
+        }
+        let mut sn = s;
+        rescale_windows(&mut sn, &po, &pn, t);
+        let far = r.range(0, 1 << 36) as i64;
+        for dt in [
+            0,
+            1,
+            1_000,
+            po.short.window_ms,
+            pn.short.window_ms,
+            po.long.window_ms,
+            pn.long.window_ms,
+            far,
+        ] {
+            let later = t + dt;
+            assert!(
+                available_now(&sn, &pn, later) <= available_now(&s, &po, later),
+                "tightening raised the room at +{dt} ms: {old:?} -> {new:?}, state {s:?} -> {sn:?}"
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked > 1_000 && drained > 100,
+        "too few useful cases: {checked} checked, {drained} drained"
+    );
+}
+
+/// The attack the rescaling stops: a stolen admin key drains the burst, then
+/// lengthens the windows (a tightening, applied at once), over and over. All
+/// it is paid, at any horizon, stays within the G1 bound of the limits it
+/// started from.
+#[test]
+fn a_thief_who_only_tightens_is_held_to_the_starting_g1_bound() {
+    let mut r = Rng(0x7419_E000);
+    let mut paid_more_than_one_burst = 0u64;
+    for _ in 0..cases() {
+        let start = random_limits(&mut r);
+        let reference = r.range(1, 1 << 50);
+        let p0 = params_of(&start, reference);
+        if p0.short.capacity == 0 || p0.long.capacity == 0 {
+            continue;
+        }
+        let t0 = r.range(0, 1 << 40) as i64;
+        let (mut cfg, mut s, mut t, mut paid) = (start, LimiterState::default(), t0, 0u128);
+        for _ in 0..r.range(1, 12) {
+            let p = params_of(&cfg, reference);
+            let room = available_now(&s, &p, t);
+            if room > 0 && request(&mut s, &p, t, room, 0) == Ok(Decision::Instant) {
+                paid += room as u128;
+                if paid > p0.short.capacity.min(p0.long.capacity) as u128 {
+                    paid_more_than_one_burst += 1;
+                }
+            }
+            if let Some(next) = tightened(&mut r, &cfg) {
+                rescale_windows(&mut s, &p, &params_of(&next, reference), t);
+                cfg = next;
+            }
+            let (any, roll) = (r.range(0, 1 << 30), r.next());
+            t += pick(&[0, 0, 1, 1_000, 60_000, any], roll) as i64;
+        }
+        assert!(
+            paid <= max_unbacked_over(&p0, t - t0),
+            "paid {paid} in {} ms; G1 of the starting limits is {} ({start:?})",
+            t - t0,
+            max_unbacked_over(&p0, t - t0)
+        );
+    }
+    assert!(
+        paid_more_than_one_burst > 10,
+        "time passed in too few cases: {paid_more_than_one_burst}"
     );
 }
 

@@ -14,7 +14,7 @@ use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decisio
 use common::vault::*;
 use common::*;
 use solana_address::Address;
-use solana_instruction::AccountMeta;
+use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 
@@ -1322,16 +1322,12 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     // then 99,000 of the 9.9M left fill it exactly; the rest queue.
     let attacker = Keypair::new();
     let loot = w.account("usdc", &attacker.pubkey());
-    let (base, _) = w.m.next_ticket(&w.env);
     let mut ixs = Vec::new();
     for k in 0..10u64 {
         let amount = if k == 1 { 99_000 } else { 100_000 } * USDC;
-        let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &loot, &attacker.pubkey(), amount, &w.usdc_prices(true));
-        // The first two fit the burst; each later one becomes ticket base + (k - 2).
-        let id = base + k.saturating_sub(2);
-        let ticket = pda(&[b"ticket", w.m.protocol.as_ref(), &id.to_le_bytes()], &w.m.vault_program);
-        ix.accounts[3 + 9 - 1].pubkey = ticket; // Harbor: 3 own accounts, then Vault release index 9 at 3 + (9 - 1)
-        ixs.push(ix);
+        // Each payout names its own ticket (payer, nonce k): ten in one
+        // transaction, built from the same state, never collide.
+        ixs.push(w.m.admin_payout_with(&w.env, &w.usdc, &loot, &attacker.pubkey(), amount, &w.usdc_prices(true), k));
     }
     let m = w.env.ok(&ixs, &[&w.m.admin]);
     assert_eq!(w.env.balance(&loot), 199_000 * USDC, "Bulkhead: only the 2% burst inside the transaction");
@@ -1344,11 +1340,459 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     let g0 = w.m.g[0].pubkey();
     let fz = w.m.freeze_ix(&g0, None, 86_400);
     w.env.ok(&[fz], &[&w.m.g[0]]);
-    for id in base..base + 8 {
-        let t = pda(&[b"ticket", w.m.protocol.as_ref(), &id.to_le_bytes()], &w.m.vault_program);
+    for nonce in 2..10u64 {
+        let t = w.m.ticket_pda(&w.env.payer.pubkey(), nonce);
         let ix = w.m.cancel_ix(&w.usdc, &t, &g0, &w.env.payer.pubkey());
         w.env.ok(&[ix], &[&w.m.g[0]]);
     }
     assert_eq!(w.env.balance(&loot), 199_000 * USDC);
     assert_eq!(w.env.balance(&w.usdc.vault_tokens), 9_801_000 * USDC, "98% stays");
+}
+
+#[test]
+fn lengthening_a_window_is_a_tightening_that_grants_no_new_burst() {
+    // G1 against a stolen admin key: a window lengthening is classified as a
+    // tightening, so it applies at once. If the bucket kept its backlog in
+    // milliseconds, a drained bucket would look partly empty under the longer
+    // window, and repeating the change would pay the burst again and again.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    let thief = w.user();
+    let to = w.account("usdc", &thief.pubkey());
+    let burst = w.m.attest(&mut w.env, &w.usdc).available_now;
+    assert_eq!(burst, 200_000 * USDC);
+    let mut paid = 0;
+    let mut limits = Limits::default_limits();
+    for _ in 0..6 {
+        let now = w.m.attest(&mut w.env, &w.usdc).available_now;
+        if now > 0 {
+            let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &thief.pubkey(), now, &w.usdc_prices(true));
+            w.env.ok(&[ix], &[&w.m.admin]);
+            paid += now;
+        }
+        // "Tighten": both windows four times longer, same bps.
+        limits.short_window_s *= 4;
+        limits.long_window_s *= 4;
+        let ix = w.m.propose_change_ix(&w.env, 0, &vault, &limits.bytes(), Some(&vault));
+        w.env.ok(&[ix], &[&w.m.admin]);
+        w.env.next_slot();
+    }
+    assert_eq!(w.env.balance(&to), paid);
+    // Everything above happened in the same second: G1 at T = 0 is one burst.
+    assert!(paid <= burst, "a stolen admin key took {} USDC instantly; G1 allows {}", paid / USDC, burst / USDC);
+}
+
+fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
+    let (mint, _) = w.env.create_mint(6, &token_program());
+    let vault = pda(&[b"vault", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
+    w.m.vault_ix(1, &limits.bytes(), vec![
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new(vault, false),
+        AccountMeta::new(vault_tokens, false),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new_readonly(token_program(), false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+fn import_ix(w: &World, owner: &Address, amount: u64) -> Instruction {
+    w.m.vault_ix(3, &amount.to_le_bytes(), vec![
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.m.backing(owner), false),
+        AccountMeta::new_readonly(*owner, false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+#[test]
+fn nothing_loosens_while_the_seal_is_under_review() {
+    // The seal waits 72h so anyone can review what is sealed (T19). If the
+    // admin could still loosen in that window, a minute before the seal it
+    // could swap in its own guardians (nobody left to veto), open the limits,
+    // add a vault and import backing, and seal all of it unreviewed.
+    let mut w = World::new();
+    let u = w.user();
+    w.deposit("usdc", &u, 1_000_000 * USDC);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY - 60);
+    let vault = w.usdc.vault;
+    let zero = Address::default();
+
+    let puppets = [Keypair::new(), Keypair::new()];
+    let mut guardians = vec![2u8];
+    for k in &puppets {
+        guardians.extend_from_slice(k.pubkey().as_ref());
+    }
+    guardians.push(2);
+    guardians.extend_from_slice(&(7 * DAY).to_le_bytes());
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardians, None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "guardian swap");
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 10_000;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "looser limits");
+    let ix = import_ix(&w, &Keypair::new().pubkey(), 1);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "an import");
+    let ix = create_vault_ix(&mut w, &Limits::default_limits());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::SEAL_UNDER_REVIEW, "a new vault");
+
+    // Making things safer never waits.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+
+    // A guardian's veto ends the review; the admin may change things again,
+    // and the seal it proposes next waits a full 72h from then.
+    let veto = w.m.vault_ix(6, &[], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(w.m.g[0].pubkey(), true)]);
+    w.env.ok(&[veto], &[&w.m.g[0]]);
+    let ix = import_ix(&w, &Keypair::new().pubkey(), 1);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1, &w.usdc.token_program);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY - 1);
+    let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[seal.clone()], &[]), verr::SEAL_NOT_EXECUTABLE);
+    w.env.advance(1);
+    w.env.ok(&[seal], &[]);
+}
+
+#[test]
+fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
+    // Creating a vault applied its limits at once, even after the seal: an
+    // admin key alone could open an instant 100%-an-hour lane on a new mint.
+    let mut w = World::new();
+    let u = w.user();
+    w.deposit("usdc", &u, 1_000_000 * USDC);
+    w.seal();
+    let ix = create_vault_ix(&mut w, &Limits::default_limits());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY);
+    // A closed lane (either bucket at capacity 0) is accepted; opening it is a
+    // loosening, so it waits 72h like any other.
+    let mut closed = Limits::default_limits();
+    closed.short_bps = 0;
+    let ix = create_vault_ix(&mut w, &closed);
+    let vault = ix.accounts[3].pubkey;
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &Limits::default_limits().bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let d = w.env.account(&vault).data;
+    assert_eq!(u16::from_le_bytes(d[8 + 32 * 4..8 + 32 * 4 + 2].try_into().unwrap()), 0, "still closed: the opening is only a proposal");
+}
+
+#[test]
+fn only_a_live_guardian_cancels_a_ticket_not_the_admin() {
+    // A stolen admin key could cancel every honest queued withdrawal, without
+    // end and with no counter: each cancel also keeps its reservation, so the
+    // lane stays full (A4). Cancelling is a guardian's brake; the admin keeps
+    // freeze.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 2_000_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let admin = w.m.admin.pubkey();
+    let by_admin = w.m.cancel_ix(&w.usdc, &ticket, &admin, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(&[by_admin], &[&w.m.admin]), verr::NOT_GUARDIAN);
+    let g0 = w.m.g[0].pubkey();
+    let by_guardian = w.m.cancel_ix(&w.usdc, &ticket, &g0, &w.env.payer.pubkey());
+    w.env.ok(&[by_guardian], &[&w.m.g[0]]);
+}
+
+/// Execute change `id`; `target` is the vault (SetLimits), the asset PDA
+/// (UpsertAsset), or anything for a protocol-level change.
+fn execute_change_ix(w: &World, id: u64, target: &Address) -> Instruction {
+    w.m.vault_ix(20, &[], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new(*target, false),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+fn short_bps(w: &World, vault: &Address) -> u16 {
+    let d = w.env.account(vault).data;
+    u16::from_le_bytes(d[8 + 128..8 + 130].try_into().unwrap())
+}
+
+#[test]
+fn a_stale_loosening_cannot_undo_a_later_tightening() {
+    // A loosening stores only its payload. Executed after a tightening of the
+    // same vault, it used to replace the whole config and silently undo the
+    // tightening, which was never part of what the 72h review saw.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 1_000;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    // An emergency tightening while it waits.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 50;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &vault)], &[]), verr::CHANGE_STALE);
+    assert_eq!(short_bps(&w, &vault), 50, "the tightening stands");
+}
+
+#[test]
+fn two_pending_loosenings_of_one_vault_cannot_both_execute() {
+    // "Last executed wins" let anyone pick the order of overlapping changes.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let vault = w.usdc.vault;
+    for bps in [300u16, 1_000] {
+        let mut l = Limits::default_limits();
+        l.short_bps = bps;
+        let ix = w.m.propose_change_ix(&w.env, 0, &vault, &l.bytes(), Some(&vault));
+        w.env.ok(&[ix], &[&w.m.admin]);
+    }
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 0, &vault)], &[]);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &vault)], &[]), verr::CHANGE_STALE);
+    assert_eq!(short_bps(&w, &vault), 300);
+}
+
+#[test]
+fn an_older_guardian_set_cannot_bring_back_an_ejected_guardian() {
+    // A quorum ejects a guardian; a SetGuardians proposed before the ejection,
+    // still naming it, must not restore it.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let zero = Address::default();
+    let mut set = vec![3u8];
+    for k in &w.m.g {
+        set.extend_from_slice(k.pubkey().as_ref());
+    }
+    set.push(2);
+    set.extend_from_slice(&(7 * DAY).to_le_bytes());
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set, None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let eject = w.m.vault_ix(15, &[2], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(w.m.g[0].pubkey(), true),
+        AccountMeta::new_readonly(w.m.g[1].pubkey(), true),
+    ]);
+    w.env.ok(&[eject], &[&w.m.g[0], &w.m.g[1]]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &protocol)], &[]), verr::CHANGE_STALE);
+}
+
+#[test]
+fn a_change_to_one_thing_does_not_stale_a_change_to_another() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let new_admin = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &new_admin, &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    // Raising the delay (a tightening of another kind) and tightening a vault.
+    let zero = Address::default();
+    let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(4 * DAY).to_le_bytes(), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let vault = w.usdc.vault;
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    let d = w.env.account(&protocol).data;
+    assert_eq!(&d[8 + 64..8 + 96], new_admin.as_ref(), "the admin changed");
+}
+
+#[test]
+fn a_stale_asset_loosening_cannot_undo_a_later_asset_tightening() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (asset, mint, program) = (w.usdc.asset, w.usdc.mint, w.usdc.token_program);
+    let upsert = |w: &World, cfg: &[u8]| {
+        let mut ix = w.m.propose_change_ix(&w.env, 1, &mint, cfg, Some(&asset));
+        ix.accounts.push(AccountMeta::new_readonly(mint, false));
+        ix.accounts.push(AccountMeta::new_readonly(program, false));
+        ix
+    };
+    // Loosen: a larger haircut allowance. Then tighten: a smaller one.
+    let ix = upsert(&w, &asset_bytes(true, 9_950, 10_100, 20_000, 60, 100, USDC_FEED));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = upsert(&w, &asset_bytes(true, 9_000, 10_100, 20_000, 60, 100, USDC_FEED));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &asset)], &[]), verr::CHANGE_STALE);
+}
+
+#[test]
+fn queued_releases_built_from_the_same_state_do_not_collide() {
+    // A ticket used to be named by the protocol's next id, so two users who
+    // read the same state raced for one address and the second failed. Each
+    // payer now names its own ticket.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (a, b) = (w.user(), w.user());
+    let (ta, tb) = (w.account("usdc", &a.pubkey()), w.account("usdc", &b.pubkey()));
+    // Drain the burst first, so both of the next payouts are queued.
+    let drain = w.m.admin_payout_ix(&w.env, &w.usdc, &ta, &a.pubkey(), 200_000 * USDC, &w.usdc_prices(true));
+    w.env.ok(&[drain], &[&w.m.admin]);
+    let first = w.m.admin_payout_with(&w.env, &w.usdc, &ta, &a.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 7);
+    let second = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
+    let o1 = outcome(&w.env.ok(&[first], &[&w.m.admin]));
+    let o2 = outcome(&w.env.ok(&[second], &[&w.m.admin]));
+    assert_eq!((o1.queued, o2.queued), (1_000 * USDC, 1_000 * USDC));
+    assert_eq!(o2.ticket_id, o1.ticket_id + 1, "ids still count up");
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!(a.pending, 2);
+    // A payer reusing its own nonce is refused, and nothing else is.
+    let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
+    assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
+}
+
+fn cancel_change_ix(w: &World, id: u64, signer: &Address) -> Instruction {
+    w.m.vault_ix(21, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new_readonly(*signer, true),
+    ])
+}
+
+fn protocol_admin(w: &World) -> Address {
+    let d = w.env.account(&w.m.protocol).data;
+    Address::from(<[u8; 32]>::try_from(&d[8 + 64..8 + 96]).unwrap())
+}
+
+#[test]
+fn a_recovery_key_replaces_a_stolen_admin_key_that_cannot_stop_it() {
+    // A4: a thief holding the admin key could cancel every rotation of the
+    // admin, since only the admin could propose or cancel one. A separate
+    // recovery key (the Morpho V2 owner / curator split) proposes the new
+    // admin; it waits the delay, any guardian can veto it, and the admin
+    // cannot cancel it.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let zero = Address::default();
+    let recovery = w.user();
+    // With no recovery key yet, the admin may set one: a 72h change.
+    let ix = w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+
+    // The admin key is stolen. The recovery key proposes a new admin.
+    let fresh = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    let thief = w.m.admin.pubkey();
+    // The thief cannot cancel it, cannot replace the recovery key, and its own
+    // rival rotation would only race a guardian veto.
+    assert_eq!(w.env.fails(&[cancel_change_ix(&w, 1, &thief)], &[&w.m.admin]), verr::NOT_ADMIN);
+    let ix = w.m.propose_change_ix(&w.env, 6, &Keypair::new().pubkey(), &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NOT_ADMIN);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 1, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh);
+    // The old key is no longer the admin.
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let vault = w.usdc.vault;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NOT_ADMIN);
+    let _ = zero;
+}
+
+#[test]
+fn the_recovery_key_can_only_replace_the_admin_or_itself() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let recovery = w.user();
+    let ix = w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    let vault = w.usdc.vault;
+    // Not limits, not guardians: it has no say over risk or the brakes.
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 1_000;
+    let mut ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    ix.accounts[1].pubkey = recovery.pubkey();
+    assert_eq!(w.env.fails(&[ix], &[&recovery]), verr::NOT_ADMIN);
+    // The admin and the recovery key stay distinct, in both directions.
+    let admin = w.m.admin.pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 6, &admin, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    assert_eq!(w.env.fails(&[ix], &[&recovery]), verr::INVALID_INSTRUCTION);
+    let ix = w.m.propose_change_ix(&w.env, 3, &recovery.pubkey(), &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
+    // It may replace itself; the admin may not, once one exists.
+    let next = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 6, &next, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+}
+
+#[test]
+fn a_thief_cannot_pre_empt_the_recovery_key_with_its_own_rotation() {
+    // With no guardian awake to veto, a thief who proposed its own new admin
+    // first would execute first and make the recovery key's change stale,
+    // again and again. A recovery proposal therefore stales every earlier
+    // admin proposal at once, and later ones run after it.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let recovery = w.user();
+    let ix = w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    // The thief proposes first (id 1), then the recovery key (id 2).
+    let accomplice = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &accomplice, &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(60);
+    let fresh = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &protocol)], &[]), verr::CHANGE_STALE);
+    w.env.ok(&[execute_change_ix(&w, 2, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh);
 }

@@ -293,6 +293,11 @@ Examples (golden G-12):
 **Soundness properties.**
 - `tighten_never_raises_the_bound`: for any reference balance and horizon, the G1 bound under the new config is ≤ the old one.
 - `tighten_asset_never_adds_value`: collateral value never rises and liability value never falls.
+- `a_tightening_never_raises_the_instant_room_now_or_later` and `a_thief_who_only_tightens_is_held_to_the_starting_g1_bound`: the state across the change, not only the formula (finding 30).
+
+**A loosening executes only on what was reviewed.** A pending change records the version of what it replaces; any change to that same thing since the proposal (a tightening, another change, an ejection for the guardian set) makes it stale, and it must be proposed again (`09 §4`, finding 34). Without this, a loosening silently undid a later emergency tightening, and an older guardian set could bring back an ejected guardian.
+
+**A change of window keeps the bucket's used fraction.** This is the policy, confirmed in the design review: it is also what the state does when capacity drifts (the TAT stays, `C` moves), so one invariant covers both. A bucket's state is a backlog in milliseconds, and the same backlog is a smaller share of a longer window. So whenever a vault's limits change, each backlog becomes `⌈backlog · W_new / W_old⌉` (`rescale_windows`). Without it, lengthening a window (a tightening, applied at once) made a just-drained bucket look partly full, and a stolen admin key could repeat that to take the burst again and again (`09 §4`, finding 30). With it, a tightening never raises the instant room, at the moment it applies or later: the room is `(1 − f)·C_new ≤ (1 − f)·C_old`, and it refills no faster.
 
 **Known liveness caveat.** A compromised admin can tighten instantly (for example, capacity 0 closes the unbacked lane), and undoing that takes 72h. That is denial of service on unbacked flows, not theft. Own-deposit exits keep working. We publish this.
 
@@ -301,7 +306,7 @@ Examples (golden G-12):
 | Action | Who | Effect | Limits |
 |---|---|---|---|
 | `settle_ticket` | anyone (crank) | Pays the stored recipient once `now ≥ eta` and not frozen | Only the stored recipient |
-| `cancel_ticket` | any guardian, admin | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5) |
+| `cancel_ticket` | any live guardian (not the admin, A4) | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5) |
 | `extend_ticket` | any guardian | `eta += x` | ≤ 24h per call, ≤ 7 days total |
 | `freeze` | any guardian, admin | `frozen_until = max(frozen_until, now + x)` | `x ≤ 24h`; re-freezable |
 | `unfreeze` | guardian quorum | `frozen_until = now` | |

@@ -31,7 +31,8 @@ use crate::governance::{
     can_eject, can_execute, freeze_until, guardian_alive, quorum, schedule, Abdications,
 };
 use crate::limiter::{
-    clamp_capacity, request, reset_backlog, Bucket, Decision, LimiterParams, LimiterState,
+    clamp_capacity, lane_always_closed, params_from_config, request, reset_backlog, Bucket,
+    Decision, LimiterParams, LimiterState,
 };
 use crate::price::conservative;
 
@@ -149,6 +150,29 @@ fn classify_tighten_is_sound() {
         assert!(new.min_queue_delay_s >= old.min_queue_delay_s);
         let tighter = |o: u64, n: u64| n == o || (o == 0 && n > 0) || (n > 0 && n <= o);
         assert!(tighter(old.short_cap, new.short_cap) && tighter(old.long_cap, new.long_cap));
+    }
+}
+
+/// FULL. A config `lane_always_closed` accepts has a bucket of capacity 0 at
+/// every reference balance, so `request` refuses every unbacked amount
+/// (`LaneClosed`). The Vault relies on it for vaults created after the seal.
+#[kani::proof]
+fn a_closed_lane_stays_closed_at_every_balance() {
+    let cfg = LimitConfig {
+        short_bps: kani::any(),
+        short_window_s: kani::any(),
+        long_bps: kani::any(),
+        long_window_s: kani::any(),
+        min_queue_delay_s: kani::any(),
+        short_floor: kani::any(),
+        long_floor: kani::any(),
+        short_cap: kani::any(),
+        long_cap: kani::any(),
+    };
+    let reference: u64 = kani::any();
+    if lane_always_closed(&cfg) {
+        let p = params_from_config(&cfg, reference);
+        assert!(p.short.capacity == 0 || p.long.capacity == 0);
     }
 }
 

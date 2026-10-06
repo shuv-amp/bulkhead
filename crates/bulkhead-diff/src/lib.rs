@@ -94,6 +94,16 @@ impl Session {
                     Err(e) => format!("X {}", e.code()),
                 })
             }
+            "W" => {
+                let (p, s) = self.limiter.as_mut().ok_or("no limiter")?;
+                let now: i64 = t.p()?;
+                let mut new = *p;
+                new.short.window_ms = t.p()?;
+                new.long.window_ms = t.p()?;
+                limiter::rescale_windows(s, p, &new, now);
+                *p = new;
+                Ok(format!("W {} {}", s.tat_short_ms, s.tat_long_ms))
+            }
             "A" => {
                 let (p, s) = self.limiter.as_ref().ok_or("no limiter")?;
                 let now: i64 = t.p()?;
