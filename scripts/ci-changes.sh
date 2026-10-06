@@ -12,6 +12,8 @@ while IFS= read -r f; do
   case "$f" in
     .github/*|scripts/ci-changes.sh|rust-toolchain.toml|*/rust-toolchain.toml)
       all ;;
+    cloud/guardian/*.service)
+      workflows=true ;;
   esac
   case "$f" in
     crates/bulkhead-core/src/*|scripts/mutants.sh|.cargo/mutants.toml)

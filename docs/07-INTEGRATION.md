@@ -87,7 +87,26 @@ Harbor is deliberately naive, so the scenarios can play a compromised protocol:
 
 A protocol whose admin can pay anyone anything is the worst case. Harbor shows that even then, Bulkhead bounds the outflow (`08` S1, S8).
 
-## 6. Not in this build
+## 6. Running a guardian
+
+The guardian (`cloud/guardian/main.mjs`, Node 20+, no dependencies) is what turns G1's bound into a freeze within seconds. Each guardian key should run on its own host, under its own operator.
+
+```json
+{ "rpc": "https://your-primary-rpc", "rpcs": ["https://a-second-provider", "https://a-third"],
+  "vaultProgram": "...", "protocolProgram": "...", "mints": ["..."],
+  "guardianKey": "/etc/bulkhead/keys/guardian.json",
+  "stateFile": "/var/lib/bulkhead/<name>.state.json",
+  "alert": { "url": "https://hooks.slack.com/services/...", "format": "slack" },
+  "policy": { "approvedChangeIds": [] } }
+```
+
+- **Endpoints from different providers.** With `rpcs`, reads and sends move to the next endpoint when one fails, and every transaction also goes to all of them (`09`, findings 49 and 51). Prefer endpoints that keep transaction history.
+- **Alerts.** Freezes, failures and lifeboat moves need people: only a guardian quorum unfreezes or returns the lifeboat. Set `alert`, and keep its URL secret.
+- **Supervision.** The guardian exits on anything it cannot recover from, after logging and alerting it. Run it under `cloud/guardian/bulkhead-guardian@.service` (systemd: restarts it, never gives up, read-only filesystem except its state directory). `stateFile` keeps an incident hold across restarts (`09`, finding 48).
+- **Liveness.** It heartbeats every 24h; a key that misses its on-chain interval stops counting toward the quorum. The status page shows each guardian's standing.
+- **Approvals are explicit.** It vetoes every loosening, lifeboat exit and Floor proposal not listed in its policy. Add a change's id to `approvedChangeIds` once the operators agree, and restart it.
+
+## 7. Not in this build
 
 - **Mint gates** (a Bulkhead-held mint authority with the same limiter on supply) and **flash loans** (`flash_release` with an introspected top-level `flash_repay`) are specified in `03 §4.8`.
 - They are not implemented in this build. A protocol that needs them waits, rather than routing around custody.

@@ -326,6 +326,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: pipx run zizmor==1.30.1 --format plain .github/workflows
+      - name: The guardian's systemd unit
+        run: |
+          # verify resolves ExecStart: give it the paths the unit names.
+          sudo mkdir -p /opt/bulkhead && sudo cp -r cloud /opt/bulkhead/
+          sudo cp cloud/guardian/bulkhead-guardian@.service /etc/systemd/system/
+          systemd-analyze verify /etc/systemd/system/bulkhead-guardian@test.service
+          systemd-analyze security --offline=yes --no-pager /etc/systemd/system/bulkhead-guardian@test.service | tail -1
 
   devnet:
     # Weekly, and when these checks change: build the programs here and
