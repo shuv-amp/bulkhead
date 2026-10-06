@@ -118,7 +118,7 @@ scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewher
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
-| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `844f4678…a901f623` |
+| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `3639b131…ad051dfa` |
 | Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `c73b058d…c3b2cdae` |
 | Harbor (demo protocol) | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `543be60b…10adeb40` |
 
