@@ -2400,9 +2400,42 @@ fn every_account_substitution_is_refused() {
         .push(AccountMeta::new_readonly(third_lifeboat, false));
     sp.run(&mut p.env, "execute seal", ix, &[], &[]);
 
+    // --- registration: by the protocol's caller PDA (through Harbor's CPI),
+    // and directly by the protocol program's upgrade authority --------------
+    let harbor2 = Address::new_unique();
+    p.env.svm.add_program(harbor2, &so("bulkhead_harbor")).unwrap();
+    let ix = p.m.register_ix(&p.env, harbor2, 3 * DAY);
+    sp.run(&mut p.env, "register (caller PDA)", ix, &[], &[
+        any(2, "rent payer: any funded signer"),
+        any(5, "programdata: read only when the registrar is the upgrade authority, not the caller PDA"),
+    ]);
+    let team = Keypair::new();
+    p.env.fund(&team);
+    let (program, programdata) = p.env.deploy(&honest_v1(), &team, 4096);
+    let mut args = Vec::new();
+    args.extend_from_slice(p.m.admin.pubkey().as_ref());
+    args.push(3);
+    for k in &p.m.g {
+        args.extend_from_slice(k.pubkey().as_ref());
+    }
+    args.push(2);
+    args.extend_from_slice(&(7 * DAY).to_le_bytes());
+    args.extend_from_slice(&(3 * DAY).to_le_bytes());
+    args.extend_from_slice(p.m.destination.pubkey().as_ref());
+    let protocol2 = pda(&[b"protocol", program.as_ref()], &p.m.vault_program);
+    let ix = p.m.vault_ix(0, &args, vec![
+        AccountMeta::new(p.env.payer.pubkey(), true),
+        AccountMeta::new(protocol2, false),
+        AccountMeta::new_readonly(program, false),
+        AccountMeta::new_readonly(programdata, false),
+        AccountMeta::new_readonly(team.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    sp.run(&mut p.env, "register (upgrade authority)", ix, &[&team], &[any(0, "rent payer: any funded signer")]);
+
     let total = s.attempts + sp.attempts;
     println!(
-        "{total} substitutions over 30 transactions; {} needed a key nobody here holds",
+        "{total} substitutions over 32 transactions; {} needed a key nobody here holds",
         s.unsignable + sp.unsignable
     );
     let mut all = s.unexpected;
