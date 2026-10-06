@@ -19,6 +19,15 @@ fi
 URL="$1"
 PAYER="$2"
 DIR="${3:-target/market-$(date +%Y%m%d-%H%M%S)}"
+# A public cluster gets only canonical binaries (Linux x86_64; finding 43),
+# so anyone can rebuild them and get the deployed bytes.
+case "$URL" in
+  *localhost*|*127.0.0.1*) ;;
+  *) if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ] && [ "${ALLOW_NONCANONICAL:-0}" != 1 ]; then
+       echo "refusing: $(uname -s)-$(uname -m) is not the canonical build host; deploy from Linux x86_64 or CI's binaries" >&2
+       exit 1
+     fi ;;
+esac
 
 scripts/build-programs.sh
 id() { solana-keygen pubkey "target/deploy/$1-keypair.json"; }

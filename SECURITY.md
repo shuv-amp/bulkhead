@@ -9,7 +9,7 @@
 | `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 13 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, a JavaScript-vs-Python differential, the end-to-end run |
-| Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep and 6 Oct (below) | All three programs run this tree's deterministic build: `scripts/verify-deployed.sh` against devnet matches each byte for byte |
+| Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep and 6 Oct (below) | All three programs run this tree's canonical build (Linux x86_64; CI publishes it): `scripts/verify-devnet.sh` matches each byte for byte, and CI checks it weekly |
 
 None of this is an audit. The mainnet path:
 1. two independent audits (a Solana specialist, and a formal-methods review of the core);
@@ -17,7 +17,7 @@ None of this is an audit. The mainnet path:
 3. verifiable builds;
 4. a public bug bounty;
 5. a TVL-capped first partner;
-6. then burning the upgrade authorities (`docs/09-VERIFICATION.md §8`).
+6. then burning the upgrade authorities (`docs/09-VERIFICATION.md §9`).
 
 ## Devnet deployment
 
@@ -27,10 +27,10 @@ Devnet only; test tokens only. The upgrade authority of all three programs is a 
 | Program | Devnet id | sha256 of the deployed code (Agave v4.3.0, platform-tools v1.57, sBPF v3) |
 |---|---|---|
 | Floor | `HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E` | `844f46784b5831bea63b7d775dc43ad28a9044a588416f0ae9f002eca901f623` (upgraded in place 6 Oct; until then `ef2b349b77473643e942afe23e190e7a3ae0e9eda2636d78c58c3b719c324dba`) |
-| Vault | `HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b` | `b8a2fbf89cac8012e141e9262fc4fe539e501c260aac000630b37411658921c5` (upgraded in place 6 Oct, twice: first to `e1961181e062cc6641da9940354cab7cea8f22809d89fe76b97708d26ff2592c`, then to this build, whose token-account and mint readers are split into pure functions so the fuzzers test the code the program runs; 29 Sep to 6 Oct `79b0a47ff3086fe2389e5ac089560f530a7d4089fcd5d12814a30132a62d9c93`; until 29 Sep `466cc17beb71ebb1f342cec5bc6ac10c333b58e7d537d675fd57bc3a6eca22eb`) |
+| Vault | `HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b` | `c73b058de016ff05adf8b7a36d97beac47d3f970f429af1be0dff34bc3b2cdae` (upgraded in place 6 Oct, three times: to `e1961181e062cc6641da9940354cab7cea8f22809d89fe76b97708d26ff2592c`; to `b8a2fbf89cac8012e141e9262fc4fe539e501c260aac000630b37411658921c5`, whose token-account and mint readers are split into pure functions so the fuzzers test the code the program runs; then to this, the same source built on Linux x86_64, the canonical build host (`09`, finding 43); 29 Sep to 6 Oct `79b0a47ff3086fe2389e5ac089560f530a7d4089fcd5d12814a30132a62d9c93`; until 29 Sep `466cc17beb71ebb1f342cec5bc6ac10c333b58e7d537d675fd57bc3a6eca22eb`) |
 | Harbor (demo) | `6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh` | `543be60b25b557ea0a58f0c4d2133f67954172006d2a21490217cb4010adeb40` (upgraded in place 6 Oct; until then `d91a8ac28a3d2bffe07de80f20028a09a1f15c8e7639e5551250c9b54cb712f2`) |
 
-`scripts/verify-deployed.sh` matched all three byte for byte on 6 Oct.
+`scripts/verify-devnet.sh` matched all three byte for byte on 6 Oct. Release binaries are Linux x86_64 builds: CI's (each pull request's `programs` artifact, with `SHA256SUMS`), or `scripts/build-programs-docker.sh` on any machine with Docker. A build on macOS has the same instructions in another order, so its Vault hash differs.
 
 The demo market's admin and guardian keys are also team-held. On devnet that is the point: S1 plays the attacker with the admin key.
 

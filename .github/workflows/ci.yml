@@ -328,8 +328,9 @@ jobs:
 
   devnet:
     # Weekly: build the programs here and require devnet to run exactly
-    # these bytes (scripts/verify-deployed.sh). Catches an upgrade that did
-    # not come from main, or a build that stopped being reproducible.
+    # these bytes (scripts/verify-deployed.sh), and the Solana Foundation's
+    # pinned build image to produce them too. Catches an upgrade that did not
+    # come from main, or a build that stopped being reproducible.
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && (github.event_name == 'schedule' || inputs.deep == true)
     runs-on: ubuntu-24.04
@@ -346,6 +347,10 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - name: Devnet runs main's build
         run: scripts/verify-devnet.sh
+      - name: The Solana verifiable-build image gives the same bytes
+        run: |
+          scripts/build-programs-docker.sh
+          diff <(cd target/deploy && sha256sum ./*.so) target/docker/SHA256SUMS
 
   ci:
     # The one required check: every job passed, or was skipped because the

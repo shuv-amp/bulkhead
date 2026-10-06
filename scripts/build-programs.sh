@@ -36,3 +36,9 @@ for so in sorted(glob.glob("target/deploy/*.so")):
     bad += not ok
 sys.exit(1 if bad else 0)
 PY
+# Release binaries are Linux x86_64 builds (CI; scripts/build-programs-docker.sh
+# elsewhere). Another host emits the same instructions in another order, so
+# its Vault hash differs (docs/09, finding 43).
+if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ]; then
+  echo "note: built on $(uname -s)-$(uname -m), not the canonical Linux-x86_64; fine for tests, not for release"
+fi
