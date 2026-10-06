@@ -133,6 +133,10 @@ export class FloorClient {
     return this.ix(4, concat(Uint8Array.of(kind), key(target), payload), a);
   }
   /** Anyone executes a pending upgrade or restore once it is allowed. */
+  /** Execute a pending SetGuardians / SetOwner / SetDelay / SetRecovery (anyone). */
+  executeConfig() {
+    return this.ix(7, new Uint8Array(0), [w(this.config)]);
+  }
   executeUpgrade(buffer, spill) {
     return this.ix(7, new Uint8Array(0), [
       w(this.config), w(this.programdata), w(this.protected), w(buffer), w(spill),
