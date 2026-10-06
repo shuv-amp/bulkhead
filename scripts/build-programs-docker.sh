@@ -15,8 +15,13 @@ rm -rf "$OUT" && mkdir -p "$OUT"
 # binaries come back out as a tar stream.
 git archive --format=tar HEAD | docker run --rm -i --platform linux/amd64 "$IMAGE" bash -c '
   set -euo pipefail
-  mkdir /build && tar -x -C /build && cd /build
-  command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 >/dev/null; }
+  src=$(mktemp -d)
+  tar -x -C "$src"
+  cd "$src"
+  if ! command -v python3 >/dev/null; then
+    apt-get update -qq >&2
+    apt-get install -y -qq python3 >&2
+  fi
   scripts/build-programs.sh >&2
   tar -c -C target/deploy bulkhead_floor.so bulkhead_vault.so bulkhead_harbor.so
 ' | tar -x -C "$OUT"
