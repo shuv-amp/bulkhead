@@ -40,7 +40,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
 7. **Read the outcome** of each `release` from return data: `backed | instant | queued | ticket_id | eta_s` (40 bytes, `05 §4`). Book the full amount against the user. If `queued > 0`, record `(ticket_id, queued, eta_s)` so your UI shows "arriving at ETA"; anyone can call `settle_ticket` once it's due.
 8. **A cancelled ticket** is a governance matter. The tokens stay in the vault. Never re-release automatically: cancellation usually means an incident.
 9. **Calibrate** (§4) before the seal. Tightening later is instant; loosening takes 72h.
-10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page.
+10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page. It vetoes every loosening, lifeboat exit and Floor proposal you have not pre-approved, and it is also your **keeper**: a change you did approve (`approvedChangeIds`, `approvedFloorProposals`, `approvedUpgradeBuffers`) is executed by it as soon as its delay ends. Solana programs never run on their own, so after a delay someone must send `execute`; anyone may, and the keeper makes sure someone does, before the 7-day expiry. It never executes the release of Floor's upgrade authority, which closes Floor's config.
 
 ## 3. The pattern, from Harbor (`programs/harbor`)
 

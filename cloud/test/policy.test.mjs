@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -424,4 +424,69 @@ test("a queued release's ticket address travels from the event to the cancel", (
   assert.equal(s.pendingTickets.get(7n).address, e.ticket);
   const [cancel] = pendingCancels(s);
   assert.deepEqual([cancel.ticketId, cancel.address], [7n, e.ticket]);
+});
+
+test("the keeper executes exactly the approved changes, only while they are due", () => {
+  const change = { id: 3n, kind: 2, target: "t", vetoed: false, executed: false, executableS: 1_000, expiresS: 2_000 };
+  const policy = { ...DEFAULT_POLICY, approvedChangeIds: [3] };
+  assert.equal(dueApprovedChange(change, policy, 1_000, new Set()).changeId, 3n);
+  assert.equal(dueApprovedChange(change, policy, 999, new Set()), null, "not yet due");
+  assert.equal(dueApprovedChange(change, policy, 2_000, new Set()), null, "expired");
+  assert.equal(dueApprovedChange(change, DEFAULT_POLICY, 1_500, new Set()), null, "not approved: vetoed instead, never executed");
+  assert.equal(dueApprovedChange({ ...change, vetoed: true }, policy, 1_500, new Set()), null);
+  assert.equal(dueApprovedChange({ ...change, executed: true }, policy, 1_500, new Set()), null);
+  assert.equal(dueApprovedChange(change, policy, 1_500, new Set(["c3"])), null, "sent once");
+  assert.equal(dueApprovedChange(change, { ...policy, executeApproved: false }, 1_500, new Set()), null);
+  // Readable straight from a change account.
+  const bytes = new Uint8Array(140);
+  bytes.set(new TextEncoder().encode("BHCHNG01"));
+  const v = new DataView(bytes.buffer);
+  v.setBigUint64(40, 3n, true);
+  bytes[48] = 2;
+  v.setBigInt64(124, 1_000n, true);
+  v.setBigInt64(132, 2_000n, true);
+  const read = readPendingChange(bytes);
+  assert.deepEqual([read.executableS, read.expiresS], [1_000, 2_000]);
+  assert.equal(dueApprovedChange(read, policy, 1_500, new Set()).kind, 2);
+});
+
+test("the keeper executes approved Floor proposals when due, but never releases the authority", () => {
+  const floor = { program: "prog", pendingKind: 4, pendingId: 7n, pendingVetoed: false, pendingTarget: "x", pendingEta: 1_000, pendingExpires: 2_000 };
+  const policy = { ...DEFAULT_POLICY, approvedFloorProposals: ["prog:7"], approvedUpgradeBuffers: ["buf"] };
+  assert.equal(dueApprovedFloor(floor, policy, 1_000, new Set()).kind, 4);
+  assert.equal(dueApprovedFloor(floor, policy, 999, new Set()), null);
+  assert.equal(dueApprovedFloor(floor, policy, 2_000, new Set()), null);
+  assert.equal(dueApprovedFloor(floor, DEFAULT_POLICY, 1_500, new Set()), null, "not approved");
+  assert.equal(dueApprovedFloor({ ...floor, pendingVetoed: true }, policy, 1_500, new Set()), null);
+  assert.equal(dueApprovedFloor(floor, policy, 1_500, new Set(["eprog:7"])), null);
+  // Code by buffer.
+  assert.equal(dueApprovedFloor({ ...floor, pendingKind: 1, pendingTarget: "buf" }, policy, 1_500, new Set()).kind, 1);
+  assert.equal(dueApprovedFloor({ ...floor, pendingKind: 1, pendingTarget: "other" }, policy, 1_500, new Set()), null);
+  // Releasing the upgrade authority closes Floor's config: always a person's call.
+  assert.equal(dueApprovedFloor({ ...floor, pendingKind: 3 }, { ...policy, approvedFloorProposals: ["prog:7"] }, 1_500, new Set()), null);
+});
+
+test("the keeper's execute instruction names the right target for each kind of change", async () => {
+  const { executeChangeIx } = await import("../guardian/keeper.mjs");
+  const { b58encode: enc, findPda, key: k, u64le: le, IDS } = await import("../lib/solana.mjs");
+  const vaultProgram = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
+  const protocol = "26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq";
+  const payer = "E3VZyofZZJLJWt6kjzEPUWedMTFUdkpoogGDbR6RF7xC";
+  const mint = "CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB";
+  const vault = "7qrrXwX5uYeCDTfdQbbRNJC7tdLYRFCLfq6sswKuZqZw";
+  const build = (kind, target, mintOwner) => executeChangeIx({ vaultProgram, protocol, payer, defaultMint: mint, changeId: 5n, kind, target, mintOwner });
+  const names = (ix) => ix.accounts.map((a) => enc(a.pubkey));
+  const [change] = await findPda(["change", k(protocol), le(5n)], k(vaultProgram));
+  // A protocol-level change (guardians): the protocol stands in as the target.
+  const guardians = await build(2, "11111111111111111111111111111111");
+  assert.deepEqual(names(guardians).slice(0, 4), [protocol, enc(change), protocol, payer]);
+  assert.equal(guardians.data[0], 20);
+  assert.deepEqual(guardians.accounts.map((a) => [!!a.writable, !!a.signer]), [[true, false], [true, false], [true, false], [true, true], [false, false], [false, false], [false, false]]);
+  // SetLimits: the vault.
+  assert.equal(names(await build(0, vault))[2], vault);
+  // UpsertAsset: the asset record, the mint, and the mint's token program.
+  const token2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+  const asset = await build(1, mint, token2022);
+  const [assetPda] = await findPda(["asset", k(protocol), k(mint)], k(vaultProgram));
+  assert.deepEqual(names(asset).slice(2), [enc(assetPda), payer, mint, token2022, enc(IDS.system)]);
 });

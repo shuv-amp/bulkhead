@@ -398,6 +398,7 @@ export function decodeFloor(d) {
     pendingId: new DataView(d.buffer, d.byteOffset + 528, 8).getBigUint64(0, true),
     pendingTarget: b58encode(at(536)),
     pendingEta: i64(568),
+    pendingExpires: i64(576),
   };
 }
 

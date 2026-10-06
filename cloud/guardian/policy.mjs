@@ -33,6 +33,11 @@ export const DEFAULT_POLICY = {
    * honest restore over a veto. */
   approvedUpgradeBuffers: [],
   approvedFloorProposals: [],
+  /** Keeper: once due, execute exactly what is approved above (changes by id,
+   * Floor proposals by id or buffer). Execution is open to anyone after the
+   * delay; this only makes sure someone does it. Releasing Floor's authority
+   * is never executed automatically: it closes the config. */
+  executeApproved: true,
   /** Veto every lifeboat exit that isn't pre-approved as "mint:amount" (base
    * units). An exit goes to a destination committed 72h earlier; vetoing it
    * is the guardian's answer to a compromised destination (T18). */
@@ -382,6 +387,8 @@ export function readPendingChange(bytes) {
     kind: bytes[48],
     vetoed: bytes[49] !== 0,
     executed: bytes[50] !== 0,
+    target: b58encode(bytes.subarray(52, 84)),
+    executableS: Number(view.getBigInt64(124, true)),
     expiresS: Number(view.getBigInt64(132, true)),
   };
 }
@@ -411,6 +418,30 @@ export function pendingExitVeto(vault, policy, now, already) {
   if (exitApproved(policy, vault.mint, vault.exitAmount)) return null;
   const action = { type: "veto_exit", mint: vault.mint, executableS: vault.exitExecutableS, reason: `lifeboat exit of ${vault.exitAmount} is still pending` };
   return already?.has(vetoKey(action)) ? null : action;
+}
+
+/** A Vault change the keeper should execute now, or null: approved by id, not
+ * vetoed or executed, due and not expired. `done` holds ids already sent. */
+export function dueApprovedChange(change, policy, now, done) {
+  if (!policy.executeApproved || !change || change.vetoed || change.executed) return null;
+  const id = BigInt(change.id);
+  if (done?.has(`c${id}`)) return null;
+  if (!(policy.approvedChangeIds ?? []).map(BigInt).includes(id)) return null;
+  if (now < change.executableS || now >= change.expiresS) return null;
+  return { type: "execute_change", changeId: id, kind: change.kind, target: change.target };
+}
+
+/** A Floor proposal the keeper should execute now, or null: approved (code by
+ * buffer, anything else by program:id), not vetoed, due and not expired, and
+ * never a release of the upgrade authority. */
+export function dueApprovedFloor(floor, policy, now, done) {
+  if (!policy.executeApproved || !floor?.pendingKind || floor.pendingVetoed) return null;
+  if (floor.pendingKind === 3) return null;
+  const id = BigInt(floor.pendingId);
+  if (done?.has(`e${floor.program}:${id}`)) return null;
+  if (floorProposalVeto({ program: floor.program, kind: floor.pendingKind, id, target: floor.pendingTarget }, policy)) return null;
+  if (now < floor.pendingEta || now >= floor.pendingExpires) return null;
+  return { type: "execute_floor", program: floor.program, proposalId: id, kind: floor.pendingKind, target: floor.pendingTarget };
 }
 
 /** Floor proposal kinds (programs/floor/src/state.rs `kind`). */
