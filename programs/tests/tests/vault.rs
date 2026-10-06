@@ -1476,6 +1476,17 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
     w.seal();
     let ix = create_vault_ix(&mut w, &Limits::default_limits());
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY);
+    // A floor alone opens a bucket: no bps but a floor is still an open lane.
+    let mut floor_only = Limits::default_limits();
+    floor_only.short_bps = 0;
+    floor_only.short_floor = 1;
+    let ix = create_vault_ix(&mut w, &floor_only);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY, "a floor alone");
+    // Closing the long bucket closes the lane too.
+    let mut long_closed = Limits::default_limits();
+    long_closed.long_bps = 0;
+    let ix = create_vault_ix(&mut w, &long_closed);
+    w.env.ok(&[ix], &[&w.m.admin]);
     // A closed lane (either bucket at capacity 0) is accepted; opening it is a
     // loosening, so it waits 72h like any other.
     let mut closed = Limits::default_limits();

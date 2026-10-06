@@ -14,7 +14,7 @@ while IFS= read -r f; do
       all ;;
   esac
   case "$f" in
-    crates/bulkhead-core/src/*)
+    crates/bulkhead-core/src/*|scripts/mutants.sh|.cargo/mutants.toml)
       mutants=true ;;
   esac
   case "$f" in

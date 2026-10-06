@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -263,20 +264,35 @@ def generate(seed: int, cases: int) -> list:
     return lines
 
 
+def worker_inputs() -> list:
+    """The source files the worker was built from, as cargo recorded them in
+    its dep-info file (`<worker>.d`). Only these can make it stale: a test file
+    or a crate the worker does not use is not an input, and cargo does not
+    relink the worker for one (a guess from directories refused for good
+    after any test edit). Without the file, every source of both crates."""
+    dep_info = WORKER + ".d"
+    if os.path.exists(dep_info):
+        text = open(dep_info).read().replace("\\\n", " ")
+        _, _, deps = text.partition(": ")
+        # Paths with spaces are written with a backslash before each space.
+        return [p.replace("\\ ", " ") for p in re.split(r"(?<!\\) ", deps.split("\n")[0]) if p]
+    found = []
+    for top in ("crates/bulkhead-core/src", "crates/bulkhead-diff/src"):
+        for d, _, files in os.walk(os.path.join(ROOT, top)):
+            found += [os.path.join(d, f) for f in files if f.endswith(".rs")]
+    return found
+
+
 def newest_source() -> tuple:
     """(mtime, path) of the newest input the worker is built from."""
     newest = (0.0, "")
-    for top in ("crates/bulkhead-core", "crates/bulkhead-diff"):
-        for d, _, files in os.walk(os.path.join(ROOT, top)):
-            for f in files:
-                if f.endswith(".rs") or f == "Cargo.toml":
-                    p = os.path.join(d, f)
-                    newest = max(newest, (os.path.getmtime(p), p))
-    # The toolchain pin is an input too: a compiler bump rebuilds the worker.
-    for f in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
-        p = os.path.join(ROOT, f)
+    for p in worker_inputs():
+        p = p if os.path.isabs(p) else os.path.join(ROOT, p)
         if os.path.exists(p):
             newest = max(newest, (os.path.getmtime(p), p))
+    # Not the manifests or the toolchain pin: cargo rebuilds for what changes
+    # in them, not for a newer timestamp (a branch switch), so `cargo build`
+    # would not clear a refusal based on their times.
     return newest
 
 
