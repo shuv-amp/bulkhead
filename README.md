@@ -103,11 +103,11 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Bounded proofs (Kani) and exhaustive checks | **14/14 harnesses verified** (12 for every value of their types); 6 exhaustive tests over ~584M inputs |
 | Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 392M executions in the 6 Oct deep CI run (25 min per target), no crash; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-6-oct-2026)) |
 | Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 80/80: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (5,526 swaps refused) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 82/82: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (5,526 swaps refused) |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
 | On devnet | All three programs match the canonical build of this tree byte for byte, checked weekly in CI. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
-| What this process found in our own code and docs | 58 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | 60 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 

@@ -85,8 +85,9 @@ const ago = (s) => {
   const d = Math.round(Date.now() / 1000 - s);
   return d < 90 ? `${d}s ago` : d < 5400 ? `${Math.round(d / 60)}m ago` : d < 172800 ? `${Math.round(d / 3600)}h ago` : `${Math.round(d / 86400)}d ago`;
 };
-const until = (s) => {
-  const d = Math.round(s - Date.now() / 1000);
+// `now` is the chain's clock, the one the row's colour is judged by.
+const until = (s, now) => {
+  const d = Math.round(s - now);
   return d <= 0 ? "no" : d < 5400 ? `yes, ${Math.round(d / 60)} more minutes` : `yes, ${Math.round(d / 3600)} more hours`;
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -157,7 +158,7 @@ async function render() {
       <div class="row"><span>Instant unbacked outflow now</span><span>${fmt(a.availableNow, d)}</span></div>
       <div class="row"><span>Worst case, nobody acts for 1h</span><span>${fmt(a.worst1h, d)}</span></div>
       <div class="row"><span>Worst case, nobody acts for 24h</span><span>${fmt(a.worst24h, d)}</span></div>
-      <div class="row"><span>Frozen</span><span class="${frozen ? "warn" : "ok"}">${until(a.frozenUntil)}</span></div>
+      <div class="row"><span>Frozen</span><span class="${frozen ? "warn" : "ok"}">${until(a.frozenUntil, now)}</span></div>
       <div class="row"><span>Pending tickets</span><span>${a.pendingTickets} (${fmt(a.queued, d)})</span></div>
       <div class="row"><span>Limits</span><span>${v.limits.shortBps / 100}% / ${v.limits.shortWindowS / 3600}h · ${v.limits.longBps / 100}% / ${v.limits.longWindowS / 3600}h</span></div>
       <div class="row"><span>Paid out (backed / unbacked)</span><span>${fmt(v.backedOut, d)} / ${fmt(v.unbackedOut, d)}</span></div>
@@ -168,7 +169,7 @@ async function render() {
       <h2>Protocol</h2>
       ${await changesRows(rpc, vc, protocol, now, live)}
       <div class="row"><span>Sealed</span><span class="${protocol.sealed ? "ok" : "warn"}">${protocol.sealed ? "yes" : "no (releases disabled)"}</span></div>
-      <div class="row"><span>Frozen</span><span class="${protocol.frozenUntil > now ? "warn" : "ok"}">${until(protocol.frozenUntil)}</span></div>
+      <div class="row"><span>Frozen</span><span class="${protocol.frozenUntil > now ? "warn" : "ok"}">${until(protocol.frozenUntil, now)}</span></div>
       <div class="row"><span>Live guardians</span><span class="${live >= protocol.threshold ? "ok" : "bad"}">${live} of ${protocol.guardians.length} (quorum ${protocol.threshold})</span></div>
       <div class="row"><span>Any loosening waits</span><span>${Math.round(protocol.loosenDelayS / 3600)} hours (minimum 72, a constant)</span></div>
       <div class="row"><span>Admin</span><span class="mono">${esc(protocol.admin)}</span></div>
@@ -195,23 +196,33 @@ async function render() {
       </div>`;
     }
   }
-  out.innerHTML = `<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p><div class="grid">${html}</div>`;
+  return `<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p><div class="grid">${html}</div>`;
 }
 
-async function loop() {
+// One refresh at a time on the timer, and only the newest result is shown: a
+// slow render for the previous inputs must not overwrite the current ones.
+let generation = 0;
+let running = false;
+async function refresh() {
+  const mine = ++generation;
+  running = true;
+  let html;
   try {
-    await render();
+    html = await render();
   } catch (e) {
-    out.innerHTML = `<div class="card err">${esc(e.message)}</div>`;
+    html = `<div class="card err">${esc(e.message)}</div>`;
+  } finally {
+    if (mine === generation) running = false;
   }
+  if (mine === generation) out.innerHTML = html;
 }
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   history.replaceState(null, "", "?" + new URLSearchParams(new FormData(form)));
-  loop();
+  refresh();
 });
-loop();
-setInterval(loop, 10_000);
+refresh();
+setInterval(() => { if (!running) refresh(); }, 10_000);
 </script>
 </body>
 </html>

@@ -2,15 +2,20 @@
 // Finishes the devnet maintenance proposed on 6 Oct 2026 (docs/08): the market's
 // guardian renewal (change 0) and recovery key (change 1), and the Floor S10
 // target's guardian renewal. Each waited the 72h loosen delay; anyone may
-// execute it after. Safe to run any time: a change already executed is
-// skipped, and one not yet due is refused by the program and reported.
+// execute it after. Safe to run any time. Each one is judged first, by the
+// chain's clock: already executed (skipped), vetoed, expired or stale (say
+// so: it has to be proposed again), not due yet (nothing sent), or due (sent;
+// a refusal is reported by its error name).
 //
 //   node cloud/deploy/finish-renewals.mjs <rpc> <market-dir> <payer.json> [floor-program protected-program]
+//
+// Exits 0 only when every one is executed.
 import { readFileSync } from "node:fs";
-import { Rpc, key, findPda, u64le, IDS, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, key, findPda, u64le, IDS, decodeFloor, decodeChange } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 import { vaultIx } from "./market.mjs";
+import { errorName } from "./errors.mjs";
 
 const [url, dir, payerPath, floorProgram, protectedProgram] = process.argv.slice(2);
 if (!url || !dir || !payerPath) {
@@ -24,50 +29,73 @@ const vaultProgram = key(world.vaultProgram);
 const w = (k) => ({ pubkey: key(k), writable: true });
 const r = (k) => ({ pubkey: key(k) });
 const s = (k, writable = false) => ({ pubkey: key(k), signer: true, writable });
+const iso = (t) => new Date(t * 1000).toISOString();
+// The chain's clock decides, not this machine's.
+const now = await rpc.call("getBlockTime", [await rpc.call("getSlot", [{ commitment: "confirmed" }])]);
 let failed = 0;
 
+/** The program's error for a refused transaction, by name. */
+function refusal(e) {
+  const err = e.rpcError?.data?.err ?? null;
+  return err ? errorName(err) : e.message.slice(0, 160);
+}
+
 for (const id of [0n, 1n]) {
-  const [change] = await findPda(["change", key(world.protocol), u64le(id)], vaultProgram);
-  const acc = await rpc.account(change);
+  const [address] = await findPda(["change", key(world.protocol), u64le(id)], vaultProgram);
+  const acc = await rpc.account(address);
   if (!acc) {
     console.log(`market change ${id}: no such change`);
+    failed++;
     continue;
   }
-  const d = acc.bytes;
-  const [vetoed, executed] = [d[49] !== 0, d[50] !== 0];
-  const executableS = Number(new DataView(d.buffer, d.byteOffset + 124, 8).getBigInt64(0, true));
-  if (executed) {
+  const c = decodeChange(acc.bytes);
+  if (c.executed) {
     console.log(`market change ${id}: already executed`);
     continue;
   }
-  if (vetoed) {
-    console.log(`market change ${id}: vetoed; propose it again`);
-    failed++;
-    continue;
-  }
-  try {
-    const sig = await send(rpc, payer, [vaultIx({ vaultProgram }, 20, new Uint8Array(0), [
-      w(world.protocol), w(change), w(world.protocol), s(payer.publicKey, true), r(world.mint), r(IDS.token), r(IDS.system),
-    ])]);
-    console.log(`market change ${id}: executed ${sig}`);
-  } catch (e) {
-    console.log(`market change ${id}: not executed (executable from ${new Date(executableS * 1000).toISOString()}): ${e.message.slice(0, 120)}`);
-    failed++;
+  failed++;
+  if (c.vetoed) console.log(`market change ${id}: vetoed; propose it again`);
+  else if (now >= c.expiresS) console.log(`market change ${id}: expired at ${iso(c.expiresS)}; propose it again`);
+  else if (now < c.executableS) console.log(`market change ${id}: not due until ${iso(c.executableS)}`);
+  else {
+    try {
+      const sig = await send(rpc, payer, [vaultIx({ vaultProgram }, 20, new Uint8Array(0), [
+        w(world.protocol), w(address), w(world.protocol), s(payer.publicKey, true), r(world.mint), r(IDS.token), r(IDS.system),
+      ])]);
+      console.log(`market change ${id}: executed ${sig}`);
+      failed--;
+    } catch (e) {
+      // ChangeStale: its target moved since; it can never execute.
+      console.log(`market change ${id}: refused (${refusal(e)})${refusal(e) === "ChangeStale" ? "; propose it again" : ""}`);
+    }
   }
 }
 
 if (floorProgram && protectedProgram) {
   const fc = await new FloorClient(floorProgram, protectedProgram).init();
-  const f = decodeFloor((await rpc.account(fc.config)).bytes);
-  if (!f.pendingKind) {
+  const acc = await rpc.account(fc.config);
+  const f = acc ? decodeFloor(acc.bytes) : null;
+  if (!f) {
+    console.log("floor: no Floor config for that program");
+    failed++;
+  } else if (!f.pendingKind) {
     console.log("floor: nothing pending");
   } else {
-    try {
-      const sig = await send(rpc, payer, [fc.executeConfig()]);
-      console.log(`floor: pending kind ${f.pendingKind} executed ${sig}`);
-    } catch (e) {
-      console.log(`floor: not executed (executable from ${new Date(f.pendingEta * 1000).toISOString()}): ${e.message.slice(0, 120)}`);
-      failed++;
+    failed++;
+    // This script executes configuration changes; an upgrade or restore
+    // (kinds 1 and 2) needs its buffer and is not one of the renewals.
+    if (f.pendingKind === 1 || f.pendingKind === 2) console.log(`floor: the pending proposal is an upgrade or restore (kind ${f.pendingKind}), not a renewal; not executed here`);
+    else if (f.pendingVetoed) console.log(`floor: proposal ${f.pendingId} vetoed; propose it again`);
+    else if (now >= f.pendingExpires) console.log(`floor: proposal ${f.pendingId} expired at ${iso(f.pendingExpires)}; propose it again`);
+    else if (now < f.pendingEta) console.log(`floor: proposal ${f.pendingId} not due until ${iso(f.pendingEta)}`);
+    else {
+      try {
+        const sig = await send(rpc, payer, [fc.executeConfig()]);
+        console.log(`floor: proposal ${f.pendingId} (kind ${f.pendingKind}) executed ${sig}`);
+        failed--;
+      } catch (e) {
+        console.log(`floor: proposal ${f.pendingId} refused (${refusal(e)})`);
+      }
     }
   }
 }

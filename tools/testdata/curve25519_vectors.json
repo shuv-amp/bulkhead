@@ -254,5 +254,17 @@
   ["e93f758b6082802310c4cf29ef872830056a5478e8eaf6856e1bb6b41d5f03f7", true],
   ["8b97b0fc13b89471e81077fcad41ffd188b776571eb356eed7fe4c5eddb2a83f", true],
   ["cb60c37e763375a9a680fa5ade8571d55b9e53a2b15b02b5512e6f9327e935f3", true],
-  ["fd18ab0bd62322a782848a94e60bc593aeacf140ca26e61ad2a3d202b9a1bc18", true]
+  ["fd18ab0bd62322a782848a94e60bc593aeacf140ca26e61ad2a3d202b9a1bc18", true],
+  ["0000000000000000000000000000000000000000000000000000000000000000", true],
+  ["0000000000000000000000000000000000000000000000000000000000000080", true],
+  ["0100000000000000000000000000000000000000000000000000000000000000", true],
+  ["0100000000000000000000000000000000000000000000000000000000000080", true],
+  ["ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", true],
+  ["ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", true],
+  ["edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", true],
+  ["edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", true],
+  ["eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", true],
+  ["eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", true],
+  ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", true],
+  ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", true]
 ]

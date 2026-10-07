@@ -33,10 +33,37 @@ fn decode_base58(s: &str) -> [u8; 32] {
     out
 }
 
+/// The canonical base58 text of 32 bytes (a leading zero byte is a '1').
+fn encode_base58(bytes: &[u8; 32]) -> String {
+    let zeros = bytes.iter().take_while(|b| **b == 0).count();
+    let mut digits: Vec<u8> = Vec::new(); // little-endian base 58
+    for &b in &bytes[zeros..] {
+        let mut carry = b as u32;
+        for d in digits.iter_mut() {
+            let x = (*d as u32) * 256 + carry;
+            *d = (x % 58) as u8;
+            carry = x / 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let mut s = "1".repeat(zeros);
+    s.extend(digits.iter().rev().map(|&d| ALPHABET[d as usize] as char));
+    s
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=BULKHEAD_VAULT_ID");
     let id = env::var("BULKHEAD_VAULT_ID").unwrap_or_else(|_| DEFAULT_VAULT.to_string());
     let bytes = decode_base58(&id);
+    // An empty, truncated or padded id decodes to some other address (an empty
+    // one to the System Program), and the build would succeed: Harbor would
+    // then refuse every call. Only a canonical 32-byte address is accepted.
+    if encode_base58(&bytes) != id {
+        panic!("BULKHEAD_VAULT_ID is not a canonical 32-byte base58 address: {id:?}");
+    }
     // `cloud/lib/solana.mjs` `key()` of the devnet Vault. A shift of the
     // previous carry, instead of `x >> 8`, keeps only the last byte.
     if id == DEFAULT_VAULT {
