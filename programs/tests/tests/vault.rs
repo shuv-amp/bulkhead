@@ -8,7 +8,7 @@
 
 mod common;
 
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::reference_update;
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterState};
 use common::vault::*;
@@ -327,7 +327,7 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
     let (mut reference, mut ref_at, mut ref_init) = (0u64, 0i64, false);
     let mut balance = 10_000_000 * USDC;
     // Deposits touched it at genesis with the pre-deposit balance of 0.
-    reference = ema_update(reference, ref_at, 0, T0, ref_init);
+    reference = reference_update(reference, ref_at, 0, T0, ref_init);
     ref_at = T0;
     ref_init = true;
 
@@ -341,7 +341,7 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
         let m = w.env.ok(&[ix], &[&w.m.admin]);
         let o = outcome(&m);
         assert_eq!(o.backed, 0, "the attacker has no deposits: nothing is backed");
-        reference = ema_update(reference, ref_at, balance, w.env.time, ref_init);
+        reference = reference_update(reference, ref_at, balance, w.env.time, ref_init);
         ref_at = w.env.time;
         let params = params_from_config(&cfg, capacity_base(reference, balance));
         match request(&mut model, &params, w.env.time * 1_000, amount, 0).unwrap() {
@@ -370,7 +370,7 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
     assert_eq!(w.env.fails(&[settle], &[]), verr::FROZEN);
     // Guardians cancel every ticket: the attacker keeps only the burst.
     for (t, _) in &tickets {
-        let ix = w.m.cancel_ix(&w.usdc, t, &g0, &w.env.payer.pubkey());
+        let ix = w.m.cancel_ix(&w.usdc, t, ticket_id(&w.env, t), &g0, &w.env.payer.pubkey());
         w.env.ok(&[ix], &[&w.m.g[0]]);
     }
     let a = w.m.attest(&mut w.env, &w.usdc);
@@ -464,7 +464,7 @@ fn reset_backlog_is_refused_while_tickets_are_pending() {
     );
     assert_eq!(w.env.fails(std::slice::from_ref(&reset), &[&w.m.admin]), verr::TICKETS_PENDING);
     let g0 = w.m.g[0].pubkey();
-    let cancel = w.m.cancel_ix(&w.usdc, &ticket, &g0, &w.env.payer.pubkey());
+    let cancel = w.m.cancel_ix(&w.usdc, &ticket, ticket_id(&w.env, &ticket), &g0, &w.env.payer.pubkey());
     w.env.ok(&[cancel], &[&w.m.g[0]]);
     w.env.ok(&[reset], &[&w.m.admin]);
 }
@@ -1342,7 +1342,7 @@ fn s8_one_transaction_drain_gets_only_the_burst() {
     w.env.ok(&[fz], &[&w.m.g[0]]);
     for nonce in 2..10u64 {
         let t = w.m.ticket_pda(&w.env.payer.pubkey(), nonce);
-        let ix = w.m.cancel_ix(&w.usdc, &t, &g0, &w.env.payer.pubkey());
+        let ix = w.m.cancel_ix(&w.usdc, &t, ticket_id(&w.env, &t), &g0, &w.env.payer.pubkey());
         w.env.ok(&[ix], &[&w.m.g[0]]);
     }
     assert_eq!(w.env.balance(&loot), 199_000 * USDC);
@@ -1516,10 +1516,10 @@ fn only_a_live_guardian_cancels_a_ticket_not_the_admin() {
     let (_, ticket) = w.m.next_ticket(&w.env);
     w.env.ok(&[ix], &[&w.m.admin]);
     let admin = w.m.admin.pubkey();
-    let by_admin = w.m.cancel_ix(&w.usdc, &ticket, &admin, &w.env.payer.pubkey());
+    let by_admin = w.m.cancel_ix(&w.usdc, &ticket, ticket_id(&w.env, &ticket), &admin, &w.env.payer.pubkey());
     assert_eq!(w.env.fails(&[by_admin], &[&w.m.admin]), verr::NOT_GUARDIAN);
     let g0 = w.m.g[0].pubkey();
-    let by_guardian = w.m.cancel_ix(&w.usdc, &ticket, &g0, &w.env.payer.pubkey());
+    let by_guardian = w.m.cancel_ix(&w.usdc, &ticket, ticket_id(&w.env, &ticket), &g0, &w.env.payer.pubkey());
     w.env.ok(&[by_guardian], &[&w.m.g[0]]);
 }
 
@@ -2011,9 +2011,11 @@ fn every_account_substitution_is_refused() {
     );
 
     // --- tickets: extend, settle -------------------------------------------
+    let mut extend = 3_600i64.to_le_bytes().to_vec();
+    extend.extend_from_slice(&ticket_id(&w.env, &t1).to_le_bytes());
     let ix = w.m.vault_ix(
         11,
-        &3_600i64.to_le_bytes(),
+        &extend,
         vec![
             AccountMeta::new_readonly(w.m.protocol, false),
             AccountMeta::new(t1, false),
@@ -2105,7 +2107,7 @@ fn every_account_substitution_is_refused() {
         &[],
         &[role(1, freezers.clone(), "a live guardian or the admin")],
     );
-    let ix = w.m.cancel_ix(&w.usdc, &t1, &g0, &w.env.payer.pubkey());
+    let ix = w.m.cancel_ix(&w.usdc, &t1, ticket_id(&w.env, &t1), &g0, &w.env.payer.pubkey());
     s.run(
         &mut w.env,
         "cancel ticket",
@@ -2598,6 +2600,263 @@ fn an_admin_rotation_is_refused_at_execution_if_its_key_became_a_guardian() {
     w.env.advance(3 * DAY);
     w.env.ok(&[execute_change_ix(&w, 1, &zero)], &[]);
     assert_eq!(w.env.fails(&[execute_change_ix(&w, admin_change, &zero)], &[]), verr::INVALID_INSTRUCTION);
+}
+
+/// Finding 65: capital deposited and taken back (backed) in the same
+/// transaction cannot lift the base back to a reference still lagging above
+/// what is left. Before the fix the payout below was instant (the deposit
+/// raised the live balance to the 10M reference: a 200,000 burst).
+#[test]
+fn a_flash_deposit_cannot_restore_the_burst_after_a_large_exit() {
+    let mut w = World::new();
+    let small = w.user();
+    let whale = w.user();
+    w.deposit("usdc", &small, 1_000_000 * USDC);
+    let whale_acc = w.deposit("usdc", &whale, 9_000_000 * USDC);
+    w.seal();
+    w.env.advance(2 * DAY);
+    let ix = w.m.withdraw_ix(
+        &w.env,
+        &w.usdc,
+        &whale.pubkey(),
+        &whale_acc,
+        9_000_000 * USDC,
+        &w.usdc_prices(false),
+    );
+    w.env.ok(&[ix], &[&whale]);
+    w.env.advance(60);
+    // One transaction: put the 9M back, pay 25,000 unbacked, take the 9M back.
+    let attacker = Keypair::new();
+    let loot = w.account("usdc", &attacker.pubkey());
+    let back_in = w.m.deposit_ix(
+        &w.env,
+        &w.usdc,
+        &whale.pubkey(),
+        &whale_acc,
+        9_000_000 * USDC,
+    );
+    let payout = w.m.admin_payout_ix(
+        &w.env,
+        &w.usdc,
+        &loot,
+        &attacker.pubkey(),
+        25_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    let back_out = w.m.withdraw_ix(
+        &w.env,
+        &w.usdc,
+        &whale.pubkey(),
+        &whale_acc,
+        9_000_000 * USDC,
+        &w.usdc_prices(false),
+    );
+    w.env
+        .ok(&[back_in, payout, back_out], &[&whale, &w.m.admin]);
+    assert_eq!(
+        w.env.balance(&loot),
+        0,
+        "above the 20,000 burst of the 1M left: queued, not paid"
+    );
+    assert_eq!(
+        w.env.balance(&whale_acc),
+        9_000_000 * USDC,
+        "the whale's own money is still backed and instant"
+    );
+    assert_eq!(
+        w.m.attest(&mut w.env, &w.usdc).available_now,
+        0,
+        "the 25,000 reservation used the 20,000 burst"
+    );
+}
+
+/// Finding 63: a loosening of one mint's asset record must name that record;
+/// another record's version would let it survive a later tightening.
+#[test]
+fn an_asset_loosening_must_name_its_own_asset_record() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (mint, program) = (w.usdc.mint, w.usdc.token_program);
+    let mut ix = w.m.propose_change_ix(
+        &w.env,
+        1,
+        &mint,
+        &asset_bytes(true, 9_990, 10_100, 20_000, 60, 100, USDC_FEED),
+        Some(&w.sol.asset),
+    );
+    ix.accounts.push(AccountMeta::new_readonly(mint, false));
+    ix.accounts.push(AccountMeta::new_readonly(program, false));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::WRONG_ADDRESS);
+}
+
+/// Finding 67: a closed ticket's address is reused by its payer's next ticket,
+/// so a cancel names the ticket the guardian decided on.
+#[test]
+fn a_cancel_or_extension_names_its_ticket() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(
+        &w.env,
+        &w.usdc,
+        &to,
+        &payee.pubkey(),
+        2_000_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let id = ticket_id(&w.env, &ticket);
+    let g0 = w.m.g[0].pubkey();
+    let wrong =
+        w.m.cancel_ix(&w.usdc, &ticket, id + 1, &g0, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.g[0]]), verr::WRONG_TICKET);
+    let mut args = 3_600i64.to_le_bytes().to_vec();
+    args.extend_from_slice(&(id + 1).to_le_bytes());
+    let extend = w.m.vault_ix(
+        11,
+        &args,
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(ticket, false),
+            AccountMeta::new_readonly(g0, true),
+        ],
+    );
+    assert_eq!(w.env.fails(&[extend], &[&w.m.g[0]]), verr::WRONG_TICKET);
+    let right =
+        w.m.cancel_ix(&w.usdc, &ticket, id, &g0, &w.env.payer.pubkey());
+    w.env.ok(&[right], &[&w.m.g[0]]);
+}
+
+/// Finding 64: every Vault event ends with the protocol it concerns, so a
+/// reader can tell one protocol's events from another's in one transaction.
+#[test]
+fn every_vault_event_names_its_protocol() {
+    let mut w = World::new();
+    w.seal();
+    let g0 = w.m.g[0].pubkey();
+    let freeze = w.m.freeze_ix(&g0, None, 3_600);
+    let m = w.env.ok(&[freeze], &[&w.m.g[0]]);
+    let data: Vec<&String> = m
+        .logs
+        .iter()
+        .filter(|l| l.starts_with("Program data: "))
+        .collect();
+    assert!(!data.is_empty());
+    fn b64(s: &str) -> Vec<u8> {
+        let val = |c: u8| match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            _ => 63,
+        };
+        let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0);
+        for c in s.bytes().filter(|c| *c != b'=') {
+            acc = acc << 6 | val(c) as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+            }
+        }
+        out
+    }
+    for line in data {
+        let fields: Vec<Vec<u8>> = line["Program data: ".len()..].split(' ').map(b64).collect();
+        assert_eq!(
+            fields.last().unwrap().as_slice(),
+            w.m.protocol.as_ref(),
+            "{line}"
+        );
+    }
+}
+
+/// Finding 68: an InterestBearing (or ScaledUiAmount) mint's UI amount is its
+/// raw amount times a factor the issuer moves at will. Pyth prices UI units,
+/// the ledger raw units, so such a mint is never priced. Custody is fine.
+#[test]
+fn a_mint_whose_ui_amount_rescales_is_held_but_never_priced() {
+    let mut env = Env::new();
+    let m = Market::new(&mut env);
+    let mint = Keypair::new();
+    let authority = Keypair::new();
+    let size = 165 + 1 + 4 + 52; // InterestBearingConfig (type 10)
+    let lamports = env.svm.minimum_balance_for_rent_exemption(size);
+    let t22 = token_2022();
+    let create = solana_system_interface::instruction::create_account(
+        &env.payer.pubkey(),
+        &mint.pubkey(),
+        lamports,
+        size as u64,
+        &t22,
+    );
+    let mut d = vec![33u8, 0]; // InterestBearingMintExtension::Initialize
+    d.extend_from_slice(authority.pubkey().as_ref());
+    d.extend_from_slice(&500i16.to_le_bytes());
+    let init_interest = solana_instruction::Instruction {
+        program_id: t22,
+        accounts: vec![AccountMeta::new(mint.pubkey(), false)],
+        data: d,
+    };
+    let mut d = vec![20u8, 6]; // InitializeMint2
+    d.extend_from_slice(authority.pubkey().as_ref());
+    d.push(0);
+    let init_mint = solana_instruction::Instruction {
+        program_id: t22,
+        accounts: vec![AccountMeta::new(mint.pubkey(), false)],
+        data: d,
+    };
+    env.ok(&[create, init_interest, init_mint], &[&mint]);
+    let vault = pda(
+        &[b"vault", m.protocol.as_ref(), mint.pubkey().as_ref()],
+        &m.vault_program,
+    );
+    let vault_tokens = pda(
+        &[b"vault-tokens", m.protocol.as_ref(), mint.pubkey().as_ref()],
+        &m.vault_program,
+    );
+    let ix = m.vault_ix(
+        1,
+        &Limits::default_limits().bytes(),
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new_readonly(m.admin.pubkey(), true),
+            AccountMeta::new(m.protocol, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(vault_tokens, false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new_readonly(t22, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ],
+    );
+    env.ok(&[ix], &[&m.admin]);
+    let asset = pda(
+        &[b"asset", m.protocol.as_ref(), mint.pubkey().as_ref()],
+        &m.vault_program,
+    );
+    let upsert = |env: &Env, listed: bool| {
+        let mut ix = m.propose_change_ix(
+            env,
+            1,
+            &mint.pubkey(),
+            &asset_bytes(listed, 8_500, 10_500, 20_000, 60, 100, USDC_FEED),
+            Some(&asset),
+        );
+        ix.accounts
+            .push(AccountMeta::new_readonly(mint.pubkey(), false));
+        ix.accounts.push(AccountMeta::new_readonly(t22, false));
+        ix
+    };
+    let ix = upsert(&env, true);
+    assert_eq!(env.fails(&[ix], &[&m.admin]), verr::EXTENSION_NOT_ALLOWED);
+    let ix = upsert(&env, false);
+    env.ok(&[ix], &[&m.admin]);
 }
 
 #[test]

@@ -39,7 +39,7 @@ pub use state::{change, Asset, Backing, Change, Protocol, Ticket, Vault, MAX_GUA
 pub use pyth::{parse as parse_price_update, PriceUpdate};
 pub use token::{mint_policy_decimals, token_account_fields};
 
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::reference_update;
 use bulkhead_core::governance::{
     MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
 };
@@ -120,7 +120,7 @@ pub fn process_instruction(
         ix::DEPOSIT => custody::deposit(program_id, accounts, args),
         ix::RELEASE => custody::release(program_id, accounts, args, false),
         ix::SETTLE_TICKET => custody::settle_ticket(program_id, accounts),
-        ix::CANCEL_TICKET => brakes::cancel_ticket(program_id, accounts),
+        ix::CANCEL_TICKET => brakes::cancel_ticket(program_id, accounts, args),
         ix::EXTEND_TICKET => brakes::extend_ticket(program_id, accounts, args),
         ix::FREEZE => brakes::freeze(program_id, accounts, args),
         ix::UNFREEZE => brakes::unfreeze(program_id, accounts, args),
@@ -353,8 +353,10 @@ impl VaultSigner {
 }
 
 /// Updates the reference balance (EMA) with the balance *before* an operation.
+/// It rises slowly but drops at once (`reference_update`, finding 65); a
+/// deposit touches with the balance before it, so it cannot raise the base.
 pub(crate) fn touch_reference(v: &mut Vault, balance: u64, now_s: i64) {
-    v.ref_balance = ema_update(
+    v.ref_balance = reference_update(
         v.ref_balance,
         v.ref_updated_s,
         balance,

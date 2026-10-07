@@ -681,12 +681,18 @@ fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     c.snapshot_valid = 0;
     if c.snapshot_buffer != [0; 32] {
         let snap = accounts.get(10).ok_or(FloorError::SnapshotMismatch)?;
-        if key(snap) != c.snapshot_buffer {
+        // The abort buffer is used up by this stop: never a snapshot.
+        let restores = key(snap) != c.abort_buffer
+            && check_frozen_buffer(program_id, &c, snap).is_ok()
+            && snapshot_identical(snap, programdata)?;
+        // Anyone may re-pin, so a stop naming an earlier pin must not fail: a
+        // buffer that restores the live code is as good as the pin, and
+        // becomes it (docs/09, finding 66). Anything else must be the pin.
+        if key(snap) != c.snapshot_buffer && !restores {
             return Err(FloorError::SnapshotMismatch.into());
         }
-        if check_frozen_buffer(program_id, &c, snap).is_ok()
-            && snapshot_identical(snap, programdata)?
-        {
+        if restores {
+            c.snapshot_buffer = key(snap);
             c.snapshot_valid = 1;
         }
     }

@@ -122,6 +122,29 @@ pub fn mint_policy_decimals(d: &[u8], token_2022: bool) -> Result<u8, ProgramErr
     Ok(decimals)
 }
 
+/// Whether a mint that passed `mint_policy_decimals` has InterestBearing (10)
+/// or ScaledUiAmount (25): its UI amount is the raw amount times a factor the
+/// issuer changes at will, outside the loosen delay. Pyth prices UI units and
+/// the ledger values raw units, so such a mint can never be priced (docs/09,
+/// finding 68). Holding it in custody is unaffected.
+pub fn rescales_ui_amount(mint: &AccountView) -> Result<bool, ProgramError> {
+    let d = mint.try_borrow()?;
+    if d.len() <= ACCOUNT_BASE_LEN + 1 {
+        return Ok(false);
+    }
+    let mut o = ACCOUNT_BASE_LEN + 1;
+    while o + 4 <= d.len() {
+        let ty = u16::from_le_bytes([d[o], d[o + 1]]);
+        let len = u16::from_le_bytes([d[o + 2], d[o + 3]]) as usize;
+        match ty {
+            0 => break,
+            10 | 25 => return Ok(true),
+            _ => o += 4 + len,
+        }
+    }
+    Ok(false)
+}
+
 /// `TransferChecked` (instruction 12) from `from` to `to`, authorized by
 /// `authority` (a signer, or the vault PDA through `signer`).
 #[allow(clippy::too_many_arguments)]

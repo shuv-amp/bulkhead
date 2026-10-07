@@ -26,3 +26,18 @@ pub fn ema_update(reference: u64, last_s: i64, balance: u64, now_s: i64, initial
         reference - step as u64
     }
 }
+
+/// The reference after a touch with the balance before an operation: the EMA
+/// step, but never above that balance. It rises slowly and drops at once, so
+/// capital deposited and withdrawn (backed) within one transaction cannot lift
+/// `capacity_base` back to a reference lagging above what is really left
+/// (docs/09, finding 65).
+pub fn reference_update(
+    reference: u64,
+    last_s: i64,
+    balance: u64,
+    now_s: i64,
+    initialized: bool,
+) -> u64 {
+    ema_update(reference, last_s, balance, now_s, initialized).min(balance)
+}

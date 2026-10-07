@@ -18,7 +18,7 @@
 mod common;
 
 use bulkhead_core::classify::{classify_limits, Class, LimitConfig};
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::reference_update;
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{available_now, capacity_base, max_unbacked_over, params_from_config, request, rescale_windows, reset_backlog, Decision, LimiterState};
 use common::vault::*;
@@ -119,7 +119,7 @@ impl Model {
     }
     /// The reference as the program sees it after `touch_reference` at `now`.
     fn touched(&self, now: i64) -> u64 {
-        ema_update(self.reference, self.ref_at, self.balance, now, self.ref_init)
+        reference_update(self.reference, self.ref_at, self.balance, now, self.ref_init)
     }
     fn touch(&mut self, now: i64) {
         self.reference = self.touched(now);
@@ -372,7 +372,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
             23 => {
                 if let Some((&id, tk)) = md.tickets.iter().next() {
                     let g = m.g[0].pubkey();
-                    env.ok(&[m.cancel_ix(&usdc, &tk.account, &g, &env.payer.pubkey())], &[&m.g[0]]);
+                    env.ok(&[m.cancel_ix(&usdc, &tk.account, ticket_id(&env, &tk.account), &g, &env.payer.pubkey())], &[&m.g[0]]);
                     md.tickets.remove(&id);
                     count("cancel");
                 }
@@ -384,7 +384,9 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                     let (&id, _) = md.tickets.iter().nth(k).unwrap();
                     let secs = rng.pick(&[0i64, 1, 3_600, 86_400, 86_401]);
                     let tk = md.tickets.get_mut(&id).unwrap();
-                    let ix = m.vault_ix(11, &secs.to_le_bytes(), vec![
+                    let mut args = secs.to_le_bytes().to_vec();
+                    args.extend_from_slice(&id.to_le_bytes());
+                    let ix = m.vault_ix(11, &args, vec![
                         AccountMeta::new_readonly(m.protocol, false),
                         AccountMeta::new(tk.account, false),
                         AccountMeta::new_readonly(m.g[2].pubkey(), true),

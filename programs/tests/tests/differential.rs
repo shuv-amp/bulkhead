@@ -15,7 +15,7 @@
 mod common;
 
 use bulkhead_core::classify::LimitConfig;
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::reference_update;
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterState};
 use common::vault::*;
@@ -156,7 +156,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
         let amount = (1 + rng.below(3_000_000)) * USDC;
         let ix = m.deposit_ix(&env, &usdc, &u.pubkey(), &usdc_acc[i].0, amount);
         env.ok(&[ix], &[u]);
-        md.reference = ema_update(md.reference, md.ref_at, md.balance, env.time, md.ref_init);
+        md.reference = reference_update(md.reference, md.ref_at, md.balance, env.time, md.ref_init);
         md.ref_at = env.time;
         md.ref_init = true;
         md.balance += amount;
@@ -204,7 +204,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 let amount = (1 + rng.below(500_000)) * USDC;
                 let ix = m.deposit_ix(&env, &usdc, &users[i].pubkey(), &usdc_acc[i].0, amount);
                 env.ok(&[ix], &[&users[i]]);
-                md.reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
+                md.reference = reference_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                 md.ref_at = now;
                 md.balance += amount;
                 md.ledgers.entry(users[i].pubkey().to_bytes()).or_default().credit(um, amount);
@@ -247,7 +247,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 // The model.
                 let backed = ledger.backed_amount(&um, amount, &lookup);
                 let unbacked = amount - backed;
-                let reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
+                let reference = reference_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                 let params = params_from_config(&cfg(), capacity_base(reference, md.balance));
                 let mut lim = md.limiter;
                 let decision = if unbacked > 0 {
@@ -308,7 +308,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                         assert!(r.is_err(), "frozen, or not enough tokens: no settlement");
                     } else {
                         r.unwrap_or_else(|e| panic!("seed {seed} step {step}: settle {:?}", e.err));
-                        md.reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
+                        md.reference = reference_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                         md.ref_at = now;
                         md.balance -= amount;
                         md.tickets.remove(&id);
@@ -322,7 +322,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 if let Some(&id) = md.tickets.keys().next() {
                     let (ticket, _) = ticket_accounts[&id];
                     let g = m.g[0].pubkey();
-                    let ix = m.cancel_ix(&usdc, &ticket, &g, &env.payer.pubkey());
+                    let ix = m.cancel_ix(&usdc, &ticket, ticket_id(&env, &ticket), &g, &env.payer.pubkey());
                     env.ok(&[ix], &[&m.g[0]]);
                     md.tickets.remove(&id);
                     c[7] += 1;

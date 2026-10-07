@@ -130,13 +130,16 @@ pub fn deposit(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
     save(&mut accounts[7], |d| b.store(d))?;
     save(&mut accounts[2], |d| v.store(d))?;
     pinocchio::cpi::set_return_data(&received.to_le_bytes());
-    sys::event(&[
-        b"vault:deposited",
-        &v.mint,
-        &owner,
-        &received.to_le_bytes(),
-        &[backed as u8],
-    ]);
+    sys::event(
+        &key(&accounts[1]),
+        &[
+            b"vault:deposited",
+            &v.mint,
+            &owner,
+            &received.to_le_bytes(),
+            &[backed as u8],
+        ],
+    );
     Ok(())
 }
 
@@ -439,7 +442,10 @@ pub fn release(
     // Set last: every CPI (the token transfer, the ticket's account) clears
     // return data when it starts.
     pinocchio::cpi::set_return_data(&outcome);
-    sys::event(&[b"vault:released", &v.mint, &owner, &outcome, &ticket_key]);
+    sys::event(
+        &key(&accounts[1]),
+        &[b"vault:released", &v.mint, &owner, &outcome, &ticket_key],
+    );
     Ok(())
 }
 
@@ -502,10 +508,13 @@ pub fn settle_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     v.unbacked_out = v.unbacked_out.saturating_add(tk.amount as u128);
     save(&mut accounts[1], |d| v.store(d))?;
     close(accounts, 4, 6)?;
-    sys::event(&[
-        b"vault:settled",
-        &tk.id.to_le_bytes(),
-        &tk.amount.to_le_bytes(),
-    ]);
+    sys::event(
+        &key(&accounts[0]),
+        &[
+            b"vault:settled",
+            &tk.id.to_le_bytes(),
+            &tk.amount.to_le_bytes(),
+        ],
+    );
     Ok(())
 }

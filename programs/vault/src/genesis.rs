@@ -138,7 +138,7 @@ pub fn register_protocol(
         recovery,
     };
     save(&mut accounts[1], |d| p.store(d))?;
-    sys::event(&[b"vault:registered", &pk, &p.admin]);
+    sys::event(&key(&accounts[1]), &[b"vault:registered", &pk, &p.admin]);
     Ok(())
 }
 
@@ -249,7 +249,7 @@ pub fn create_vault(
     save(&mut accounts[3], |d| v.store(d))?;
     p.vault_count = p.vault_count.checked_add(1).ok_or(VaultError::Overflow)?;
     save(&mut accounts[2], |d| p.store(d))?;
-    sys::event(&[b"vault:vault_created", &pk, &mk]);
+    sys::event(&key(&accounts[2]), &[b"vault:vault_created", &pk, &mk]);
     Ok(())
 }
 
@@ -301,6 +301,9 @@ pub(crate) fn write_asset(
         acc(accounts, mint_i)?,
         acc(accounts, token_program_i)?.address(),
     )?;
+    if config.allowlisted && token::rescales_ui_amount(acc(accounts, mint_i)?)? {
+        return Err(VaultError::ExtensionNotAllowed.into());
+    }
     let asset = acc(accounts, asset_i)?;
     let bump = expect_pda(&[seeds::ASSET, &pk, &mk], program_id, asset)?;
     // An absent record reads as version 0, so creating one is a change too.
@@ -335,7 +338,10 @@ pub(crate) fn write_asset(
         version,
     };
     save(&mut accounts[asset_i], |d| a.store(d))?;
-    sys::event(&[b"vault:asset", &pk, &mk, &[config.allowlisted as u8]]);
+    sys::event(
+        &pk,
+        &[b"vault:asset", &pk, &mk, &[config.allowlisted as u8]],
+    );
     Ok(())
 }
 
@@ -372,7 +378,10 @@ pub fn import_backing(
     save(&mut accounts[4], |d| b.store(d))?;
     v.imported = v.imported.checked_add(amount).ok_or(VaultError::Overflow)?;
     save(&mut accounts[3], |d| v.store(d))?;
-    sys::event(&[b"vault:imported", &v.mint, &owner, &amount.to_le_bytes()]);
+    sys::event(
+        &key(&accounts[2]),
+        &[b"vault:imported", &v.mint, &owner, &amount.to_le_bytes()],
+    );
     Ok(())
 }
 
@@ -395,11 +404,14 @@ pub fn propose_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
     p.seal_expires_s = s.expires_s;
     p.seal_vetoed = false;
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[
-        b"vault:seal_proposed",
-        &p.protocol_program,
-        &s.executable_s.to_le_bytes(),
-    ]);
+    sys::event(
+        &key(&accounts[0]),
+        &[
+            b"vault:seal_proposed",
+            &p.protocol_program,
+            &s.executable_s.to_le_bytes(),
+        ],
+    );
     Ok(())
 }
 
@@ -412,7 +424,10 @@ pub fn veto_seal(program_id: &Address, accounts: &mut [AccountView]) -> ProgramR
     }
     p.seal_vetoed = true;
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:seal_vetoed", &p.protocol_program]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:seal_vetoed", &p.protocol_program],
+    );
     Ok(())
 }
 
@@ -482,6 +497,6 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
     }
     p.sealed = true;
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:sealed", &p.protocol_program]);
+    sys::event(&key(&accounts[0]), &[b"vault:sealed", &p.protocol_program]);
     Ok(())
 }

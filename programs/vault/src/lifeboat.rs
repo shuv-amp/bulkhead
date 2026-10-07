@@ -81,7 +81,10 @@ pub fn move_in(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
     // lifeboat. Track its actual balance, not the gross source debit.
     v.lifeboat_amount = token::balance(lifeboat)?;
     save(&mut accounts[1], |d| v.store(d))?;
-    sys::event(&[b"vault:lifeboat_in", &v.mint, &amount.to_le_bytes()]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:lifeboat_in", &v.mint, &amount.to_le_bytes()],
+    );
     Ok(())
 }
 
@@ -138,7 +141,10 @@ pub fn move_back(program_id: &Address, accounts: &mut [AccountView], args: &[u8]
     v.lifeboat_amount = token::balance(lifeboat)?;
     v.exit_amount = v.exit_amount.min(v.lifeboat_amount);
     save(&mut accounts[1], |d| v.store(d))?;
-    sys::event(&[b"vault:lifeboat_out", &v.mint, &amount.to_le_bytes()]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:lifeboat_out", &v.mint, &amount.to_le_bytes()],
+    );
     Ok(())
 }
 
@@ -170,12 +176,15 @@ pub fn propose_exit(
     v.exit_expires_s = s.expires_s;
     v.exit_vetoed = false;
     save(&mut accounts[1], |d| v.store(d))?;
-    sys::event(&[
-        b"vault:exit_proposed",
-        &v.mint,
-        &amount.to_le_bytes(),
-        &s.executable_s.to_le_bytes(),
-    ]);
+    sys::event(
+        &key(&accounts[0]),
+        &[
+            b"vault:exit_proposed",
+            &v.mint,
+            &amount.to_le_bytes(),
+            &s.executable_s.to_le_bytes(),
+        ],
+    );
     Ok(())
 }
 
@@ -231,7 +240,10 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
     v.lifeboat_amount = token::balance(lifeboat)?;
     v.exit_amount = 0;
     save(&mut accounts[1], |d| v.store(d))?;
-    sys::event(&[b"vault:exit_executed", &v.mint, &amount.to_le_bytes()]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:exit_executed", &v.mint, &amount.to_le_bytes()],
+    );
     Ok(())
 }
 
@@ -246,6 +258,6 @@ pub fn veto_exit(program_id: &Address, accounts: &mut [AccountView]) -> ProgramR
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
     v.exit_vetoed = true;
     save(&mut accounts[1], |d| v.store(d))?;
-    sys::event(&[b"vault:exit_vetoed", &v.mint]);
+    sys::event(&key(&accounts[0]), &[b"vault:exit_vetoed", &v.mint]);
     Ok(())
 }
