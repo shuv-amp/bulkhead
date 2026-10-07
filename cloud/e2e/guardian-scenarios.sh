@@ -16,6 +16,8 @@ mkdir -p "$E"
 echo "== building the world (LiteSVM, the same program ids)"
 (cd programs/tests && BULKHEAD_E2E_DIR="$E" cargo test --release --test e2e_world -- --ignored > "$E/world-build.log" 2>&1) \
   || { tail -30 "$E/world-build.log"; echo "the e2e world did not build"; exit 1; }
+# Keypair.load refuses a key file others can read; the world writes them 0644.
+chmod 700 "$E/keys" && chmod 600 "$E"/keys/*.json
 field() { python3 -c "import json,sys; print(json.load(open('$E/world.json'))['$1'])"; }
 VAULT=$(field vaultProgram); HARBOR=$(field harbor)
 VPID=""

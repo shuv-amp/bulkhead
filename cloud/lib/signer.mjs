@@ -3,7 +3,7 @@
 // (32-byte seed, then the 32-byte public key).
 
 import { createPrivateKey, createPublicKey, sign as edSign, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, statSync, chmodSync } from "node:fs";
 import { b58encode, compileMessage, serializeTransaction, key, concat, u64le } from "./solana.mjs";
 
 const PKCS8_ED25519 = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -18,7 +18,13 @@ export class Keypair {
   static generate() {
     return new Keypair(randomBytes(32));
   }
+  /** Refuses a key file the group or others may read or write: a guardian or
+   * admin key anyone on the host can copy is not a key the protocol holds. */
   static load(path) {
+    const mode = statSync(path).mode;
+    if (process.platform !== "win32" && (mode & 0o077) !== 0) {
+      throw new Error(`${path}: key file is open to group or others (mode ${(mode & 0o777).toString(8)}); run chmod 600 ${path}`);
+    }
     const bytes = JSON.parse(readFileSync(path, "utf8"));
     const kp = new Keypair(Uint8Array.from(bytes.slice(0, 32)));
     if (bytes.length === 64 && b58encode(Uint8Array.from(bytes.slice(32))) !== kp.address) {
@@ -28,6 +34,7 @@ export class Keypair {
   }
   save(path) {
     writeFileSync(path, JSON.stringify([...this.seed, ...this.publicKey]), { mode: 0o600 }); // owner-only, like solana-keygen
+    chmodSync(path, 0o600); // the mode above applies only to a new file
   }
   get address() {
     return b58encode(this.publicKey);
@@ -69,10 +76,17 @@ export function priorityPrice(fees, { percentile = 0.9, cap = 1_000_000 } = {}) 
  * `computeUnits` adds a compute-budget limit (and `microLamports` a priority
  * price); `rpcs` are extra endpoints the same signed transaction is also sent
  * to, so one slow or censoring endpoint doesn't delay it.
+ *
+ * Until it confirms, the same signed bytes go out again every `rebroadcastMs`
+ * to every endpoint: a leader that dropped the first copy (congestion, a
+ * fork) gets another, as wallets do. Sent once, a freeze under load could sit
+ * out the whole minute and never land. Once the blockhash has expired it can
+ * never land, and that is said at once.
  */
-export async function send(rpc, payer, instructions, extraSigners = [], { skipPreflight = false, computeUnits = 0, microLamports = 0, rpcs = [] } = {}) {
+export async function send(rpc, payer, instructions, extraSigners = [], { skipPreflight = false, computeUnits = 0, microLamports = 0, rpcs = [], pollMs = 500, rebroadcastMs = 2_000, confirmMs = 60_000 } = {}) {
   const ixs = computeUnits > 0 ? [...computeBudget(computeUnits, microLamports), ...instructions] : instructions;
-  const { message, signers } = compileMessage(payer.publicKey, ixs, await rpc.blockhash());
+  const latest = rpc.latestBlockhash ? await rpc.latestBlockhash() : { blockhash: await rpc.blockhash(), lastValidBlockHeight: null };
+  const { message, signers } = compileMessage(payer.publicKey, ixs, latest.blockhash);
   const all = [payer, ...extraSigners];
   const sigs = signers.map((k) => {
     const kp = all.find((s) => b58encode(s.publicKey) === b58encode(k));
@@ -93,11 +107,31 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
     e.signature = b58encode(sigs[0]);
     throw e;
   }
-  for (let i = 0; i < 120; i++) {
+  const status = async () => {
     const st = (await rpc.call("getSignatureStatuses", [[signature]])).value[0];
     if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);
-    if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return signature;
-    await new Promise((r) => setTimeout(r, 500));
+    return Boolean(st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized"));
+  };
+  const again = () => {
+    for (const r of [rpc, ...rpcs]) void Promise.resolve().then(() => r.call("sendTransaction", [tx, { ...opts, skipPreflight: true }])).catch(() => {});
+  };
+  const started = Date.now();
+  let sentAt = started;
+  for (;;) {
+    if (await status()) return signature;
+    if (Date.now() - started >= confirmMs) break;
+    if (Date.now() - sentAt >= rebroadcastMs) {
+      sentAt = Date.now();
+      if (latest.lastValidBlockHeight != null) {
+        const height = await rpc.call("getBlockHeight", [{ commitment: "confirmed" }]).catch(() => null);
+        if (height != null && height > latest.lastValidBlockHeight) {
+          if (await status()) return signature;
+          throw new Error(`transaction ${signature} expired unconfirmed (its blockhash is no longer valid)`);
+        }
+      }
+      again();
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
   }
   throw new Error(`transaction ${signature} not confirmed`);
 }
@@ -122,9 +156,12 @@ export async function sendWithFallback(rpc, payer, instructions, extraSigners = 
     // The backups were sent the same transaction without a preflight: if one
     // landed it, that is the answer. A second transaction would freeze twice,
     // or fail as a duplicate veto and be reported as a failure.
+    // One that landed with an error (out of compute, say: the very budget the
+    // fallback drops) did nothing, so it is no answer: fall back. It used to
+    // throw here, and the fallback finding 47 added never ran.
     if (opts.rpcs?.length && e.signature) {
       const landed = await landedBy(rpc, e.signature, opts.landedWaitMs ?? 2_000);
-      if (landed) return e.signature;
+      if (landed === "confirmed") return e.signature;
     }
     const signature = await send(rpc, payer, instructions, extraSigners, { ...opts, computeUnits: 0, microLamports: 0 });
     onFallback(e);
@@ -132,7 +169,7 @@ export async function sendWithFallback(rpc, payer, instructions, extraSigners = 
   }
 }
 
-/** Whether `signature` confirmed (true), failed (throws), or did not show up within `waitMs` (false). */
+/** Whether `signature` "confirmed", "failed" (landed with an error), or did not show up within `waitMs` (null). */
 async function landedBy(rpc, signature, waitMs) {
   const until = Date.now() + waitMs;
   for (;;) {
@@ -142,9 +179,9 @@ async function landedBy(rpc, signature, waitMs) {
     } catch {
       st = null;
     }
-    if (st?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`);
-    if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return true;
-    if (Date.now() >= until) return false;
+    if (st?.err) return "failed";
+    if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return "confirmed";
+    if (Date.now() >= until) return null;
     await new Promise((r) => setTimeout(r, 400));
   }
 }

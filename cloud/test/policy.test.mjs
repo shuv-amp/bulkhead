@@ -1,16 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
 const worst1h = 400_000n * USDC; // 10M vault, default limits (golden G-6)
 const owner = "5YMKnK8DcuUc5vSagDZTJB8VVGnQ1ZJP9Pxm9BAqUoPh";
 const mint = "DmrC7P3uPGQ7zCMhLVkJVAtnWwPn6yzSg6tL9xVEmzzM";
+// The Vault appends the protocol it acted for to every event (finding 64).
+const PROTOCOL_ID = "8sZ5d3jB3kGqEoTz6eYpNw2bR3aUqv1uJ8sZtLWGd7Vb";
+const PROTOCOL = key(PROTOCOL_ID);
 
 function released({ backed = 0n, instant = 0n, queued = 0n, ticketId = 0n, who = owner, mint: which = mint }) {
   const outcome = concat(u64le(backed), u64le(instant), u64le(queued), u64le(ticketId), i64le(0));
-  return decode({ name: "vault:released", fields: [key(which), key(who), outcome] });
+  return decode({ name: "vault:released", fields: [key(which), key(who), outcome, new Uint8Array(32), PROTOCOL] });
 }
 
 test("the burst alone does not freeze; crossing half of worst_1h does", () => {
@@ -71,7 +74,7 @@ test("one mint's outflow does not fill another mint's window", () => {
 
 test("replaying history records the window and does not veto or freeze by itself", () => {
   const s = newState();
-  const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0)] });
+  const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0), PROTOCOL] });
   assert.deepEqual(assess(s, ev, { worst1h, now: 0 }, DEFAULT_POLICY, false), []);
   assert.equal(s.vetoed.size, 0);
   assess(s, released({ instant: 250_000n * USDC }), { worst1h, worst24h: 2_000_000n * USDC, now: 10 }, DEFAULT_POLICY, false);
@@ -81,14 +84,14 @@ test("replaying history records the window and does not veto or freeze by itself
 
 test("unapproved loosenings are vetoed once; approved ones are not", () => {
   const s = newState();
-  const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0)] });
+  const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0), PROTOCOL] });
   assert.equal(assess(s, ev, { worst1h, now: 0 })[0].type, "veto_change");
   assert.deepEqual(assess(s, ev, { worst1h, now: 1 }), []);
-  // The event has no payload: an approval of this kind and target leaves it
-  // to the account scan, which compares the payload.
+  // The event has no payload: an approval of this kind and target has the
+  // change account read by its id, which compares the payload.
   const approved = { ...DEFAULT_POLICY, approvedChanges: [changeApproval({ kind: 0, target: mint, payload: Uint8Array.of(1, 2) })] };
-  assert.deepEqual(assess(newState(), ev, { worst1h, now: 0 }, approved), []);
-  const otherTarget = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(owner), i64le(0)] });
+  assert.deepEqual(assess(newState(), ev, { worst1h, now: 0 }, approved), [{ type: "check_change", changeId: 3n }]);
+  const otherTarget = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(owner), i64le(0), PROTOCOL] });
   assert.equal(assess(newState(), otherTarget, { worst1h, now: 0 }, approved)[0].type, "veto_change");
 });
 
@@ -102,18 +105,18 @@ test("an approval names what a change does, so a thief proposing first gets no a
   const policy = checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [changeApproval({ kind: 3, target: fresh, payload: new Uint8Array(0) })] });
   const theirs = { id: 9n, kind: 3, target: thief, payload: new Uint8Array(0), vetoed: false, executed: false, executableS: 1_000, expiresS: 2_000 };
   const ours = { ...theirs, id: 10n, target: fresh };
-  const live = (c) => decode({ name: "vault:change_proposed", fields: [u64le(c.id), Uint8Array.of(c.kind), key(c.target), i64le(0)] });
+  const live = (c) => decode({ name: "vault:change_proposed", fields: [u64le(c.id), Uint8Array.of(c.kind), key(c.target), i64le(0), PROTOCOL] });
   assert.equal(assess(newState(), live(theirs), { worst1h, now: 0 }, policy)[0].changeId, 9n, "the thief's is vetoed live");
-  assert.deepEqual(assess(newState(), live(ours), { worst1h, now: 0 }, policy), []);
+  assert.deepEqual(assess(newState(), live(ours), { worst1h, now: 0 }, policy), [{ type: "check_change", changeId: 10n }]);
   assert.equal(pendingChangeVeto(theirs, policy, 500, new Set()).changeId, 9n);
   assert.equal(pendingChangeVeto(ours, policy, 500, new Set()), null);
   assert.equal(dueApprovedChange(theirs, policy, 1_500, new Set()), null, "never executed");
   assert.equal(dueApprovedChange(ours, policy, 1_500, new Set()).changeId, 10n);
   // Same kind and target, another payload (looser limits for the approved
-  // vault): let through live, vetoed by the account scan, never executed.
+  // vault): read by id live, vetoed on its payload, never executed.
   const limits = { ...DEFAULT_POLICY, approvedChanges: [changeApproval({ kind: 0, target: mint, payload: Uint8Array.of(1) })] };
   const looser = { ...theirs, kind: 0, target: mint, payload: Uint8Array.of(2) };
-  assert.deepEqual(assess(newState(), live(looser), { worst1h, now: 0 }, limits), []);
+  assert.deepEqual(assess(newState(), live(looser), { worst1h, now: 0 }, limits), [{ type: "check_change", changeId: 9n }]);
   assert.equal(pendingChangeVeto(looser, limits, 500, new Set()).type, "veto_change");
   assert.equal(dueApprovedChange(looser, limits, 1_500, new Set()), null);
   assert.equal(dueApprovedChange({ ...looser, payload: Uint8Array.of(1) }, limits, 1_500, new Set()).kind, 0);
@@ -130,8 +133,8 @@ test("a policy that approves by id is refused at startup, as is a malformed appr
 });
 
 const frozenEvent = (scope, until) =>
-  decode({ name: "vault:frozen", fields: [Uint8Array.of(scope), key(owner), i64le(until)] });
-const unfrozenEvent = (scope) => decode({ name: "vault:unfrozen", fields: [Uint8Array.of(scope), Uint8Array.of(3)] });
+  decode({ name: "vault:frozen", fields: [Uint8Array.of(scope), key(owner), i64le(until), PROTOCOL] });
+const unfrozenEvent = (scope) => decode({ name: "vault:unfrozen", fields: [Uint8Array.of(scope), Uint8Array.of(3), PROTOCOL] });
 
 test("a vault-scoped freeze is not read as a protocol-wide freeze", () => {
   const s = newState();
@@ -174,7 +177,7 @@ test("an externally observed chain freeze cancels tracked tickets", () => {
 test("settlement and cancellation events remove tickets from the cancellation set", () => {
   const s = newState();
   rememberTicket(s, { ticketId: 9n, mint, owner });
-  const ev = decode({ name: "vault:settled", fields: [u64le(9), u64le(50)] });
+  const ev = decode({ name: "vault:settled", fields: [u64le(9), u64le(50), PROTOCOL] });
   assess(s, ev, { now: 1 });
   assert.deepEqual(pendingCancels(s), []);
 });
@@ -382,7 +385,7 @@ test("a retried vault veto stops once the change is closed", () => {
 
 test("a lifeboat exit is vetoed unless pre-approved, once per proposal", () => {
   const mintKey = new Uint8Array(32).fill(7);
-  const exit = (amount, executableS) => decode({ name: "vault:exit_proposed", fields: [mintKey, u64le(amount), i64le(executableS)] });
+  const exit = (amount, executableS) => decode({ name: "vault:exit_proposed", fields: [mintKey, u64le(amount), i64le(executableS), PROTOCOL] });
   const e = exit(4_000_000n, 900_000);
   assert.equal(e.kind, "exit_proposed");
   assert.equal(e.amount, 4_000_000n);
@@ -401,7 +404,7 @@ test("a lifeboat exit is vetoed unless pre-approved, once per proposal", () => {
   assert.deepEqual(assess(newState(), e, { now: 1 }, { ...policy, vetoLifeboatExits: false }), []);
   // Replayed history decides nothing; the restart scan does.
   assert.deepEqual(assess(newState(), e, { now: 1 }, policy, false), []);
-  const lifeboatIn = decode({ name: "vault:lifeboat_in", fields: [mintKey, u64le(5n)] });
+  const lifeboatIn = decode({ name: "vault:lifeboat_in", fields: [mintKey, u64le(5n), PROTOCOL] });
   assert.deepEqual([lifeboatIn.kind, lifeboatIn.amount], ["lifeboat_in", 5n]);
 });
 
@@ -457,12 +460,12 @@ test("every Floor proposal a stolen owner key could make is vetoed unless pre-ap
 test("a queued release's ticket address travels from the event to the cancel", () => {
   const addr = new Uint8Array(32).fill(5);
   const outcome = concat(u64le(0n), u64le(0n), u64le(400n), u64le(7n), i64le(99));
-  const e = decode({ name: "vault:released", fields: [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), outcome, addr] });
+  const e = decode({ name: "vault:released", fields: [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), outcome, addr, PROTOCOL] });
   assert.equal(e.ticketId, 7n);
-  assert.equal(e.ticket, decode({ name: "vault:released", fields: [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), outcome, addr] }).ticket);
+  assert.equal(e.ticket, decode({ name: "vault:released", fields: [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), outcome, addr, PROTOCOL] }).ticket);
   assert.notEqual(e.ticket, null);
   // An all-zero address (nothing queued), or an event from an older build without it, is no address.
-  assert.equal(decode({ name: "vault:released", fields: [new Uint8Array(32), new Uint8Array(32), outcome, new Uint8Array(32)] }).ticket, null);
+  assert.equal(decode({ name: "vault:released", fields: [new Uint8Array(32), new Uint8Array(32), outcome, new Uint8Array(32), PROTOCOL] }).ticket, null);
   assert.equal(decode({ name: "vault:released", fields: [new Uint8Array(32), new Uint8Array(32), outcome] }).ticket, null);
   const s = newState();
   assess(s, e, { worst1h: 1_000_000n, worst24h: 2_000_000n, now: 1 }, DEFAULT_POLICY, false);
@@ -606,7 +609,101 @@ test("incident hold: a quorum unfreeze ends it; a freeze that runs out does not"
 
 test("a replaced recovery key is decoded from both programs", () => {
   const k = new Uint8Array(32).fill(7);
-  assert.deepEqual(decode({ name: "vault:recovery_replaced", fields: [k, Uint8Array.of(3)] }), { kind: "recovery_replaced", recovery: b58encodeForTest(k) });
+  assert.deepEqual(decode({ name: "vault:recovery_replaced", fields: [k, Uint8Array.of(3), PROTOCOL] }), { kind: "recovery_replaced", recovery: b58encodeForTest(k), protocol: PROTOCOL_ID });
   const prog = new Uint8Array(32).fill(1);
   assert.deepEqual(decode({ name: "floor:recovery_replaced", fields: [prog, k, Uint8Array.of(3)] }), { kind: "recovery_replaced", program: b58encodeForTest(prog), recovery: b58encodeForTest(k) });
+  // All zero is a removed key, not the key 1111….
+  assert.equal(decode({ name: "vault:recovery_replaced", fields: [new Uint8Array(32), Uint8Array.of(3), PROTOCOL] }).recovery, null);
+  assert.equal(decode({ name: "floor:recovery_replaced", fields: [prog, new Uint8Array(32), Uint8Array.of(3)] }).recovery, null);
+});
+
+test("a Vault event names its protocol last; one that names none, or too few fields, names none", () => {
+  assert.equal(released({ instant: 1n }).protocol, PROTOCOL_ID);
+  assert.equal(unfrozenEvent(0).protocol, PROTOCOL_ID);
+  // An older build appended nothing: its last field (a ticket, a recovery
+  // key) must not pass for the protocol.
+  const outcome = concat(u64le(0), u64le(1), u64le(0), u64le(0), i64le(0));
+  assert.equal(decode({ name: "vault:released", fields: [key(mint), key(owner), outcome, PROTOCOL] }).protocol, null);
+  assert.equal(decode({ name: "vault:recovery_replaced", fields: [PROTOCOL, Uint8Array.of(3)] }).protocol, null);
+  assert.equal(decode({ name: "vault:unfrozen", fields: [Uint8Array.of(0), Uint8Array.of(3)] }).protocol, null);
+});
+
+test("an approval is spent once its change has executed; a thief's copy is then vetoed and never executed", () => {
+  // The operators approved rotating the admin to `fresh`; it ran as change 4.
+  // A thief still holding an admin key proposes the same content again.
+  const fresh = owner;
+  const content = changeApproval({ kind: 3, target: fresh, payload: new Uint8Array(0) });
+  const policy = checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [content] });
+  const ran = { id: 4n, kind: 3, target: fresh, payload: new Uint8Array(0), vetoed: false, executed: true, executableS: 1_000, expiresS: 2_000 };
+  const again = { ...ran, id: 11n, executed: false, executableS: 5_000, expiresS: 6_000 };
+  const s = newState();
+  assert.equal(consumeApproval(s.consumed, policy.approvedChanges, changeApproval(ran), "c4"), content);
+  assert.equal(consumeApproval(s.consumed, policy.approvedChanges, changeApproval(ran), "c4"), null, "the same execution spends nothing more");
+  assert.equal(pendingChangeVeto(again, policy, 4_000, s.vetoed, s.consumed).changeId, 11n);
+  assert.equal(dueApprovedChange(again, policy, 5_500, new Set(), s.consumed), null);
+  const live = decode({ name: "vault:change_proposed", fields: [u64le(11), Uint8Array.of(3), key(fresh), i64le(5_000), PROTOCOL] });
+  assert.equal(assess(s, live, { worst1h, now: 4_000 }, policy)[0].type, "veto_change", "vetoed live, not even read");
+  // Before it ran, the approval held; approving the content again takes a
+  // second approval (with an expiry, so the two differ).
+  assert.equal(pendingChangeVeto(again, policy, 4_000, new Set(), new Map()), null);
+  const twice = checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [content, `${content}@9000`] });
+  assert.equal(pendingChangeVeto(again, twice, 4_000, new Set(), s.consumed), null);
+  assert.equal(dueApprovedChange(again, twice, 5_500, new Set(), s.consumed).approval, content);
+  // The keeper spends exactly one of them per execution.
+  consumeApproval(s.consumed, twice.approvedChanges, content, "c11");
+  assert.equal(pendingChangeVeto({ ...again, id: 12n }, twice, 4_000, new Set(), s.consumed).changeId, 12n);
+});
+
+test("an approval with an expiry approves nothing from then on; the old format still works", () => {
+  const content = changeApproval({ kind: 0, target: mint, payload: Uint8Array.of(1) });
+  const policy = checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [`${content}@3000`] });
+  const change = { id: 5n, kind: 0, target: mint, payload: Uint8Array.of(1), vetoed: false, executed: false, executableS: 2_000, expiresS: 4_000 };
+  assert.equal(pendingChangeVeto(change, policy, 2_999, new Set()), null);
+  assert.equal(dueApprovedChange(change, policy, 2_500, new Set()).changeId, 5n);
+  assert.equal(pendingChangeVeto(change, policy, 3_000, new Set()).changeId, 5n, "expired: vetoed");
+  assert.equal(dueApprovedChange(change, policy, 3_500, new Set()), null, "expired: not executed");
+  const live = decode({ name: "vault:change_proposed", fields: [u64le(5), Uint8Array.of(0), key(mint), i64le(2_000), PROTOCOL] });
+  assert.equal(assess(newState(), live, { worst1h, now: 3_000 }, policy)[0].type, "veto_change");
+  assert.deepEqual(parseApproval(`${content}@3000`), { content, expiresS: 3_000 });
+  assert.deepEqual(parseApproval(content), { content, expiresS: null });
+  assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [`${content}@soon`] }), /approvedChanges/);
+  // Floor approvals too, by content, spent once.
+  const floor = { program: owner, pendingKind: 5, pendingId: 2n, pendingVetoed: false, pendingTarget: mint, pendingPayload: new Uint8Array(0), pendingEta: 1_000, pendingExpires: 9_000 };
+  const fcontent = floorApproval({ program: owner, kind: 5, target: mint, payload: new Uint8Array(0) });
+  const fpolicy = checkPolicy({ ...DEFAULT_POLICY, approvedFloorProposals: [`${fcontent}@5000`] });
+  assert.equal(dueApprovedFloor(floor, fpolicy, 1_500, new Set(), new Map()).approval, fcontent);
+  assert.equal(pendingUpgradeVeto(floor, fpolicy, new Set(), { now: 5_000 }).proposalId, 2n, "expired");
+  const spent = new Map([[`${fcontent}@5000`, `e${owner}:1`]]);
+  assert.equal(pendingUpgradeVeto(floor, fpolicy, new Set(), { now: 1_500, consumed: spent }).proposalId, 2n, "spent");
+  assert.equal(dueApprovedFloor(floor, fpolicy, 1_500, new Set(), spent), null);
+});
+
+test("a live proposal that may be approved is read by id: approved, vetoed on payload, or vetoed when unreadable too long", () => {
+  const content = changeApproval({ kind: 0, target: mint, payload: Uint8Array.of(1) });
+  const policy = { ...DEFAULT_POLICY, approvedChanges: [content], approvalCheckGiveUpS: 600 };
+  const change = { id: 7n, kind: 0, target: mint, payload: Uint8Array.of(1), vetoed: false, executed: false, executableS: 2_000, expiresS: 9_000 };
+  assert.equal(checkProposedChange(7n, change, policy, 100, 100, new Set(), new Map()), "ok");
+  assert.equal(checkProposedChange(7n, { ...change, payload: Uint8Array.of(2) }, policy, 100, 100, new Set(), new Map()).type, "veto_change");
+  // The program-account scan may be failing: the change's own account decides.
+  assert.equal(checkProposedChange(7n, undefined, policy, 699, 100, new Set(), new Map()), "wait");
+  const veto = checkProposedChange(7n, undefined, policy, 700, 100, new Set(), new Map());
+  assert.deepEqual([veto.type, veto.changeId], ["veto_change", 7n], "unread is not approved");
+  assert.equal(checkProposedChange(7n, undefined, policy, 700, 100, new Set(["c7"]), new Map()), "ok", "already vetoed");
+});
+
+test("a failed cancel backs off; a refusal no retry changes stops it", () => {
+  const refused = (code) => Object.assign(new Error("sendTransaction: simulation failed"), { rpcError: { code: -32002, data: { err: { InstructionError: [2, { Custom: code }] } } } });
+  let r = afterCancelFailure(undefined, new Error("connection reset"), 0);
+  assert.deepEqual([r.final, r.failures, r.at], [null, 1, CANCEL_RETRY_MS]);
+  r = afterCancelFailure(r, new Error("connection reset"), 0);
+  assert.equal(r.at, 2 * CANCEL_RETRY_MS);
+  for (let i = 0; i < 20; i++) r = afterCancelFailure(r, new Error("x"), 0);
+  assert.equal(r.at, 600_000, "capped at 10 minutes");
+  assert.equal(afterCancelFailure(undefined, refused(8010), 0).final, "WrongVault");
+  assert.equal(afterCancelFailure(undefined, refused(8006), 0).final, "NotGuardian");
+  assert.equal(afterCancelFailure(undefined, refused(8052), 0).final, "WrongTicket");
+  // A confirmed failure carries the error in its message.
+  assert.equal(afterCancelFailure(undefined, new Error('transaction x failed: {"InstructionError":[2,{"Custom":8052}]}'), 0).final, "WrongTicket");
+  assert.equal(afterCancelFailure(undefined, refused(8049), 0).final, null, "anything else is retried");
+  assert.equal(programErrorCode(new Error("no code")), null);
 });

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { emaUpdate, capacityFromRef, maxUnbackedOver, availableNow } from "../lib/limits.mjs";
+import { emaUpdate, touchReference, attestLocal, capacityFromRef, maxUnbackedOver, availableNow } from "../lib/limits.mjs";
 
 const reference = fileURLToPath(new URL("../../reference", import.meta.url));
 const script = `
@@ -59,4 +59,21 @@ test("JS limiter views match the Python reference on 40,000 edge cases", () => {
     counts[t[0]] = (counts[t[0]] ?? 0) + 1;
   }
   for (const k of ["K", "E", "M", "A*"]) assert.ok(counts[k] > 2000, `coverage ${k}: ${counts[k]}`);
+});
+
+test("the touched reference drops at once to the balance and rises slowly (finding 65)", () => {
+  // Rising: the EMA step, as before.
+  assert.equal(touchReference(1_000n, 0, 2_000n, 43_200, true), emaUpdate(1_000n, 0, 2_000n, 43_200, true));
+  assert.equal(touchReference(1_000n, 0, 2_000n, 43_200, true), 1_500n);
+  // Falling: straight to the balance, not halfway.
+  assert.equal(emaUpdate(1_000n, 0, 200n, 43_200, true), 600n);
+  assert.equal(touchReference(1_000n, 0, 200n, 43_200, true), 200n);
+  assert.equal(touchReference(1_000n, 0, 200n, 0, true), 200n, "even with no time passed");
+  assert.equal(touchReference(0n, 0, 5_000n, 0, false), 5_000n, "first touch: the balance");
+  // attestLocal's figures use it: a vault whose stored reference sits above
+  // the live balance is limited by the balance.
+  const limits = { shortBps: 200, shortWindowS: 3_600, longBps: 500, longWindowS: 86_400, minQueueDelayS: 21_600, shortFloor: 0n, longFloor: 0n, shortCap: 0n, longCap: 0n };
+  const vault = { refBalance: 10_000_000n, refUpdatedS: 0, refInitialized: true, limits, tatShortMs: 0n, tatLongMs: 0n, frozenUntil: 0, queuedAmount: 0n, pendingTickets: 0 };
+  const a = attestLocal(vault, { frozenUntil: 0 }, 1_000_000n, 1);
+  assert.equal(a.worst1h, attestLocal({ ...vault, refBalance: 1_000_000n }, { frozenUntil: 0 }, 1_000_000n, 1).worst1h);
 });

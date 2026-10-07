@@ -20,6 +20,18 @@ export function emaUpdate(reference, lastS, balance, nowS, initialized) {
   return bal >= ref ? ref + ((bal - ref) * f) / TAU_S : ref - ((ref - bal) * f) / TAU_S;
 }
 
+/**
+ * The program's `touch_reference`: the EMA step, never above the balance it
+ * is touched with. The reference drops at once to the balance and only rises
+ * slowly, so capital parked for a moment (a flash loan, a deposit withdrawn
+ * next block) cannot raise the limits it is drained under (docs/09, finding 65).
+ */
+export function touchReference(reference, lastS, balance, nowS, initialized) {
+  const ref = emaUpdate(reference, lastS, balance, nowS, initialized);
+  const bal = BigInt(balance);
+  return ref < bal ? ref : bal;
+}
+
 export function capacityFromRef(reference, bps, floor, cap) {
   let c = (BigInt(reference) * BigInt(bps)) / BPS;
   if (c > U64_MAX) c = U64_MAX;
@@ -59,10 +71,11 @@ export function maxUnbackedOver(params, tMs) {
 
 /** What `attest` returns, computed from a decoded vault and protocol. */
 export function attestLocal(vault, protocol, balance, nowS) {
-  const reference = emaUpdate(vault.refBalance, vault.refUpdatedS, balance, nowS, vault.refInitialized);
-  // Same base as the program: min(reference, live balance) (docs/15, A1).
+  // Same base as the program: the touched reference, min(EMA, live balance)
+  // (docs/15, A1; docs/09, finding 65).
+  const reference = touchReference(vault.refBalance, vault.refUpdatedS, balance, nowS, vault.refInitialized);
   const live = BigInt(balance);
-  const params = paramsFromConfig(vault.limits, reference < live ? reference : live);
+  const params = paramsFromConfig(vault.limits, reference);
   const frozenUntil = Math.max(protocol.frozenUntil, vault.frozenUntil);
   const nowMs = BigInt(nowS) * 1000n;
   const cap = (x) => (x > U64_MAX ? U64_MAX : x);

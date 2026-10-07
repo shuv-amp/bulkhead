@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { b58decode, b58encode, key, onCurve, findPda, compileMessage, decodeVault } from "../lib/solana.mjs";
-import { FloorClient } from "../lib/bulkhead.mjs";
+import { FloorClient, VaultClient } from "../lib/bulkhead.mjs";
 
 const here = new URL(".", import.meta.url);
 
@@ -58,6 +58,19 @@ test("a floor veto can name the proposal, and still be sent without one", () => 
   assert.equal(named.data[1], 4);
   assert.ok(named.data.subarray(2).every((b) => b === 0));
   assert.deepEqual(fc.veto(guardian).data, Uint8Array.of(5));
+});
+
+test("cancel_ticket and extend_ticket name the ticket id the guardian decided on", () => {
+  const vc = new VaultClient("11111111111111111111111111111111", "11111111111111111111111111111112");
+  vc.protocol = key("11111111111111111111111111111113");
+  const [vault, ticket, guardian, payer] = ["11111111111111111111111111111114", "11111111111111111111111111111115", "11111111111111111111111111111116", "11111111111111111111111111111117"];
+  const cancel = vc.cancelTicket(vault, ticket, guardian, payer, 0x0102n);
+  assert.deepEqual([...cancel.data], [10, 2, 1, 0, 0, 0, 0, 0, 0], "tag, then ticket id u64 LE");
+  assert.equal(cancel.accounts.length, 5);
+  assert.throws(() => vc.cancelTicket(vault, ticket, guardian, payer), /ticket id/);
+  const extend = vc.extendTicket(ticket, guardian, 3_600, 7n);
+  assert.deepEqual([...extend.data], [11, 0x10, 0x0e, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0], "tag, secs i64 LE, ticket id u64 LE");
+  assert.deepEqual(extend.accounts.map((a) => [Boolean(a.writable), Boolean(a.signer)]), [[false, false], [true, false], [false, true]]);
 });
 
 test("signer: RFC 8032 test vector 1 (empty message)", () => {

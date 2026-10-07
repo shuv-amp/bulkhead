@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 // The guardian approval of each open Vault change of a market, and of a
 // Floor's pending proposal: what to put in `policy.approvedChanges` or
-// `approvedFloorProposals` to let exactly that proposal through. An approval
-// names what a change does (kind, target, payload), never its id, so it can
-// only ever match that change (docs/07 §6). Read-only; approve only what the
-// operators agreed to.
+// `approvedFloorProposals` to let a proposal of exactly that content through.
+// An approval names what a change does (kind, target, payload), never its id,
+// so a thief's different change does not match it (docs/07 §6). It is not
+// tied to one proposal: anyone holding the proposing key can propose the same
+// content again. The guardian spends an approval once a matching change has
+// executed, and an approval may end in "@<unix seconds>" to stop approving
+// anything from then on; add one with the expiry you need. Read-only; approve
+// only what the operators agreed to.
 //
 //   node cloud/deploy/approvals.mjs <rpc> <vault-program> <protocol> [floor-program protected-program]
 import { Rpc, decodeFloor } from "../lib/solana.mjs";

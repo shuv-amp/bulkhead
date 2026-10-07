@@ -41,8 +41,19 @@ export class VaultClient {
   heartbeat(guardian) {
     return this.ix(14, new Uint8Array(0), [w(this.protocol), s(guardian)]);
   }
-  cancelTicket(vault, ticket, signer, rentReceiver) {
-    return this.ix(10, new Uint8Array(0), [r(this.protocol), w(vault), w(ticket), s(signer), w(rentReceiver)]);
+  /**
+   * Names the ticket id the guardian decided on: ticket addresses are reused
+   * once a ticket closes, and the program refuses (WrongTicket) when the
+   * address now holds another one.
+   */
+  cancelTicket(vault, ticket, signer, rentReceiver, ticketId) {
+    if (ticketId == null) throw new Error("cancelTicket needs the ticket id");
+    return this.ix(10, u64le(BigInt(ticketId)), [r(this.protocol), w(vault), w(ticket), s(signer), w(rentReceiver)]);
+  }
+  /** Delays a ticket by `secs` (≤ 24h a call, ≤ 7 days in all); names its id, as a cancel does. */
+  extendTicket(ticket, guardian, secs, ticketId) {
+    if (ticketId == null) throw new Error("extendTicket needs the ticket id");
+    return this.ix(11, concat(i64le(secs), u64le(BigInt(ticketId))), [r(this.protocol), w(ticket), s(guardian)]);
   }
   vetoChange(change, guardian) {
     return this.ix(19, new Uint8Array(0), [r(this.protocol), w(change), s(guardian)]);

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLogs, parseEvents, decodeTicket, concat, key, u64le, i64le, b58encode } from "../lib/solana.mjs";
 import { activeTickets, freshVaultOutflow, settledTicketAccounts, vaultOutflows, ticketRelease, settlementRows, tokenIncreases, countedAfterAllowlist, truncatedOutflows, unexplainedOutflow, vaultTransfersOut } from "../guardian/chain.mjs";
-import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket } from "../guardian/policy.mjs";
+import { assess, decode, newState, observeProtocolFreeze, pendingCancels, rememberTicket, watchedEvents } from "../guardian/policy.mjs";
 
 const VAULT = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
 const HARBOR = "6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh";
@@ -291,7 +291,7 @@ test("a ticket read from the chain counts once, even when its event arrives too"
   const ctx = { worst1h: 1_000_000n, worst24h: 2_500_000n, now: 10 };
   assess(s, fromChain, ctx);
   const outcome = concat(u64le(0), u64le(7), u64le(50), u64le(3), i64le(99));
-  const event = decode({ name: "vault:released", fields: [key(TOKEN), key(OTHER), outcome] });
+  const event = decode({ name: "vault:released", fields: [key(TOKEN), key(OTHER), outcome, new Uint8Array(32), key(VAULT)] });
   assess(s, { ...event, mint: "USDC" }, { ...ctx, now: 11 });
   const amounts = s.outflows.map((o) => [o.amount, o.ticketId]);
   assert.deepEqual(amounts, [[50n, 3n], [7n, null]], "the event adds only its instant part");
@@ -332,6 +332,77 @@ test("active ticket scan returns every protocol ticket, including old ids beyond
   const cancels = observeProtocolFreeze(state, 100_000, 90_000);
   assert.equal(cancels.length, 300, "an observed freeze sweeps ids beyond the former 256-ticket window");
   assert.equal(cancels.at(-1).ticketId, 300n);
+});
+
+// Finding 64: one Vault program serves every protocol. Anyone can register a
+// protocol B and send a transaction that lists protocol A's account: it is in
+// A's signature history, and B's events are in its log.
+const PROTO_A = "5YMKnK8DcuUc5vSagDZTJB8VVGnQ1ZJP9Pxm9BAqUoPh";
+const PROTO_B = "DmrC7P3uPGQ7zCMhLVkJVAtnWwPn6yzSg6tL9xVEmzzM";
+const at = (protocol) => key(protocol);
+const outcomeOf = (instant) => concat(u64le(0), u64le(instant), u64le(0), u64le(0), i64le(0));
+const inVault = (...lines) => [`Program ${VAULT} invoke [1]`, ...lines, `Program ${VAULT} success`];
+
+test("another protocol's unfreeze, release, proposal and ticket events are not this protocol's", () => {
+  const logs = inVault(
+    data("vault:unfrozen", Uint8Array.of(0), Uint8Array.of(3), at(PROTO_B)),
+    data("vault:released", key(TOKEN), key(OTHER), outcomeOf(500), new Uint8Array(32), at(PROTO_B)),
+    data("vault:change_proposed", u64le(9), Uint8Array.of(3), key(OTHER), i64le(0), at(PROTO_B)),
+    data("vault:exit_proposed", key(TOKEN), u64le(5), i64le(0), at(PROTO_B)),
+    data("vault:settled", u64le(7), u64le(50), at(PROTO_B)),
+    data("vault:ticket_cancelled", u64le(7), key(OTHER), at(PROTO_B)),
+    data("vault:released", key(TOKEN), key(OTHER), outcomeOf(100), new Uint8Array(32), at(PROTO_A)),
+  );
+  const seen = watchedEvents(logs, { vaultProgram: VAULT, protocol: PROTO_A });
+  assert.deepEqual(seen.events.map((e) => [e.kind, e.protocol]), [["released", PROTO_A]]);
+  assert.equal(seen.foreign, 6);
+  // Read the old way, B's events acted on A: the incident hold ends, A's
+  // approved change id is vetoed, its ticket leaves the cancel list.
+  const s = newState();
+  s.incidentSince = 100;
+  s.frozenUntil = 9_999;
+  rememberTicket(s, { ticketId: 7n, mint: "USDC", owner: OTHER });
+  for (const e of seen.events) assess(s, { ...e, mint: "USDC" }, { worst1h: 1_000_000n, worst24h: 2_000_000n, now: 200 });
+  assert.equal(s.incidentSince, 100, "the hold stands");
+  assert.equal(s.frozenUntil, 9_999);
+  assert.equal(s.vetoed.size, 0, "no veto for B's proposal");
+  assert.ok(s.pendingTickets.has(7n), "A's ticket 7 is still cancellable");
+});
+
+test("an event that names no protocol (an older Vault) is dropped and counted, never guessed", () => {
+  const logs = inVault(data("vault:unfrozen", Uint8Array.of(0), Uint8Array.of(3)), data("vault:released", key(TOKEN), key(OTHER), outcomeOf(1), at(PROTO_A)));
+  const seen = watchedEvents(logs, { vaultProgram: VAULT, protocol: PROTO_A });
+  assert.deepEqual(seen.events, []);
+  assert.equal(seen.unnamed, 2);
+});
+
+test("a truncated outflow is explained only by this protocol's surviving releases", () => {
+  // A's vault lost 500 in a truncated transaction. B's release of 500, in
+  // the same log, used to explain it away.
+  const logs = inVault(data("vault:released", key(TOKEN), key(OTHER), outcomeOf(500), new Uint8Array(32), at(PROTO_B)), "Log truncated");
+  const seen = watchedEvents(logs, { vaultProgram: VAULT, protocol: PROTO_A });
+  assert.equal(seen.truncated, true);
+  const released = seen.events.filter((e) => e.kind === "released").map((e) => ({ ...e, mint: "USDC" }));
+  assert.equal(unexplainedOutflow(new Map([["USDC", 500n]]), released, []).get("USDC"), 500n);
+  // This protocol's own surviving release still explains its part.
+  const own = watchedEvents(inVault(data("vault:released", key(TOKEN), key(OTHER), outcomeOf(200), new Uint8Array(32), at(PROTO_A)), "Log truncated"), { vaultProgram: VAULT, protocol: PROTO_A });
+  assert.equal(unexplainedOutflow(new Map([["USDC", 500n]]), own.events.map((e) => ({ ...e, mint: "USDC" })), []).get("USDC"), 300n);
+});
+
+test("Floor events count only from Floor, for a watched program", () => {
+  const FLOOR = "F1oor11111111111111111111111111111111111111";
+  const replaced = (prog) => data("floor:recovery_replaced", key(prog), new Uint8Array(32), Uint8Array.of(3));
+  const logs = [`Program ${FLOOR} invoke [1]`, replaced(HARBOR), replaced(OTHER), `Program ${FLOOR} success`, `Program ${VAULT} invoke [1]`, replaced(HARBOR), `Program ${VAULT} success`];
+  const seen = watchedEvents(logs, { floorProgram: FLOOR, floorPrograms: [HARBOR] });
+  assert.deepEqual(seen.events.map((e) => [e.program, e.recovery]), [[HARBOR, null]]);
+  // The protocol path reads no Floor events at all.
+  assert.deepEqual(watchedEvents(logs, { vaultProgram: VAULT, protocol: PROTO_A }).events, []);
+});
+
+test("a transaction with no log at all is read as truncated, so its balances are checked", () => {
+  assert.deepEqual(parseLogs(null), { events: [], truncated: true });
+  assert.deepEqual(parseLogs(undefined), { events: [], truncated: true });
+  assert.equal(parseLogs([]).truncated, false);
 });
 
 test("tickets stay cancellable after their outflow ages out of the 24-hour window", () => {

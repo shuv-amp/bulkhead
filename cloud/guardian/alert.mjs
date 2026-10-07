@@ -12,6 +12,7 @@
 const URGENT_WARNINGS = [
   /moved tokens into the lifeboat/,
   /recovery key was replaced/,
+  /recovery key was removed/,
   /no longer a live guardian/,
   /no longer has the cursor/,
   /floor not ready/,
@@ -48,6 +49,32 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   const detail = [line.reason, message, line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
     .filter(Boolean).join(" | ");
   return { severity: level === "error" || action === "freeze" ? "critical" : "warning", title: `Bulkhead guardian: ${what}`, detail, at: line.t };
+}
+
+/**
+ * A loop step that keeps failing is a guardian that has gone quiet: one
+ * transaction the RPC never returns (`requireTransaction`) used to hold
+ * ingestion at that signature forever, logged only as a warning, which does
+ * not alert. `failed(name, nowMs)` returns how long `name` has failed without
+ * a success once that passes `afterMs`, at most once per `everyMs` (null
+ * otherwise); `ok(name)` clears it.
+ */
+export function stallWatch({ afterMs = 120_000, everyMs = 600_000 } = {}) {
+  const since = new Map();
+  const said = new Map();
+  return {
+    ok(name) {
+      since.delete(name);
+      said.delete(name);
+    },
+    failed(name, nowMs) {
+      if (!since.has(name)) since.set(name, nowMs);
+      const failingMs = nowMs - since.get(name);
+      if (failingMs < afterMs || nowMs - (said.get(name) ?? -Infinity) < everyMs) return null;
+      said.set(name, nowMs);
+      return failingMs;
+    },
+  };
 }
 
 /** The webhook body for `format`. */
