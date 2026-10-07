@@ -196,6 +196,12 @@ export function decode(ev) {
       return { kind: "exit_proposed", mint: b58encode(f[0]), amount: u64(f[1]), executableS: Number(new Reader(f[2]).i64()) };
     case "vault:lifeboat_in":
       return { kind: "lifeboat_in", mint: b58encode(f[0]), amount: u64(f[1]) };
+    // The admin (Floor: the owner) and a guardian quorum replaced the
+    // recovery key: rare, and people should know it happened.
+    case "vault:recovery_replaced":
+      return { kind: "recovery_replaced", recovery: b58encode(f[0]) };
+    case "floor:recovery_replaced":
+      return { kind: "recovery_replaced", program: b58encode(f[0]), recovery: b58encode(f[1]) };
     case "floor:proposed":
       return { kind: "floor_proposed", program: b58encode(f[0]), proposalKind: f[1][0], id: u64(f[2]), target: b58encode(f[3]) };
     case "vault:settled":

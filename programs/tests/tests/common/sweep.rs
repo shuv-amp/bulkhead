@@ -48,6 +48,8 @@ pub struct Sweep {
     pub unexpected: Vec<String>,
     pub attempts: usize,
     pub unsignable: usize,
+    /// Transactions swept (each `run`).
+    pub runs: usize,
 }
 
 impl Sweep {
@@ -92,6 +94,7 @@ impl Sweep {
             unexpected: vec![],
             attempts: 0,
             unsignable: 0,
+            runs: 0,
         }
     }
 
@@ -118,6 +121,7 @@ impl Sweep {
             unexpected: vec![],
             attempts: 0,
             unsignable: 0,
+            runs: 0,
         }
     }
 
@@ -159,6 +163,7 @@ impl Sweep {
         extra_keys: &[&Keypair],
         ok: &[Allow],
     ) {
+        self.runs += 1;
         let free: Vec<usize> = ok
             .iter()
             .filter(|a| a.who.is_none())

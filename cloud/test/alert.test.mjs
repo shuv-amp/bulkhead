@@ -16,6 +16,7 @@ test("actions, errors and urgent warnings alert; routine lines do not", () => {
   assert.match(f.detail, /tx SIG/);
   assert.equal(alertFor({ level: "error", action: "freeze", error: "simulation failed" }, seen, 0).title, "Bulkhead guardian: freeze failed");
   assert.equal(alertFor({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short" }, seen, 0).severity, "warning");
+  assert.equal(alertFor({ level: "warn", msg: "the recovery key was replaced by the admin with a guardian quorum" }, seen, 0).severity, "warning");
   assert.ok(alertFor({ level: "error", msg: "this key is no longer a live guardian" }, seen, 0));
 });
 

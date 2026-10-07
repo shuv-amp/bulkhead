@@ -88,6 +88,7 @@ pub mod ix {
     pub const HEARTBEAT: u8 = 9;
     pub const EJECT: u8 = 10;
     pub const CANCEL: u8 = 11;
+    pub const REPLACE_RECOVERY: u8 = 12;
 }
 
 /// Event tags (first field of every `Program data:` event).
@@ -105,6 +106,7 @@ pub mod ev {
     pub const EJECTED: &[u8] = b"floor:ejected";
     pub const CANCELLED: &[u8] = b"floor:cancelled";
     pub const DELAY_RAISED: &[u8] = b"floor:delay_raised";
+    pub const RECOVERY_REPLACED: &[u8] = b"floor:recovery_replaced";
 }
 
 pub fn process_instruction(
@@ -126,6 +128,7 @@ pub fn process_instruction(
         ix::HEARTBEAT => heartbeat(program_id, accounts),
         ix::EJECT => eject(program_id, accounts, args),
         ix::CANCEL => cancel(program_id, accounts),
+        ix::REPLACE_RECOVERY => replace_recovery(program_id, accounts, args),
         _ => Err(FloorError::InvalidInstruction.into()),
     }
 }
@@ -737,8 +740,14 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
     } else if key(signer) != c.owner || (k == kind::SET_RECOVERY && c.recovery != [0; 32]) {
         return Err(FloorError::NotOwner.into());
     }
+    let t = now()?;
     if c.pending_kind != kind::NONE {
-        if by_recovery && c.pending_by_recovery == 0 {
+        // A recovery proposal that can never execute (vetoed or expired) no
+        // longer holds the slot: only the recovery key may cancel it, so it
+        // would otherwise block every owner proposal for good.
+        let dead_recovery =
+            c.pending_by_recovery == 1 && (c.pending_vetoed != 0 || t >= c.pending_expires);
+        if (by_recovery && c.pending_by_recovery == 0) || dead_recovery {
             c.clear_pending();
         } else {
             return Err(FloorError::ProposalPending.into());
@@ -749,7 +758,6 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
     if payload.len() > MAX_PAYLOAD {
         return Err(FloorError::InvalidInstruction.into());
     }
-    let t = now()?;
     match k {
         kind::UPGRADE => {
             if c.status != STATUS_LIVE {
@@ -1229,5 +1237,52 @@ fn cancel(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     c.clear_pending();
     save_config(&mut accounts[0], &c)?;
     sys::event(&[ev::CANCELLED, &c.program, &id.to_le_bytes()]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 12. Replace the recovery key (the owner with a live guardian quorum, at once)
+// ---------------------------------------------------------------------------
+// Accounts: 0 config [w], 1 owner [s], 2.. guardians [s] forming a live quorum.
+// Data: the new recovery key[32] (all zero: none).
+//
+// A stolen recovery key can only propose, but it can do that forever: each
+// proposal takes the slot from the owner's, and nothing else could replace
+// it. The owner and a live quorum together can, at once (a delayed proposal
+// would sit in the slot the stolen key takes). Together they already decide
+// more than this (a guardian's stop and a quorum-approved restore install
+// code at once); neither can alone.
+fn replace_recovery(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &[u8],
+) -> ProgramResult {
+    let mut c = load_config(program_id, acc(accounts, 0)?)?;
+    let owner = acc(accounts, 1)?;
+    require_signer(owner)?;
+    if key(owner) != c.owner {
+        return Err(FloorError::NotOwner.into());
+    }
+    let recovery = k32_arg(args, 0)?;
+    if recovery == c.owner {
+        return Err(FloorError::InvalidInstruction.into());
+    }
+    let alive = c.alive_mask(now()?);
+    let signers = guardian_signers(&c, accounts.get(2..).unwrap_or(&[]))?;
+    if !quorum(signers & alive, alive, c.threshold) {
+        return Err(FloorError::NoQuorum.into());
+    }
+    c.recovery = recovery;
+    // What the replaced key proposed, or a pending new recovery key, is void.
+    if c.pending_by_recovery == 1 || c.pending_kind == kind::SET_RECOVERY {
+        c.clear_pending();
+    }
+    save_config(&mut accounts[0], &c)?;
+    sys::event(&[
+        ev::RECOVERY_REPLACED,
+        &c.program,
+        &recovery,
+        &[signers & alive],
+    ]);
     Ok(())
 }

@@ -556,6 +556,13 @@ impl Market {
         self.vault_ix(12, &args, a)
     }
 
+    /// The admin with a live guardian quorum replaces the recovery key.
+    pub fn replace_recovery_ix(&self, admin: &Address, recovery: &Address, guardians: &[Address]) -> Instruction {
+        let mut a = vec![AccountMeta::new(self.protocol, false), AccountMeta::new_readonly(*admin, true)];
+        a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        self.vault_ix(29, recovery.as_ref(), a)
+    }
+
     pub fn unfreeze_ix(&self, scope_vault: Option<&VaultRef>, guardians: &[Address]) -> Instruction {
         let mut a = vec![AccountMeta::new(self.protocol, false)];
         a.push(match scope_vault {

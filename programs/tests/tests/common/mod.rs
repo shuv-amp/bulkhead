@@ -567,6 +567,18 @@ impl Floor {
             ],
         )
     }
+
+    /// The owner with a live guardian quorum replaces the recovery key.
+    pub fn replace_recovery(&self, owner: &Address, recovery: &Address, guardians: &[Address]) -> Instruction {
+        let mut d = vec![12];
+        d.extend_from_slice(recovery.as_ref());
+        let mut a = vec![
+            AccountMeta::new(self.config, false),
+            AccountMeta::new_readonly(*owner, true),
+        ];
+        a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        self.ix(d, a)
+    }
 }
 
 /// Floor's config fields the tests read (offsets: programs/floor/src/state.rs).

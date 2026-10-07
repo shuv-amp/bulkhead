@@ -848,6 +848,10 @@ fn every_floor_account_substitution_is_refused() {
     let zero = solana_address::Address::default();
     let longer = (7 * DAY).to_le_bytes();
     s.run(&mut env, "propose a longer delay", f.propose(&p.owner.pubkey(), SET_DELAY, &zero, &longer, None), &[], &[]);
+    s.run(&mut env, "replace recovery", f.replace_recovery(&p.owner.pubkey(), &solana_address::Address::new_unique(), &gs[0..2]), &[], &[
+        role(2, guardians.clone(), "any quorum"),
+        role(3, guardians.clone(), "any quorum"),
+    ]);
     s.run(&mut env, "eject", f.eject(2, &gs[0..2]), &[], &[]);
 
     // Registering another program; releasing A's authority (closes A's config).
@@ -864,7 +868,7 @@ fn every_floor_account_substitution_is_refused() {
     env.advance(7 * DAY);
     s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth)), &[], &[]);
 
-    println!("{} substitutions over 14 Floor transactions; {} needed a key nobody here holds", s.attempts, s.unsignable);
+    println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds", s.attempts, s.runs, s.unsignable);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
 
@@ -959,4 +963,66 @@ fn a_restore_whose_buffer_became_the_abort_buffer_is_refused_at_execution() {
     let exec = f.execute_code(&b, &p.owner.pubkey());
     assert_eq!(env.fails(&[exec], &[]), err::WRONG_BUFFER);
     assert_eq!(read_config(&env, f).abort_buffer, b.to_bytes(), "the stop is still staged");
+}
+
+#[test]
+fn a_vetoed_recovery_proposal_does_not_hold_the_owner_s_slot() {
+    // A stolen recovery key proposes itself a new owner; a guardian vetoes it.
+    // Only the recovery key may cancel its own proposal, so if a vetoed or
+    // expired proposal kept the one slot, the owner could never propose again:
+    // no upgrade, and after a stop no restore of a new fix.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let recovery = with_recovery(&mut env, &p);
+    let thief = solana_keypair::Keypair::new().pubkey();
+    env.ok(&[f.propose(&recovery.pubkey(), SET_OWNER, &thief, &[], None)], &[&recovery]);
+    env.ok(&[f.veto(&gs[0])], &[&p.g[0]]);
+    env.next_slot();
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    assert_eq!(read_config(&env, f).pending_kind, UPGRADE);
+    // A live one still holds it.
+    env.ok(&[f.cancel(&p.owner.pubkey())], &[&p.owner]);
+    env.ok(&[f.propose(&recovery.pubkey(), SET_OWNER, &thief, &[], None)], &[&recovery]);
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]), err::PROPOSAL_PENDING);
+    // An expired one does not (nobody executed it in its 7 days).
+    env.advance(3 * DAY + 7 * DAY + 1);
+    env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    assert_eq!(read_config(&env, f).pending_kind, UPGRADE);
+}
+
+#[test]
+fn a_stolen_floor_recovery_key_is_replaced_by_the_owner_with_a_live_quorum() {
+    // A stolen recovery key can take the slot from every owner proposal, as
+    // often as it likes, and only it could replace itself: no upgrade would
+    // ever wait out its delay again. The owner and a live quorum replace it.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let stolen = with_recovery(&mut env, &p);
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    let thief = solana_keypair::Keypair::new().pubkey();
+    env.ok(&[f.propose(&stolen.pubkey(), SET_OWNER, &thief, &[], None)], &[&stolen]);
+    assert_eq!(read_config(&env, f).pending_kind, SET_OWNER, "the owner's upgrade is gone");
+    let fresh = solana_keypair::Keypair::new().pubkey();
+    // Neither the owner alone, nor with too few guardians, nor a quorum
+    // without the owner; and the owner cannot be its own recovery key.
+    assert_eq!(env.fails(&[f.replace_recovery(&p.owner.pubkey(), &fresh, &[])], &[&p.owner]), err::NO_QUORUM);
+    assert_eq!(env.fails(&[f.replace_recovery(&p.owner.pubkey(), &fresh, &[gs[0]])], &[&p.owner, &p.g[0]]), err::NO_QUORUM);
+    assert_eq!(env.fails(&[f.replace_recovery(&gs[2], &fresh, &[gs[0], gs[1]])], &[&p.g[2], &p.g[0], &p.g[1]]), err::NOT_OWNER);
+    assert_eq!(env.fails(&[f.replace_recovery(&p.owner.pubkey(), &p.owner.pubkey(), &[gs[0], gs[1]])], &[&p.owner, &p.g[0], &p.g[1]]), err::INVALID_INSTRUCTION);
+    env.ok(&[f.replace_recovery(&p.owner.pubkey(), &fresh, &[gs[0], gs[1]])], &[&p.owner, &p.g[0], &p.g[1]]);
+    env.next_slot();
+    // The stolen key's proposal is void, it can propose nothing more, and the
+    // owner's upgrade goes back in.
+    assert_eq!(read_config(&env, f).pending_kind, 0);
+    assert_eq!(env.fails(&[f.propose(&stolen.pubkey(), SET_OWNER, &thief, &[], None)], &[&stolen]), err::NOT_OWNER);
+    env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref(), "the new recovery key");
 }

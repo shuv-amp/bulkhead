@@ -442,6 +442,9 @@ async function consider(e, signature, now, act) {
   if (e.kind === "lifeboat_in") {
     log({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short until a guardian quorum or the admin returns them", mint: e.mint, amount: e.amount });
   }
+  if (e.kind === "recovery_replaced") {
+    log({ level: "warn", msg: `the recovery key was replaced${e.program ? ` on Floor for ${e.program}` : ""} by the ${e.program ? "owner" : "admin"} with a guardian quorum`, recovery: e.recovery });
+  }
   await applyActions(actions, e, now);
 }
 

@@ -1809,6 +1809,54 @@ fn a_thief_cannot_pre_empt_the_recovery_key_with_its_own_rotation() {
 }
 
 #[test]
+fn a_stolen_recovery_key_is_replaced_by_the_admin_with_a_live_quorum() {
+    // A stolen recovery key can propose a new admin as often as it likes; each
+    // proposal stales the admin's own rotations, the guardians must veto every
+    // one, and only that key could replace itself. The admin and a live
+    // quorum replace it at once.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let stolen = w.user();
+    let ix = w.m.propose_change_ix(&w.env, 6, &stolen.pubkey(), &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    // The thief proposes itself the admin (change 1) and a recovery key of its own (2).
+    let accomplice = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &accomplice, &[], None);
+    ix.accounts[1].pubkey = stolen.pubkey();
+    w.env.ok(&[ix], &[&stolen]);
+    let mut ix = w.m.propose_change_ix(&w.env, 6, &accomplice, &[], None);
+    ix.accounts[1].pubkey = stolen.pubkey();
+    w.env.ok(&[ix], &[&stolen]);
+    let (admin, g0, g1, g2) = (w.m.admin.pubkey(), w.m.g[0].pubkey(), w.m.g[1].pubkey(), w.m.g[2].pubkey());
+    let fresh = Keypair::new().pubkey();
+    // Neither the admin alone, nor with too few guardians, nor a quorum without
+    // the admin; and the admin cannot be its own recovery key.
+    let ix = w.m.replace_recovery_ix(&admin, &fresh, &[]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NO_QUORUM);
+    let ix = w.m.replace_recovery_ix(&admin, &fresh, &[g0]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin, &w.m.g[0]]), verr::NO_QUORUM);
+    let ix = w.m.replace_recovery_ix(&g2, &fresh, &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.g[2], &w.m.g[0], &w.m.g[1]]), verr::NOT_ADMIN);
+    let ix = w.m.replace_recovery_ix(&admin, &admin, &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::INVALID_INSTRUCTION);
+    let ix = w.m.replace_recovery_ix(&admin, &fresh, &[g0, g1]);
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    // The stolen key can propose nothing more, and what it proposed is stale.
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &accomplice, &[], None);
+    ix.accounts[1].pubkey = stolen.pubkey();
+    assert_eq!(w.env.fails(&[ix], &[&stolen]), verr::NOT_ADMIN);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &protocol)], &[]), verr::CHANGE_STALE);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 2, &protocol)], &[]), verr::CHANGE_STALE);
+    assert_eq!(protocol_admin(&w), admin);
+}
+
+#[test]
 fn every_account_substitution_is_refused() {
     use common::sweep::{any, role, Sweep};
     let mut w = World::new();
@@ -2313,6 +2361,17 @@ fn every_account_substitution_is_refused() {
             role(3, guardians.clone(), "any quorum"),
         ],
     );
+    let ix = w.m.replace_recovery_ix(&admin, &Address::new_unique(), &[g0, g1]);
+    s.run(
+        &mut w.env,
+        "replace recovery",
+        ix,
+        &[],
+        &[
+            role(2, guardians.clone(), "any quorum"),
+            role(3, guardians.clone(), "any quorum"),
+        ],
+    );
     let ix = w.m.vault_ix(
         15,
         &[2],
@@ -2435,7 +2494,8 @@ fn every_account_substitution_is_refused() {
 
     let total = s.attempts + sp.attempts;
     println!(
-        "{total} substitutions over 32 transactions; {} needed a key nobody here holds",
+        "{total} substitutions over {} transactions; {} needed a key nobody here holds",
+        s.runs + sp.runs,
         s.unsignable + sp.unsignable
     );
     let mut all = s.unexpected;

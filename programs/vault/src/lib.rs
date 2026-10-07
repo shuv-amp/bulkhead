@@ -100,6 +100,7 @@ pub mod ix {
     pub const PROPOSE_LIFEBOAT_EXIT: u8 = 26;
     pub const EXECUTE_LIFEBOAT_EXIT: u8 = 27;
     pub const VETO_LIFEBOAT_EXIT: u8 = 28;
+    pub const REPLACE_RECOVERY: u8 = 29;
 }
 
 pub fn process_instruction(
@@ -138,6 +139,7 @@ pub fn process_instruction(
         ix::PROPOSE_LIFEBOAT_EXIT => lifeboat::propose_exit(program_id, accounts, args),
         ix::EXECUTE_LIFEBOAT_EXIT => lifeboat::execute_exit(program_id, accounts),
         ix::VETO_LIFEBOAT_EXIT => lifeboat::veto_exit(program_id, accounts),
+        ix::REPLACE_RECOVERY => governance::replace_recovery(program_id, accounts, args),
         _ => Err(VaultError::InvalidInstruction.into()),
     }
 }
