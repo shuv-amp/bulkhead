@@ -50,9 +50,16 @@ fn parse(
         }
         change::SET_GUARDIANS => Parsed::Guardians(parse_guardian_set(&mut r, &p.admin)?),
         change::SET_ADMIN | change::SET_LIFEBOAT_DESTINATION => {
+            // The admin is never a guardian (as `parse_guardian_set` keeps it
+            // from the other side): an admin who is also a guardian would get
+            // back the powers kept from the admin, cancelling honest tickets
+            // first (docs/09, finding 57). Checked again at execution, so a
+            // guardian set changed in between cannot slip one in.
             if *target == [0; 32]
                 || (kind == change::SET_LIFEBOAT_DESTINATION && *target == p.admin)
-                || (kind == change::SET_ADMIN && *target == p.recovery)
+                || (kind == change::SET_ADMIN
+                    && (*target == p.recovery
+                        || p.guardians[..p.guardian_count as usize].contains(target)))
             {
                 return Err(VaultError::InvalidInstruction.into());
             }

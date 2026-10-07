@@ -2447,3 +2447,65 @@ fn every_account_substitution_is_refused() {
         all.join("\n")
     );
 }
+
+#[test]
+fn unlisting_collateral_does_not_free_it_while_its_loan_is_open() {
+    // Code review, 7 Oct: turning an asset's allowlisting off was a tightening
+    // (applied at once), and the ledger let an owner take back an unlisted
+    // mint whatever they owed. With only the admin key: deposit collateral,
+    // borrow against it, unlist it, take it back through the backed lane (no
+    // limiter), keep the loan; repeat.
+    let mut w = World::new();
+    let lender = w.user();
+    w.deposit("usdc", &lender, 5_000_000 * USDC);
+    let borrower = w.user();
+    w.deposit("sol", &borrower, 10 * SOL);
+    w.seal();
+    let usdc_to = w.account("usdc", &borrower.pubkey());
+    let prices = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &borrower.pubkey(), &usdc_to, 1_200 * USDC, &prices);
+    assert_eq!(outcome(&w.env.ok(&[ix], &[&borrower])).backed, 1_200 * USDC, "a backed loan against 10 SOL");
+
+    // The admin unlists SOL.
+    let (asset, mint, program) = (w.sol.asset, w.sol.mint, w.sol.token_program);
+    let mut ix = w.m.propose_change_ix(&w.env, 1, &mint, &asset_bytes(false, 8_500, 10_500, 20_000, 60, 100, SOL_FEED), Some(&asset));
+    ix.accounts.push(AccountMeta::new_readonly(mint, false));
+    ix.accounts.push(AccountMeta::new_readonly(program, false));
+    let applied = w.env.send(&[ix], &[&w.m.admin]).is_ok();
+
+    // The borrower asks for all 10 SOL back while the 1,200 USDC loan is open.
+    let sol_to = w.account("sol", &borrower.pubkey());
+    let prices = vec![(w.sol.asset, w.sol.price), (w.usdc.asset, w.usdc.price)];
+    let ix = w.m.withdraw_ix(&w.env, &w.sol, &borrower.pubkey(), &sol_to, 10 * SOL, &prices);
+    let r = w.env.send(&[ix], &[&borrower]);
+    let backed = r.as_ref().map(|m| outcome(m).backed).unwrap_or(0);
+    assert_eq!(backed, 0, "unlisting applied: {applied}; the collateral of an open loan came back through the backed lane");
+    assert!(applied, "delisting is a tightening: it still applies at once");
+
+    // Repaid, the owner owes nothing: all of the delisted SOL comes back
+    // through the backed lane (G2), whatever it is worth.
+    let left = w.env.balance(&w.sol.vault_tokens);
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &usdc_to, 1_200 * USDC, &w.usdc.token_program);
+    let ix = w.m.deposit_ix(&w.env, &w.usdc, &borrower.pubkey(), &usdc_to, 1_200 * USDC);
+    w.env.ok(&[ix], &[&borrower]);
+    let back = left.min(10 * SOL - r.as_ref().map(|m| { let o = outcome(m); o.instant + o.queued }).unwrap_or(0));
+    let ix = w.m.withdraw_ix(&w.env, &w.sol, &borrower.pubkey(), &sol_to, back, &[(w.sol.asset, w.sol.price)]);
+    let o = outcome(&w.env.ok(&[ix], &[&borrower]));
+    assert_eq!(o.backed, back, "repaid: the owner's own deposit comes back in full");
+}
+
+#[test]
+fn a_guardian_never_becomes_the_admin() {
+    // Code review, 7 Oct (finding 57): parse_guardian_set kept the admin off
+    // the guardian list, but an admin rotation could name a guardian.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 1_000_000 * USDC);
+    w.seal();
+    let g1 = w.m.g[1].pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &g1, &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
+    let fresh = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+}

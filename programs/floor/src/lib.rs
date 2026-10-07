@@ -120,7 +120,7 @@ pub fn process_instruction(
         ix::ABORT => abort(program_id, accounts),
         ix::PROPOSE => propose(program_id, accounts, args),
         ix::VETO => veto(program_id, accounts, args),
-        ix::APPROVE => approve(program_id, accounts),
+        ix::APPROVE => approve(program_id, accounts, args),
         ix::EXECUTE => execute(program_id, accounts),
         ix::RESTORE_SNAPSHOT => restore_snapshot(program_id, accounts),
         ix::HEARTBEAT => heartbeat(program_id, accounts),
@@ -763,8 +763,13 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
         }
         kind::RELEASE_AUTHORITY => {}
         // The owner and the recovery key stay distinct, or recovery means nothing.
+        // The owner is never a guardian (as `parse_guardian_set` keeps it
+        // from the other side), or the owner's limits fall away (finding 57).
         kind::SET_OWNER => {
-            if target == [0; 32] || target == c.recovery {
+            if target == [0; 32]
+                || target == c.recovery
+                || c.guardians[..c.guardian_count as usize].contains(&target)
+            {
                 return Err(FloorError::InvalidInstruction.into());
             }
         }
@@ -791,7 +796,10 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
     }
     if k == kind::UPGRADE || k == kind::RESTORE {
         let buffer = acc(accounts, 2)?;
-        if key(buffer) != target {
+        // Upgrading from the staged abort buffer would use it up and leave
+        // Floor pointing at a closed account: no stop, and no way to stage
+        // another (docs/09, finding 58). The pinned snapshot is the quorum's.
+        if key(buffer) != target || target == c.abort_buffer || target == c.snapshot_buffer {
             return Err(FloorError::WrongBuffer.into());
         }
         check_frozen_buffer(program_id, &c, buffer)?;
@@ -848,11 +856,21 @@ fn veto(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> Prog
 
 // ---------------------------------------------------------------------------
 // 6. Approve a restore (guardians)  Accounts: 0 config [w], 1.. guardians [s].
+//    Data: the pending proposal's id (u64).
 // ---------------------------------------------------------------------------
-fn approve(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+fn approve(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
     if c.pending_kind != kind::RESTORE {
         return Err(FloorError::WrongProposalKind.into());
+    }
+    // The approval names the proposal it is for: guardians review a buffer,
+    // and an owner who cancels it and proposes another before their signatures
+    // land must not collect them for that one (docs/09, finding 58).
+    let id: [u8; 8] = args
+        .try_into()
+        .map_err(|_| FloorError::InvalidInstruction)?;
+    if u64::from_le_bytes(id) != c.pending_id {
+        return Err(FloorError::NoProposal.into());
     }
     let bits = guardian_signers(&c, accounts.get(1..).unwrap_or(&[]))?;
     if bits == 0 || bits & c.alive_mask(now()?) != bits {
@@ -874,7 +892,8 @@ fn approve(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
 // ---------------------------------------------------------------------------
 //
 // Upgrade / Restore accounts: 0 config [w], 1 programdata [w], 2 program [w],
-//   3 buffer [w], 4 spill [w], 5 rent, 6 clock, 7 authority PDA, 8 loader-v3.
+//   3 buffer [w], 4 spill [w] (the owner: the buffer's rent returns to it),
+//   5 rent, 6 clock, 7 authority PDA, 8 loader-v3.
 // ReleaseAuthority: 0 config [w], 1 programdata [w], 2 authority PDA,
 //   3 loader-v3, 4 owner [w] (receives the config's rent),
 //   5 new authority (omitted when the target is zero: program becomes immutable).
@@ -893,7 +912,11 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
             let (programdata, program, buffer) =
                 (acc(accounts, 1)?, acc(accounts, 2)?, acc(accounts, 3)?);
             check_program_accounts(&c, programdata, program)?;
-            if key(buffer) != c.pending_target {
+            // Staged or pinned since the proposal: still never consumed here.
+            if key(buffer) != c.pending_target
+                || c.pending_target == c.abort_buffer
+                || c.pending_target == c.snapshot_buffer
+            {
                 return Err(FloorError::WrongBuffer.into());
             }
             let authority = acc(accounts, 7)?;
@@ -923,6 +946,11 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
                 if !ok {
                     return Err(FloorError::NotExecutable.into());
                 }
+            }
+            // The buffer's rent goes back to the owner who funded it, not to
+            // whoever executes first (docs/09, finding 58).
+            if key(acc(accounts, 4)?) != c.owner {
+                return Err(FloorError::NotOwner.into());
             }
             cpi_upgrade(
                 &c,
@@ -1026,7 +1054,9 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
                     c.last_heartbeat = [t; MAX_GUARDIANS]; // the new set starts alive
                 }
                 kind::SET_OWNER => {
-                    if c.pending_target == c.recovery {
+                    if c.pending_target == c.recovery
+                        || c.guardians[..c.guardian_count as usize].contains(&c.pending_target)
+                    {
                         return Err(FloorError::InvalidInstruction.into());
                     }
                     c.owner = c.pending_target;
@@ -1091,6 +1121,10 @@ fn restore_snapshot(program_id: &Address, accounts: &mut [AccountView]) -> Progr
         0,
     ) {
         return Err(FloorError::NoQuorum.into());
+    }
+    // As in `execute`: the snapshot buffer's rent returns to the owner.
+    if key(acc(accounts, 4)?) != c.owner {
+        return Err(FloorError::NotOwner.into());
     }
     cpi_upgrade(
         &c,

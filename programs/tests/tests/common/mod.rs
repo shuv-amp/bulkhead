@@ -485,14 +485,17 @@ impl Floor {
         )
     }
 
-    pub fn approve(&self, guardians: &[Address]) -> Instruction {
+    /// Approve the pending restore `id` (Floor refuses another id).
+    pub fn approve(&self, id: u64, guardians: &[Address]) -> Instruction {
         let mut a = vec![AccountMeta::new(self.config, false)];
         a.extend(
             guardians
                 .iter()
                 .map(|g| AccountMeta::new_readonly(*g, true)),
         );
-        self.ix(vec![6], a)
+        let mut d = vec![6];
+        d.extend_from_slice(&id.to_le_bytes());
+        self.ix(d, a)
     }
 
     pub fn execute_code(&self, buffer: &Address, spill: &Address) -> Instruction {
@@ -577,6 +580,7 @@ pub struct ConfigView {
     pub snapshot_buffer: [u8; 32],
     pub pending_kind: u8,
     pub pending_vetoed: u8,
+    pub pending_id: u64,
     pub pending_eta: i64,
 }
 
@@ -595,6 +599,7 @@ pub fn read_config(env: &Env, f: &Floor) -> ConfigView {
         snapshot_buffer: k32(480),
         pending_kind: d[520],
         pending_vetoed: d[521],
+        pending_id: u64::from_le_bytes(d[528..536].try_into().unwrap()),
         pending_eta: i64_at(568),
     }
 }

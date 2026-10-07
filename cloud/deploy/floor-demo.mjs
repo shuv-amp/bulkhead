@@ -144,19 +144,24 @@ await send(rpc, team, [f.pinSnapshot(snapshot)]);
 say(`   abort buffer ${abortBuffer} and snapshot ${snapshot}: frozen, owned by Floor, verified on-chain`);
 await refused("staging a second abort", [f.stageAbort(snapshot)], "AbortAlreadyStaged");
 await refused("a stranger stopping the program", [f.abort(stranger.publicKey, abortBuffer, snapshot)], "NotLiveGuardian");
-await refused("restoring a program that is running", [f.restoreSnapshot(snapshot, team.publicKey, [guardians[0].publicKey, guardians[1].publicKey])], "NotAborted");
+await refused("restoring a program that is running", [f.restoreSnapshot(snapshot, owner.publicKey, [guardians[0].publicKey, guardians[1].publicKey])], "NotAborted");
 
 say("\n3. an upgrade waits for the delay (72h), and any one guardian can veto it");
-await refused("a stranger proposing an upgrade", [f.propose(stranger.publicKey, UPGRADE, snapshot)], "NotOwner");
-await send(rpc, owner, [f.propose(owner.publicKey, UPGRADE, snapshot)]);
+// The upgrade comes from a buffer of its own: the pinned snapshot and the
+// staged abort buffer are never an upgrade (an upgrade would use them up).
+const upgrade = buffer(`${dir}/program.so`);
+await refused("upgrading from the pinned snapshot", [f.propose(owner.publicKey, UPGRADE, snapshot)], "WrongBuffer");
+await refused("upgrading from the staged abort buffer", [f.propose(owner.publicKey, UPGRADE, abortBuffer)], "WrongBuffer");
+await refused("a stranger proposing an upgrade", [f.propose(stranger.publicKey, UPGRADE, upgrade)], "NotOwner");
+await send(rpc, owner, [f.propose(owner.publicKey, UPGRADE, upgrade)]);
 const proposed = await config();
 say(`   the owner proposed an upgrade; executable from ${new Date(proposed.pendingEta * 1000).toISOString()}`);
-await refused("executing it now", [f.executeUpgrade(snapshot, team.publicKey)], "NotExecutable");
-await refused("proposing a second one", [f.propose(owner.publicKey, UPGRADE, snapshot)], "ProposalPending");
+await refused("executing it now", [f.executeUpgrade(upgrade, owner.publicKey)], "NotExecutable");
+await refused("proposing a second one", [f.propose(owner.publicKey, UPGRADE, upgrade)], "ProposalPending");
 await refused("a stranger vetoing it", [f.veto(stranger.publicKey)], "NotLiveGuardian");
 await send(rpc, guardians[2], [f.veto(guardians[2].publicKey)]);
 say("   guardian 2 vetoed it");
-await refused("executing the vetoed upgrade", [f.executeUpgrade(snapshot, team.publicKey)], "Vetoed");
+await refused("executing the vetoed upgrade", [f.executeUpgrade(upgrade, owner.publicKey)], "Vetoed");
 await send(rpc, owner, [f.cancel(owner.publicKey)]);
 say("   the owner withdrew it");
 await refused("cancelling when nothing is pending", [f.cancel(owner.publicKey)], "NoProposal");
@@ -170,12 +175,12 @@ say(`   stop: ${stopSig} (${Date.now() - t0} ms to confirm)`);
 say(`   the same call now: fails with ${callStopped.err}, Floor's code 0x464C4F52 ("FLOR")`);
 for (const l of callStopped.logs.filter((l) => l.includes("Bulkhead Floor"))) say(`   log: ${l}`);
 await refused("stopping it again", [f.abort(guardians[1].publicKey, abortBuffer, snapshot)], "NotLive");
-await refused("the owner proposing an upgrade while stopped", [f.propose(owner.publicKey, UPGRADE, snapshot)], "NotLive");
-await refused("one guardian restoring alone", [f.restoreSnapshot(snapshot, team.publicKey, [guardians[0].publicKey])], "NoQuorum");
-await refused("a guardian and a stranger restoring", [f.restoreSnapshot(snapshot, team.publicKey, [guardians[0].publicKey, stranger.publicKey])], "NotLiveGuardian");
+await refused("the owner proposing an upgrade while stopped", [f.propose(owner.publicKey, UPGRADE, upgrade)], "NotLive");
+await refused("one guardian restoring alone", [f.restoreSnapshot(snapshot, owner.publicKey, [guardians[0].publicKey])], "NoQuorum");
+await refused("a guardian and a stranger restoring", [f.restoreSnapshot(snapshot, owner.publicKey, [guardians[0].publicKey, stranger.publicKey])], "NotLiveGuardian");
 
 say("\n5. TWO guardians restore the snapshot");
-const restoreSig = await send(rpc, guardians[0], [f.restoreSnapshot(snapshot, team.publicKey, [guardians[0].publicKey, guardians[1].publicKey])], [guardians[1]]);
+const restoreSig = await send(rpc, guardians[0], [f.restoreSnapshot(snapshot, owner.publicKey, [guardians[0].publicKey, guardians[1].publicKey])], [guardians[1]]);
 await nextSlot();
 const after = await fingerprint();
 const callAfter = await call();

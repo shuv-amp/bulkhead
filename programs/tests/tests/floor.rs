@@ -58,12 +58,12 @@ fn s10_full_lifecycle() {
         )],
         &[&p.owner],
     );
-    let early = f.execute_code(&drainer_buf, &env.payer.pubkey());
+    let early = f.execute_code(&drainer_buf, &p.owner.pubkey());
     assert_eq!(env.fails(&[early], &[]), err::NOT_EXECUTABLE);
     // 2. A guardian vetoes it; even after the delay it can never execute.
     env.ok(&[f.veto(&gs[0])], &[&p.g[0]]);
     env.advance(3 * DAY + 1);
-    let late = f.execute_code(&drainer_buf, &env.payer.pubkey());
+    let late = f.execute_code(&drainer_buf, &p.owner.pubkey());
     assert_eq!(env.fails(&[late], &[]), err::VETOED);
     env.ok(&[f.cancel(&p.owner.pubkey())], &[&p.owner]);
     assert!(env.call(&f.program).is_ok(), "still the honest code");
@@ -83,7 +83,7 @@ fn s10_full_lifecycle() {
     );
 
     // 4. A quorum restores exactly the code that ran before the stop.
-    let restore = f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &gs[1..3]);
+    let restore = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[1..3]);
     env.ok(&[restore], &[&p.g[1], &p.g[2]]);
     env.next_slot();
     assert!(env.call(&f.program).is_ok(), "running again");
@@ -110,14 +110,15 @@ fn a_fix_goes_live_fast_only_with_quorum_approval_of_that_exact_buffer() {
         &[&p.owner],
     );
     // One approval is not a quorum.
-    env.ok(&[f.approve(&gs[0..1])], &[&p.g[0]]);
-    let exec = f.execute_code(&fix, &env.payer.pubkey());
+    let id = read_config(&env, f).pending_id;
+    env.ok(&[f.approve(id, &gs[0..1])], &[&p.g[0]]);
+    let exec = f.execute_code(&fix, &p.owner.pubkey());
     assert_eq!(
         env.fails(std::slice::from_ref(&exec), &[]),
         err::NOT_EXECUTABLE
     );
     // A second live guardian approves: the fix installs at once.
-    env.ok(&[f.approve(&gs[2..3])], &[&p.g[2]]);
+    env.ok(&[f.approve(id, &gs[2..3])], &[&p.g[2]]);
     env.ok(&[exec], &[]);
     env.next_slot();
     assert!(env.call(&f.program).is_ok());
@@ -141,11 +142,11 @@ fn a_proposed_fix_without_approvals_waits_the_full_delay() {
     );
     env.advance(3 * DAY - 10);
     assert_eq!(
-        env.fails(&[f.execute_code(&fix, &env.payer.pubkey())], &[]),
+        env.fails(&[f.execute_code(&fix, &p.owner.pubkey())], &[]),
         err::NOT_EXECUTABLE
     );
     env.advance(11);
-    env.ok(&[f.execute_code(&fix, &env.payer.pubkey())], &[]);
+    env.ok(&[f.execute_code(&fix, &p.owner.pubkey())], &[]);
     env.next_slot();
     assert!(env.call(&f.program).is_ok());
 }
@@ -162,7 +163,7 @@ fn owner_upgrade_executes_after_the_delay_and_invalidates_the_snapshot() {
         &[&p.owner],
     );
     env.advance(3 * DAY);
-    env.ok(&[f.execute_code(&v2, &env.payer.pubkey())], &[]);
+    env.ok(&[f.execute_code(&v2, &p.owner.pubkey())], &[]);
     env.next_slot();
     let v = read_config(&env, f);
     assert_eq!(
@@ -177,7 +178,7 @@ fn owner_upgrade_executes_after_the_delay_and_invalidates_the_snapshot() {
         &[&p.g[0]],
     );
     assert_eq!(read_config(&env, f).snapshot_valid, 0);
-    let r = f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &gs[0..2]);
+    let r = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[0..2]);
     assert_eq!(env.fails(&[r], &[&p.g[0], &p.g[1]]), err::NO_VALID_SNAPSHOT);
 }
 
@@ -477,7 +478,7 @@ fn proposals_expire_seven_days_after_becoming_executable() {
     );
     env.advance(10 * DAY);
     assert_eq!(
-        env.fails(&[f.execute_code(&v2, &env.payer.pubkey())], &[]),
+        env.fails(&[f.execute_code(&v2, &p.owner.pubkey())], &[]),
         err::EXPIRED
     );
 }
@@ -554,7 +555,7 @@ fn restoring_a_snapshot_needs_a_live_quorum() {
         &[&p.g[0]],
     );
     env.next_slot();
-    let one = f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &gs[0..1]);
+    let one = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[0..1]);
     assert_eq!(env.fails(&[one], &[&p.g[0]]), err::NO_QUORUM);
     stopped_with_floor_code(&mut env, &f.program);
 }
@@ -619,7 +620,7 @@ fn stopping_a_200kb_program_with_snapshot_verification_is_cheap() {
     assert_eq!(read_config(&env, f).snapshot_valid, 1);
     assert!(m.compute_units_consumed < 100_000);
     env.next_slot();
-    let r = f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &gs[0..2]);
+    let r = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[0..2]);
     let m = env.ok(&[r], &[&p.g[0], &p.g[1]]);
     println!(
         "restore of {} bytes: {} CU",
@@ -725,7 +726,8 @@ fn a_recovery_key_replaces_a_stolen_owner_key_that_cannot_stop_it() {
     env.ok(&[f.execute_config()], &[]);
     assert_eq!(floor_owner(&env, f), fresh.to_bytes());
     // The quorum restores the program; the old owner key is now nobody.
-    env.ok(&[f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &[gs[0], gs[1]])], &[&p.g[0], &p.g[1]]);
+    // The snapshot's rent goes to the new owner, not to the replaced key.
+    env.ok(&[f.restore_snapshot(&p.snapshot, &fresh, &[gs[0], gs[1]])], &[&p.g[0], &p.g[1]]);
     assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_DELAY, &solana_address::Address::default(), &(4 * DAY).to_le_bytes(), None)], &[&p.owner]), err::NOT_OWNER);
 }
 
@@ -783,7 +785,7 @@ fn every_floor_account_substitution_is_refused() {
     keys.extend(q.g.iter());
     let mut s = Sweep::new(&env, decoys, &keys);
     let guardians = gs.clone();
-    let spill = |at| any(at, "spill: whoever executes receives the buffer's rent");
+    let spill = |at| any(at, "the stop's spill: whoever stops (a stop never fails on it); execute and restore pay the owner");
     let heartbeat_all = |env: &mut Env| {
         for g in &p.g {
             env.ok(&[f.heartbeat(&g.pubkey())], &[g]);
@@ -801,7 +803,7 @@ fn every_floor_account_substitution_is_refused() {
     env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
     env.advance(3 * DAY);
     heartbeat_all(&mut env);
-    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &payer), &[], &[spill(4)]);
+    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &p.owner.pubkey()), &[], &[]);
     env.next_slot();
 
     // The snapshot no longer matches: pin one of the new code; stage a fresh abort buffer.
@@ -816,8 +818,7 @@ fn every_floor_account_substitution_is_refused() {
         spill(5),
     ]);
     env.next_slot();
-    s.run(&mut env, "restore snapshot", f.restore_snapshot(&snap2, &payer, &gs[0..2]), &[], &[
-        spill(4),
+    s.run(&mut env, "restore snapshot", f.restore_snapshot(&snap2, &p.owner.pubkey(), &gs[0..2]), &[], &[
         role(9, guardians.clone(), "any quorum"),
         role(10, guardians.clone(), "any quorum"),
     ]);
@@ -835,11 +836,12 @@ fn every_floor_account_substitution_is_refused() {
     let fix = env.write_buffer(&honest_v1(), &p.owner);
     env.set_buffer_authority(&fix, &p.owner, &f.authority);
     env.ok(&[f.propose(&p.owner.pubkey(), RESTORE, &fix, &[], Some(&fix))], &[&p.owner]);
-    s.run(&mut env, "approve", f.approve(&gs[1..3]), &[], &[
+    let pid = read_config(&env, f).pending_id;
+    s.run(&mut env, "approve", f.approve(pid, &gs[1..3]), &[], &[
         role(1, guardians.clone(), "any quorum"),
         role(2, guardians.clone(), "any quorum"),
     ]);
-    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &payer), &[], &[spill(4)]);
+    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &p.owner.pubkey()), &[], &[]);
     env.next_slot();
 
     // A raised delay applies at once; a quorum of the others ejects one guardian.
@@ -883,8 +885,54 @@ fn a_stop_must_name_the_pinned_snapshot() {
     assert_eq!(read_config(&env, f).snapshot_valid, 1);
     // So the quorum restores by itself, as G8 says.
     env.next_slot();
-    let r = f.restore_snapshot(&p.snapshot, &env.payer.pubkey(), &gs[1..3]);
+    let r = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[1..3]);
     env.ok(&[r], &[&p.g[1], &p.g[2]]);
     env.next_slot();
     assert!(env.call(&f.program).is_ok());
+}
+
+#[test]
+fn approvals_name_their_proposal_and_buffers_stay_where_they_belong() {
+    // Code review, 7 Oct (finding 58).
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+
+    // The staged abort buffer and the pinned snapshot are never an upgrade:
+    // using one up would leave Floor pointing at a closed account.
+    for b in [p.abort_buffer, p.snapshot] {
+        let ix = f.propose(&p.owner.pubkey(), UPGRADE, &b, &[], Some(&b));
+        assert_eq!(env.fails(&[ix], &[&p.owner]), err::WRONG_BUFFER);
+    }
+
+    // A guardian never becomes the owner.
+    let ix = f.propose(&p.owner.pubkey(), SET_OWNER, &gs[1], &[], None);
+    assert_eq!(env.fails(&[ix], &[&p.owner]), err::INVALID_INSTRUCTION);
+
+    // Stopped: the owner proposes fix A; the guardians approve A by its id.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    let fix_a = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&fix_a, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), RESTORE, &fix_a, &[], Some(&fix_a))], &[&p.owner]);
+    let id_a = read_config(&env, f).pending_id;
+    // The owner swaps in B before the approvals land: they no longer count.
+    env.ok(&[f.cancel(&p.owner.pubkey())], &[&p.owner]);
+    let fix_b = env.write_buffer(&honest_v1(), &p.owner);
+    env.set_buffer_authority(&fix_b, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), RESTORE, &fix_b, &[], Some(&fix_b))], &[&p.owner]);
+    let late = f.approve(id_a, &gs[1..3]);
+    assert_eq!(env.fails(&[late], &[&p.g[1], &p.g[2]]), err::NO_PROPOSAL);
+    let exec = f.execute_code(&fix_b, &p.owner.pubkey());
+    assert_eq!(env.fails(std::slice::from_ref(&exec), &[]), err::NOT_EXECUTABLE, "B was never approved");
+
+    // B approved by its own id: it installs, and its rent returns to the owner only.
+    let id_b = read_config(&env, f).pending_id;
+    env.ok(&[f.approve(id_b, &gs[1..3])], &[&p.g[1], &p.g[2]]);
+    let thief = f.execute_code(&fix_b, &env.payer.pubkey());
+    assert_eq!(env.fails(&[thief], &[]), err::NOT_OWNER);
+    let owner_before = env.svm.get_account(&p.owner.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    let rent = env.account(&fix_b).lamports;
+    env.ok(&[exec], &[]);
+    assert_eq!(env.account(&p.owner.pubkey()).lamports, owner_before + rent, "the buffer's rent went to the owner");
 }

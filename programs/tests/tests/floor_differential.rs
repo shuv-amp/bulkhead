@@ -212,7 +212,11 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         let at = format!("seed {seed} step {step}");
         let (op, sent, model_ok): (&str, bool, bool);
 
-        match rng.below(16) {
+        // While a restore is pending, approvals are tried often: it is the
+        // only window where one can succeed, and it is short.
+        let restore_pending = matches!(&md.pending, Some(pd) if pd.kind == RESTORE);
+        let choice = if restore_pending && rng.below(3) == 0 { 13 } else { rng.below(16) };
+        match choice {
             // Heartbeat, by a live, stale or unregistered key.
             0..=2 => {
                 let k = rng.below(5) as usize;
@@ -334,8 +338,11 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             }
             // Execute whatever is pending.
             8..=9 => {
+                // The spill must be the owner (finding 58); sometimes it is not.
+                let bad_spill = rng.below(8) == 0;
+                let spill = if bad_spill { env.payer.pubkey() } else { ok_[md.owner].pubkey() };
                 let ix = match &md.pending {
-                    Some(pd) if pd.kind == UPGRADE || pd.kind == RESTORE => f.execute_code(&Address::from(pd.target), &env.payer.pubkey()),
+                    Some(pd) if pd.kind == UPGRADE || pd.kind == RESTORE => f.execute_code(&Address::from(pd.target), &spill),
                     _ => f.execute_config(),
                 };
                 let r = env.send(&[ix], &[]);
@@ -351,6 +358,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                             }
                             _ => can_execute(&sched, now, pd.vetoed, false, false).is_ok(),
                         };
+                        let allowed = allowed && !((pd.kind == UPGRADE || pd.kind == RESTORE) && bad_spill);
                         if allowed {
                             match pd.effect {
                                 Effect::Code(c) => {
@@ -439,12 +447,22 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             }
             // Live guardians approve the pending restore.
             13 => {
-                let signers: Vec<usize> = md.guardians.iter().copied().filter(|_| rng.below(2) == 0).collect();
+                // Mostly live guardians (an approval with a stale one is refused,
+                // which the other quarter still tries), never nobody.
+                let live: Vec<usize> = md.guardians.iter().copied().filter(|&k| md.live_guardian(k, now).is_some()).collect();
+                let pool = if rng.below(4) != 0 && !live.is_empty() { live } else { md.guardians.clone() };
+                let mut signers: Vec<usize> = pool.iter().copied().filter(|_| rng.below(2) == 0).collect();
+                if signers.is_empty() && !pool.is_empty() {
+                    signers.push(pool[rng.below(pool.len() as u64) as usize]);
+                }
                 let keys: Vec<Address> = signers.iter().map(|&k| gk[k].pubkey()).collect();
                 let kps: Vec<&Keypair> = signers.iter().map(|&k| gk[k]).collect();
-                let r = env.send(&[f.approve(&keys)], &kps);
+                // The approval names the proposal (finding 58); sometimes another one.
+                let wrong_id = rng.below(6) == 0;
+                let id = md.pending.as_ref().map(|pd| pd.id + wrong_id as u64).unwrap_or(0);
+                let r = env.send(&[f.approve(id, &keys)], &kps);
                 let bits = md.bits(&signers).unwrap();
-                let ok = matches!(&md.pending, Some(pd) if pd.kind == RESTORE) && bits != 0 && bits & md.alive(now) == bits;
+                let ok = matches!(&md.pending, Some(pd) if pd.kind == RESTORE) && !wrong_id && bits != 0 && bits & md.alive(now) == bits;
                 if ok {
                     md.pending.as_mut().unwrap().approvals |= bits;
                 }
@@ -456,9 +474,11 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                 let keys: Vec<Address> = signers.iter().map(|&k| gk[k].pubkey()).collect();
                 let kps: Vec<&Keypair> = signers.iter().map(|&k| gk[k]).collect();
                 let snap = snapshot_buffer.unwrap_or(p.snapshot);
-                let r = env.send(&[f.restore_snapshot(&snap, &env.payer.pubkey(), &keys)], &kps);
+                let bad_spill = rng.below(8) == 0;
+                let spill = if bad_spill { env.payer.pubkey() } else { ok_[md.owner].pubkey() };
+                let r = env.send(&[f.restore_snapshot(&snap, &spill, &keys)], &kps);
                 let alive = md.alive(now);
-                let ok = md.aborted && md.snapshot_valid && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold);
+                let ok = md.aborted && md.snapshot_valid && !bad_spill && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold);
                 if ok {
                     md.live = md.snapshot.unwrap();
                     md.aborted = false;
