@@ -2509,3 +2509,32 @@ fn a_guardian_never_becomes_the_admin() {
     let ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
     w.env.ok(&[ix], &[&w.m.admin]);
 }
+
+#[test]
+fn an_admin_rotation_is_refused_at_execution_if_its_key_became_a_guardian() {
+    // Finding 57, the execution-time check: both changes were valid when
+    // proposed (the new admin was not a guardian yet; the new guardian set did
+    // not hold the current admin), but executing the guardian set first makes
+    // the new admin a guardian.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 1_000_000 * USDC);
+    w.seal();
+    let x = Keypair::new();
+    w.env.fund(&x);
+    let ix = w.m.propose_change_ix(&w.env, 3, &x.pubkey(), &[], None);
+    let admin_change = 0;
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let mut set = vec![3u8];
+    for k in [w.m.g[0].pubkey(), w.m.g[1].pubkey(), x.pubkey()] {
+        set.extend_from_slice(k.as_ref());
+    }
+    set.push(2);
+    set.extend_from_slice(&(7 * DAY).to_le_bytes());
+    let zero = Address::default();
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set, None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 1, &zero)], &[]);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, admin_change, &zero)], &[]), verr::INVALID_INSTRUCTION);
+}

@@ -936,3 +936,27 @@ fn approvals_name_their_proposal_and_buffers_stay_where_they_belong() {
     env.ok(&[exec], &[]);
     assert_eq!(env.account(&p.owner.pubkey()).lamports, owner_before + rent, "the buffer's rent went to the owner");
 }
+
+#[test]
+fn a_restore_whose_buffer_became_the_abort_buffer_is_refused_at_execution() {
+    // Finding 58, the execution-time check: the target was not staged when
+    // proposed, but is the abort buffer by the time it would execute.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    // Stopped: no abort buffer is staged. The owner proposes a restore from B,
+    // a buffer that holds the canonical abort binary.
+    let b = env.write_buffer(&ABORT_ELF, &p.owner);
+    env.set_buffer_authority(&b, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), RESTORE, &b, &[], Some(&b))], &[&p.owner]);
+    // Anyone stages B as the abort buffer; the quorum approves the restore.
+    env.ok(&[f.stage_abort(&b)], &[]);
+    let id = read_config(&env, f).pending_id;
+    env.ok(&[f.approve(id, &gs[1..3])], &[&p.g[1], &p.g[2]]);
+    // Executing would use up the abort buffer: refused.
+    let exec = f.execute_code(&b, &p.owner.pubkey());
+    assert_eq!(env.fails(&[exec], &[]), err::WRONG_BUFFER);
+    assert_eq!(read_config(&env, f).abort_buffer, b.to_bytes(), "the stop is still staged");
+}

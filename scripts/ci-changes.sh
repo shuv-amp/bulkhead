@@ -41,8 +41,9 @@ while IFS= read -r f; do
       deny=true ;;
   esac
   case "$f" in
-    # The guardian on a real validator: what it runs, and the scenarios.
-    cloud/guardian/*|cloud/lib/*|cloud/e2e/*)
+    # The guardian on a real validator, against the programs as built: what it
+    # runs, the programs and core it acts on, the world and build it starts from.
+    cloud/guardian/*|cloud/lib/*|cloud/e2e/*|programs/*|crates/*|scripts/build-programs.sh|scripts/build-harbor.sh)
       scenarios=true ;;
   esac
   case "$f" in

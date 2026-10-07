@@ -14,7 +14,7 @@ test("base58 round-trips well-known ids", () => {
   assert.deepEqual(b58decode("1"), Uint8Array.of(0));
 });
 
-test("on-curve check agrees with curve25519-dalek on 256 vectors", () => {
+test("on-curve check agrees with curve25519-dalek on 268 vectors", () => {
   const vectors = JSON.parse(readFileSync(new URL("../../tools/testdata/curve25519_vectors.json", here)));
   let on = 0;
   for (const [hex, want] of vectors) {
@@ -89,4 +89,17 @@ test("a vault account decodes through its lifeboat exit, in the program's field 
   const v = decodeVault(new Uint8Array(Buffer.concat(parts)));
   assert.deepEqual([v.decimals, v.pendingTickets, v.cancelled], [6, 5, 13n]);
   assert.deepEqual([v.lifeboatAmount, v.exitAmount, v.exitProposedS, v.exitExecutableS, v.exitExpiresS, v.exitVetoed], [40n, 30n, 1000, 260_200, 865_000, true]);
+});
+
+test("onCurve takes a y of p or more mod p, as Solana does", async () => {
+  // Checked against solana-address's is_on_curve (curve25519-dalek): p + 1 is
+  // the identity point, on the curve (the vectors carry the y >= p edges too).
+  const { onCurve } = await import("../lib/solana.mjs");
+  const pPlus1 = new Uint8Array(32).fill(0xff);
+  pPlus1[31] = 0x7f;
+  pPlus1[0] = 0xee;
+  assert.equal(onCurve(pPlus1), true);
+  const one = new Uint8Array(32);
+  one[0] = 1;
+  assert.equal(onCurve(one), true);
 });

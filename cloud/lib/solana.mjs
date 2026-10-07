@@ -85,8 +85,9 @@ const D = modp(-121665n * powmod(121666n, P - 2n));
 export function onCurve(k) {
   let y = 0n;
   for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(k[i]);
-  y &= (1n << 255n) - 1n;
-  if (y >= P) return false;
+  // As Solana's is_on_curve (curve25519-dalek): a y of p or more is taken
+  // mod p, not refused (p + 1 is the identity point, on the curve).
+  y = ((y & ((1n << 255n) - 1n)) % P);
   const u = modp(y * y - 1n);
   const v = modp(D * y * y + 1n);
   const x = modp(u * powmod(v, 3n) * powmod(u * powmod(v, 7n), (P - 5n) / 8n));

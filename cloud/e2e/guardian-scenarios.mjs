@@ -80,11 +80,12 @@ async function freezeEnds(count, withinS) {
   const t0 = now();
   while (ends.length < count && now() - t0 < withinS) {
     const u = await frozenUntil();
-    if (u > now() && u !== ends.at(-1)) ends.push({ until: u, seenAt: now() });
+    if (u > now() && u !== ends.at(-1)?.until) ends.push({ until: u, seenAt: now() });
     await sleep(1000);
   }
   if (ends.length < count) fail(`saw ${ends.length} freeze ends, wanted ${count}`);
   for (let i = 1; i < ends.length; i++) {
+    if (ends[i].until <= ends[i - 1].until) fail(`freeze end ${i} did not move later`);
     if (ends[i].seenAt > ends[i - 1].until) fail(`renewal ${i} came after the freeze had ended`);
   }
   return ends;
@@ -115,10 +116,12 @@ const scenarios = {
     guardian.kill("SIGKILL");
     await startGuardian(HOLD, { fresh: false });
     if (!log().includes("incident hold resumed from saved state")) fail("the restarted guardian did not resume the incident");
-    // The restarted guardian renews: the end moves past the last one seen.
-    const t0 = now();
-    while ((await frozenUntil()) <= first.at(-1).until) {
-      if (now() - t0 > 90) fail("the restarted guardian did not renew the freeze");
+    // The restarted guardian renews before the freeze it inherited ends.
+    const old = first.at(-1).until;
+    for (;;) {
+      const u = await frozenUntil();
+      if (u > old) break;
+      if (now() > old) fail("the freeze ran out before the restarted guardian renewed it");
       await sleep(1000);
     }
     await quorumUnfreeze();
