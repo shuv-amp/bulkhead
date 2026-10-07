@@ -42,6 +42,13 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
 9. **Calibrate** (§4) before the seal. Tightening later is instant; loosening takes 72h.
 10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page. It vetoes every loosening, lifeboat exit and Floor proposal you have not pre-approved, and it is also your **keeper**: a change you did approve (`approvedChanges`, `approvedFloorProposals`, `approvedUpgradeBuffers`, each by what it does) is executed by it as soon as its delay ends. Solana programs never run on their own, so after a delay someone must send `execute`; anyone may, and the keeper makes sure someone does, before the 7-day expiry. It never executes the release of Floor's upgrade authority, which closes Floor's config.
 
+**Hard rules.** Each one is a way to lose the guarantee without a bug in Bulkhead:
+
+- **Pin the Vault program id** in every CPI that carries the caller PDA's signature (step 1; `15`, A11). Compare it with a constant, never with an account the transaction supplies.
+- **Deposit credits the signing source authority**, not the token account's owner. Have the user sign as the authority of their own token account. Never pull tokens through a delegate PDA that you also release to: every deposit would credit that PDA, and a release to an account it owns would be backed by everyone's deposits.
+- **A recipient can stall its own ticket.** `settle_ticket` pays the token account stored in the ticket. If its owner closes it, freezes it or enables `MemoTransfer` (the Vault's transfer carries no memo), settling fails and the ticket stays pending, with its reservation, until a guardian cancels it (`cancel_ticket`). While it is pending, `reset_backlog` is refused. Watch for tickets past their ETA that do not settle.
+- **You trust the mint's issuer.** For a `TransferFeeConfig` mint, the fee authority can raise the fee up to its configured maximum: deposits credit what arrived, but every release then delivers less. A mint's freeze authority can freeze the vault token account and stop custody entirely. Bulkhead discloses both (`05 §7`); it cannot prevent either. Prefer mints with no freeze authority and no fee authority.
+
 ## 3. The pattern, from Harbor (`programs/harbor`)
 
 Harbor forwards to Bulkhead, signing as its caller PDA:

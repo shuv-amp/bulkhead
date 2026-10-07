@@ -9,7 +9,10 @@
 //
 //   node cloud/deploy/finish-renewals.mjs <rpc> <market-dir> <payer.json> [floor-program protected-program]
 //
-// Exits 0 only when every one is executed.
+// Exits 0 only when every one is executed (by this run or before it), 1 when
+// any is not, and 3 when the market's are executed but the Floor has nothing
+// pending: from the chain alone that cannot tell a renewal already executed
+// from one never proposed or withdrawn, so check its guardian set by hand.
 import { readFileSync } from "node:fs";
 import { Rpc, key, findPda, u64le, IDS, decodeFloor, decodeChange } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
@@ -31,8 +34,14 @@ const r = (k) => ({ pubkey: key(k) });
 const s = (k, writable = false) => ({ pubkey: key(k), signer: true, writable });
 const iso = (t) => new Date(t * 1000).toISOString();
 // The chain's clock decides, not this machine's.
-const now = await rpc.call("getBlockTime", [await rpc.call("getSlot", [{ commitment: "confirmed" }])]);
+const slot = await rpc.call("getSlot", [{ commitment: "confirmed" }]);
+const now = await rpc.call("getBlockTime", [slot]);
+if (typeof now !== "number") {
+  console.error(`the RPC has no block time for slot ${slot}; try again, or use an RPC that keeps block times`);
+  process.exit(2);
+}
 let failed = 0;
+let floorUnconfirmed = false;
 
 /** The program's error for a refused transaction, by name. */
 function refusal(e) {
@@ -79,7 +88,8 @@ if (floorProgram && protectedProgram) {
     console.log("floor: no Floor config for that program");
     failed++;
   } else if (!f.pendingKind) {
-    console.log("floor: nothing pending");
+    console.log("floor: nothing pending; executed already, or never proposed? Not confirmed (exit 3)");
+    floorUnconfirmed = true;
   } else {
     failed++;
     // This script executes configuration changes; an upgrade or restore
@@ -99,4 +109,4 @@ if (floorProgram && protectedProgram) {
     }
   }
 }
-process.exit(failed ? 1 : 0);
+process.exit(failed ? 1 : floorUnconfirmed ? 3 : 0);

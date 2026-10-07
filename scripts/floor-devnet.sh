@@ -22,7 +22,8 @@ SO="${4:-target/deploy/bulkhead_harbor.so}"
 mkdir -p "$D"
 chmod 700 "$D"
 [ -f "$D/program.so" ] || cp "$SO" "$D/program.so"
-python3 -c "import sys; sys.path.insert(0, 'reference'); import bulkhead_ref as r; open('$D/abort.so', 'wb').write(r.abort_elf())"
+# The path is an argument, never part of the Python source.
+python3 -c "import sys; sys.path.insert(0, 'reference'); import bulkhead_ref as r; open(sys.argv[1], 'wb').write(r.abort_elf())" "$D/abort.so"
 [ -f "$D/program-keypair.json" ] || solana-keygen new --no-bip39-passphrase --silent --outfile "$D/program-keypair.json"
 chmod 600 "$D/program-keypair.json"
 FLOOR=$(solana-keygen pubkey target/deploy/bulkhead_floor-keypair.json)

@@ -139,14 +139,16 @@ The property test `g1_dual_bucket_bound_holds_with_freezes_cancels_and_resets` c
 ema_update(ref, last_s, balance, now_s, initialized):
     if !initialized: return balance
     f = min(max(0, now_s − last_s), 86 400)
-    return ref + ⌊(balance − ref) · f / 86 400⌋        (toward balance, truncated toward ref)
+    d = ⌊|balance − ref| · f / 86 400⌋
+    return ref + d if balance ≥ ref, else ref − d     (toward balance, truncated toward ref)
+ref        = min(ema_update(ref, last_s, balance, now_s, init), balance)   (the program's touch)
 base       = min(ref, balance)                     (capacity_base; balance before the operation)
 capacity_k = clamp(⌊base · bps_k / 10 000⌋, floor_k, cap_k if cap_k > 0)   (saturating at u64::MAX)
 ```
 
-It is updated on every touch, **before** the operation.
+It is updated on every touch, **before** the operation, from the balance before the transfer. The program caps the result at that balance, so the reference **drops at once** and **rises slowly**.
 
-**Why the lower of the two** (`15`, A1). The reference alone rises slowly, which is the point (G-8), but it also falls slowly: after a large backed exit or a bank run, capacity stayed sized for money that had left (7.8× the daily bound on what was left, in the adversarial test). With `min`, money that arrives still counts slowly and money that leaves stops counting at once. It only ever lowers a capacity, so it is a tightening at every instant. Every unbacked payout also shrinks the base, so a burst is 2% of what is in the vault at each payout: 100,000 of a 10,000,000 vault, then 99,000 of the 9,900,000 left (S8).
+**Why the lower of the two** (`15`, A1). An average alone rises slowly, which is the point (G-8), but it also falls slowly: after a large backed exit or a bank run, capacity stayed sized for money that had left (7.8× the daily bound on what was left, in the adversarial test). With `min`, money that arrives still counts slowly and money that leaves stops counting at once. It only ever lowers a capacity, so it is a tightening at every instant. Every unbacked payout also shrinks the base, so a burst is 2% of what is in the vault at each payout: 100,000 of a 10,000,000 vault, then 99,000 of the 9,900,000 left (S8). The reference itself drops at once to the balance before each transfer, and a deposit later in the same transaction moves it by `dt = 0`, i.e. not at all. So capital deposited within the transaction cannot raise the base back between payouts.
 
 **Absolute caps** (`cap_k`, in tokens; 0 means none). `min` does not help against capital the attacker parks in the vault itself: deposit, wait for the reference, drain while the deposit is still there, then take it back through the backed lane (`15`, A1b: 19.8% of the honest depositors' money in a 2-minute attack on a 10M vault next to 90M parked). Caps near the vault's honest size bring that back to the G1 bound (2.1%). Setting or lowering a cap is a tightening (instant); raising it is a loosening (72h). Calibration sets both (`07 §4`).
 
@@ -166,7 +168,7 @@ Backing is **non-transferable** and **pays only its owner**. The recipient token
 ### 4.2 Pricing
 
 For an allowlisted mint with a valid Pyth `PriceUpdateV2`, the program checks:
-- the account owner is the Pyth receiver program;
+- the account owner is the Pyth receiver program (`rec5EKMG…`) or its Pyth Pro-compatible deployment (`rec2HHDD…`);
 - verification level is Full;
 - the feed id matches the asset config;
 - `now − publish_time ≤ max_age`;
@@ -306,8 +308,8 @@ Examples (golden G-12):
 | Action | Who | Effect | Limits |
 |---|---|---|---|
 | `settle_ticket` | anyone (crank) | Pays the stored recipient once `now ≥ eta` and not frozen | Only the stored recipient |
-| `cancel_ticket` | any live guardian (not the admin, A4) | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5) |
-| `extend_ticket` | any guardian | `eta += x` | ≤ 24h per call, ≤ 7 days total |
+| `cancel_ticket` | any live guardian (not the admin, A4) | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5); names the ticket id it expects, since a ticket's address can be reused |
+| `extend_ticket` | any guardian | `eta += x` | ≤ 24h per call, ≤ 7 days total; names the ticket id it expects |
 | `freeze` | any guardian, admin | `frozen_until = max(frozen_until, now + x)` | `x ≤ 24h`; re-freezable |
 | `unfreeze` | guardian quorum | `frozen_until = now` | |
 | `reset_backlog` | admin or guardian | §2.2 | Only with zero pending tickets |
@@ -378,7 +380,7 @@ Why each rule exists: `14 §3–4`.
 |---|---|---|
 | `cost` | ceil; saturates at 2^61 ms | The requester pays at least the exact time; TAT can't overflow |
 | capacity | floor; saturates at `u64::MAX` | Smaller budget. (Saturation was a real bug; see `09 §4`.) |
-| EMA step | truncate toward the old reference | Moves slowly in both directions, never overshoots |
+| EMA step | truncate toward the old reference | Moves slowly in both directions, never overshoots; the program then caps it at the balance, so it drops at once |
 | collateral value | floor; overflow → 0 | Conservative |
 | liability value | ceil; overflow → unknown → nothing backed | Conservative |
 | health sum | checked; overflow → unknown | Conservative |

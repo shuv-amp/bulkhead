@@ -1,13 +1,16 @@
 //! Reference balance: a slow average of the vault balance (or mint supply).
 //!
-//! The reference moves slowly. Capacity then uses `min(reference, live balance)`,
-//! so:
-//! - an attacker cannot raise the limit by depositing right before an attack
-//!   (the reference moves at most `dt / 24h` of the way toward the balance);
-//! - a drain shrinks the limit at once, because the live balance is the cap.
+//! `ema_update` moves the reference at most `dt / 24h` of the way toward the
+//! balance, in either direction. The step is linear,
+//! `|balance - reference| * min(dt, TAU) / TAU`, truncated toward the old
+//! reference, so it never overshoots the balance.
 //!
-//! The step is linear, `(balance - reference) * min(dt, TAU) / TAU`, truncated
-//! toward the old reference, so it never overshoots the balance.
+//! The program does not use the average alone: it caps it at the balance
+//! before the operation, so the reference rises slowly and drops at once
+//! (docs/03 §3). Capacity then uses `min(reference, live balance)`, so:
+//! - an attacker cannot raise the limit by depositing right before an attack,
+//!   or between two payouts in one transaction;
+//! - a drain shrinks the limit at once.
 
 use crate::consts::TAU_S;
 

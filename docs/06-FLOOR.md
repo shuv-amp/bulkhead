@@ -64,7 +64,7 @@ Each was checked in agave's source (master `f771659`, 26 Sep 2026) or on-chain; 
 | `status` | Live or Aborted |
 | `elf_is_v3` | Whether the live code is deployable after SIMD-0500 (updated at every install) |
 | `abort_buffer` | The staged canonical abort binary (frozen buffer) |
-| `snapshot_buffer`, `snapshot_valid` | A frozen buffer pinned as a copy of the live code; "valid" is decided at the moment of an abort, which must name the pinned buffer (otherwise whoever stops could leave it out and deny the quorum its restore; `09`, finding 53) |
+| `snapshot_buffer`, `snapshot_valid` | A frozen buffer pinned as a copy of the live code; "valid" is decided at the moment of an abort, which must name the pinned buffer or another frozen buffer byte-identical to the live code (otherwise whoever stops could leave it out and deny the quorum its restore; `09`, finding 53) |
 | `pending_*` | At most one proposal: kind, target, payload, ETA, expiry, veto flag, approval bitmap, id |
 
 The upgrade authority is a second PDA, `["authority", program]`, with no data: it only signs. Buffers pinned by Floor have that PDA as authority.
@@ -89,11 +89,11 @@ Account lists and data layouts are documented above each handler in `programs/fl
 
 | # | Instruction | Signer | Effect |
 |---|---|---|---|
-| 0 | `register(owner, guardians, threshold, interval, delay)` | the **current** upgrade authority | Creates the config and moves the authority to Floor's PDA **in the same instruction** (CPI `SetAuthority`). There is no window in which Floor holds a key but someone else chose the guardians. Survives a pre-funded config address. |
+| 0 | `register(owner, guardians, threshold, interval, delay, recovery?)` | the **current** upgrade authority | Refuses a recovery key that is also a guardian or the owner. Creates the config and moves the authority to Floor's PDA **in the same instruction** (CPI `SetAuthority`). There is no window in which Floor holds a key but someone else chose the guardians. Survives a pre-funded config address. |
 | 1 | `stage_abort` | anyone | Accepts a frozen buffer holding exactly a canonical abort binary that fits the programdata account |
 | 2 | `pin_snapshot` | anyone | Accepts a frozen buffer byte-identical to the live code (`sol_memcmp_`) |
-| 3 | `abort` | a live guardian; the owner only while fewer than a quorum of guardians are live | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Never fails because of the snapshot. Cancels any pending proposal. |
-| 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. Raising the delay is instant, even past a recovery proposal in the slot (which stays); everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop; once vetoed or expired it no longer holds the slot. |
+| 3 | `abort` | a live guardian; the owner only while fewer than a quorum of guardians are live | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Account 10 is the pinned buffer, or any other frozen buffer byte-identical to the live code, which then becomes the pin. Anyone may re-pin, so a re-pin just before the stop cannot make an honest stop fail. Never fails because of the snapshot. Cancels any pending proposal. |
+| 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. The recovery key is never a guardian: SetGuardians and SetRecovery refuse a set where one key holds both roles. Raising the delay is instant, even while a recovery proposal holds the slot (which stays); everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop; once vetoed or expired it no longer holds the slot. |
 | 5 | `veto` | any live guardian | Blocks the pending proposal. Data may be empty, or the proposal id (u64). A named id that is not the one pending is refused, so a retried veto cannot hit a proposal that replaced it. |
 | 6 | `approve` | live guardians | Approves the pending Restore (its exact buffer) |
 | 7 | `execute` | anyone | Runs the pending proposal once allowed. A Restore runs at once with a quorum's approval. |

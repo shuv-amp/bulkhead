@@ -25,10 +25,13 @@ while IFS= read -r f; do
   esac
   case "$f" in
     # The programs depend on the core; the build checks each binary with the
-    # Python reference; the end-to-end run uses the Cloud guardian and pages.
-    crates/*|programs/*|cloud/*|reference/*|Cargo.toml|Cargo.lock|\
+    # Python reference; the end-to-end run uses the Cloud guardian and pages;
+    # the deploy rehearsal runs the deploy and Floor scripts; a LiteSVM test
+    # checks tools/testdata.
+    crates/*|programs/*|cloud/*|reference/*|tools/*|Cargo.toml|Cargo.lock|\
     scripts/build-programs.sh|scripts/build-harbor.sh|scripts/check-programs.sh|\
-    scripts/deploy-dryrun.sh|scripts/verify-deployed.sh)
+    scripts/deploy-dryrun.sh|scripts/verify-deployed.sh|scripts/deploy.sh|\
+    scripts/floor-devnet.sh|scripts/floor-demo.sh)
       programs=true ;;
   esac
   case "$f" in

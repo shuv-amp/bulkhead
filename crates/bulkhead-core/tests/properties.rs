@@ -14,8 +14,8 @@ use bulkhead_core::floor::{
 use bulkhead_core::governance::{self, Abdications, GovError, Schedule, CHANGE_EXPIRY_S};
 use bulkhead_core::ledger::{contribution, Ledger, LedgerError, Mint, PricedAsset, Pricing};
 use bulkhead_core::limiter::{
-    available_now, capacity_from_ref, max_unbacked_over, request, rescale_windows, reset_backlog,
-    Bucket, Decision, LimiterError, LimiterParams, LimiterState,
+    available_now, capacity_from_ref, cost_ms, max_unbacked_over, request, rescale_windows,
+    reset_backlog, Bucket, Decision, LimiterError, LimiterParams, LimiterState,
 };
 use bulkhead_core::price::conservative;
 use bulkhead_core::value::value_v;
@@ -265,6 +265,56 @@ fn available_now_is_exact() {
     }
 }
 
+/// G1's inductive step, from any state: an admitted request (instant or
+/// queued) moves each bucket's TAT to at least `max(TAT, now) + cost`, and a
+/// refused one changes nothing.
+#[test]
+fn an_admitted_request_charges_its_full_cost_to_both_buckets() {
+    let mut r = Rng(0x61_57E9);
+    let (mut n_instant, mut n_queued) = (0u64, 0u64);
+    for case in 0..cases() {
+        let p = random_params(&mut r);
+        let now = r.range(0, 1 << 45) as i64;
+        let mut s = LimiterState {
+            tat_short_ms: r.range(0, (now + p.short.window_ms + 86_400_000) as u64) as i64,
+            tat_long_ms: r.range(0, (now + p.long.window_ms + 86_400_000) as u64) as i64,
+        };
+        let frozen_until = if r.chance(0.2) {
+            now + r.range(0, 86_400_000) as i64
+        } else {
+            0
+        };
+        let amount = pick(
+            &[
+                1,
+                r.range(1, p.short.capacity),
+                r.range(1, p.long.capacity),
+                r.range(1, u64::MAX),
+            ],
+            r.next(),
+        );
+        let before = s;
+        match request(&mut s, &p, now, amount, frozen_until) {
+            Ok(d) => {
+                match d {
+                    Decision::Instant => n_instant += 1,
+                    Decision::Queued { .. } => n_queued += 1,
+                }
+                assert!(
+                    s.tat_short_ms >= before.tat_short_ms.max(now) + cost_ms(amount, &p.short),
+                    "case {case}"
+                );
+                assert!(
+                    s.tat_long_ms >= before.tat_long_ms.max(now) + cost_ms(amount, &p.long),
+                    "case {case}"
+                );
+            }
+            Err(_) => assert_eq!(s, before, "case {case}"),
+        }
+    }
+    assert!(n_instant > 0 && n_queued > 0, "both outcomes exercised");
+}
+
 #[test]
 fn lane_closed_and_zero_amount() {
     let p = LimiterParams {
@@ -299,6 +349,11 @@ fn ema_moves_toward_balance_and_never_overshoots() {
         let now = last + r.range(0, 3 * TAU_S as u64) as i64;
         let v = ema_update(reference, last, balance, now, true);
         assert!(v >= reference.min(balance) && v <= reference.max(balance));
+        // The step is exactly |balance - reference| * min(dt, TAU) / TAU,
+        // truncated toward the old reference.
+        let f = (now - last).min(TAU_S) as u128;
+        let step = (reference.abs_diff(balance) as u128 * f / TAU_S as u128) as u64;
+        assert_eq!(reference.abs_diff(v), step);
         if now - last >= TAU_S {
             assert_eq!(v, balance);
         }
@@ -340,11 +395,15 @@ fn conservative_price_brackets_spot_and_ema() {
     for _ in 0..cases() {
         let price = r.range(1, i64::MAX as u64) as i64;
         let ema = r.range(1, i64::MAX as u64) as i64;
-        let conf = r.next();
+        let conf = pick(&[r.next(), r.range(0, 1 << 40)], r.next()); // wide, or a lo above 0
         let mult = r.range(0, 40_000) as u32;
         let b = conservative(price, conf, ema, mult).unwrap();
         assert!(b.lo <= price.min(ema) as u128);
         assert!(b.hi >= price.max(ema) as u128);
+        // Widened by exactly k = ceil(conf * mult / 10_000) on both sides.
+        let k = (conf as u128 * mult as u128).div_ceil(10_000);
+        assert_eq!(b.lo, (price.min(ema) as u128).saturating_sub(k));
+        assert_eq!(b.hi, price.max(ema) as u128 + k);
     }
     assert!(conservative(0, 1, 5, 10_000).is_none());
     assert!(conservative(5, 1, -1, 10_000).is_none());
