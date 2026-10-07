@@ -443,7 +443,10 @@ export function decodeChange(d) {
     executableS: Number(r.i64()),
     expiresS: Number(r.i64()),
   });
-  r.o += 2 + 300; // payload length and payload
+  const len = r.u16();
+  if (len > 300) throw new Error("malformed change account: payload longer than 300 bytes");
+  c.payload = d.slice(r.o, r.o + len);
+  r.o += 300;
   c.baseVersion = r.u32();
   return c;
 }
@@ -482,6 +485,7 @@ export function decodeFloor(d) {
     pendingTarget: b58encode(at(536)),
     pendingEta: i64(568),
     pendingExpires: i64(576),
+    pendingPayload: d.slice(586, 586 + Math.min(266, new DataView(d.buffer, d.byteOffset + 584, 2).getUint16(0, true))),
   };
 }
 

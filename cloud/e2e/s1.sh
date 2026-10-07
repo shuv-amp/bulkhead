@@ -18,10 +18,12 @@ COUNT="${COUNT:-12}"            # payouts
 AMOUNT="${AMOUNT:-100000000000}" # 100,000 USDC each
 INTERVAL="${INTERVAL:-800}"     # ms between payouts
 POLL_MS="${POLL_MS:-300}"       # the guardian's polling interval (public RPCs: 1000)
-# Pending changes the market's owners want, which the guardian must not veto
-# (comma-separated ids). Without them, its restart scan vetoes every pending
-# loosening, a guardian renewal or a recovery key included.
-APPROVED_CHANGE_IDS="${APPROVED_CHANGE_IDS:-}"
+# Pending changes the market's owners want, which the guardian must not veto:
+# comma-separated approvals, "kind:target:payloadHex" each, as printed by
+# cloud/deploy/approvals.mjs. Without them, its restart scan vetoes every
+# pending loosening, a guardian renewal or a recovery key included.
+APPROVED_CHANGES="${APPROVED_CHANGES:-}"
+APPROVED_JSON=$(python3 -c 'import json,sys; print(json.dumps([a for a in sys.argv[1].split(",") if a]))' "$APPROVED_CHANGES")
 # A webhook the guardian posts its alerts to (cloud/guardian/alert.mjs), if any.
 ALERT_URL="${ALERT_URL:-}"
 ALERT_CFG=""
@@ -32,7 +34,7 @@ VAULT=$(field vaultProgram); HARBOR=$(field harbor)
 cat > "$W/guardian.json" <<CFG
 { "rpc": "$RPC", "vaultProgram": "$VAULT", "protocolProgram": "$HARBOR",
   "mints": ["$(field mint)"], "guardianKey": "$W/keys/guardian0.json", "pollMs": $POLL_MS,
-  "policy": { "approvedChangeIds": [$APPROVED_CHANGE_IDS] }$ALERT_CFG }
+  "policy": { "approvedChanges": $APPROVED_JSON }$ALERT_CFG }
 CFG
 echo "== guardian watching"
 node cloud/guardian/main.mjs "$W/guardian.json" > "$W/guardian.log" 2>&1 &

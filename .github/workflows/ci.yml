@@ -191,8 +191,8 @@ jobs:
         run: scripts/build-programs.sh
       - name: Scenarios
         run: |
-          if [ "$DEEP" = true ]; then cloud/e2e/guardian-scenarios.sh hold restart failover cursor
-          else cloud/e2e/guardian-scenarios.sh hold restart failover; fi
+          if [ "$DEEP" = true ]; then cloud/e2e/guardian-scenarios.sh hold restart failover approvals cursor
+          else cloud/e2e/guardian-scenarios.sh hold restart failover approvals; fi
 
   fuzz:
     # Coverage-guided fuzzing of the byte parsers and the full-width limiter

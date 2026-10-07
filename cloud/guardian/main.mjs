@@ -37,9 +37,10 @@
 // execute after the delay; this makes sure someone does), except a release of
 // Floor's upgrade authority.
 //
-// Vetoes: every loosening not in `approvedChangeIds`, every lifeboat exit not
-// in `approvedExits` ("mint:amount"), and every Floor proposal not approved
-// (code by buffer in `approvedUpgradeBuffers`, anything else by "program:id"
+// Vetoes: every loosening not in `approvedChanges` ("kind:target:payloadHex",
+// what it does, never its id), every lifeboat exit not in `approvedExits`
+// ("mint:amount"), and every Floor proposal not approved (code by buffer in
+// `approvedUpgradeBuffers`, anything else as "program:kind:target:payloadHex"
 // in `approvedFloorProposals`), live and, after a restart, from the accounts.
 //
 // Heartbeats keep this key live on the Vault and on every watched Floor it
@@ -51,14 +52,14 @@ import { basename } from "node:path";
 import { Rpc, FailoverRpc, b58encode, decodeTicket, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, checkPolicy, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
 import { ingestSignatures, signatureWalk, signatureWalkSinceSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
-const policy = { ...DEFAULT_POLICY, ...(cfg.policy ?? {}) };
+const policy = checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) });
 // With backup endpoints, reads and sends move to the next endpoint when one
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
 // only in the log: RPC URLs often carry an API key.

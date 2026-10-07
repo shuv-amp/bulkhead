@@ -11,6 +11,9 @@
 //              not freeze again (finding 54)
 //   failover   the primary RPC dies after startup; the guardian reads from the
 //              backup and freezes the attack (finding 51)
+//   approvals  a stolen admin key proposes first and takes the id the
+//              operators expected; approvals name what a change does, so the
+//              thief's change is vetoed and theirs is not (finding 61)
 //   cursor     the node forgets the guardian's last signature on a quiet
 //              protocol; the guardian reads on and freezes an attack (49).
 //              Needs a validator with a small ledger (the .sh does that).
@@ -19,7 +22,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { openSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { Rpc, decodeProtocol } from "../lib/solana.mjs";
+import { Rpc, decodeProtocol, decodeChange, findPda, key, u64le, concat, IDS } from "../lib/solana.mjs";
+import { changeApproval } from "../guardian/policy.mjs";
 import { VaultClient } from "../lib/bulkhead.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 
@@ -157,6 +161,38 @@ const scenarios = {
     attack();
     await waitForFreeze(120);
     if (!/is failing; now using/.test(log())) fail("the switch to the backup endpoint was not logged");
+  },
+
+  async approvals() {
+    const admin = Keypair.load(`${dir}/keys/admin.json`);
+    const fresh = Keypair.generate().address;
+    const thief = Keypair.generate().address;
+    // The operators approve rotating the admin to `fresh`, by what it does.
+    await startGuardian({ policy: { approvedChanges: [changeApproval({ kind: 3, target: fresh, payload: new Uint8Array(0) })] } });
+    const first = decodeProtocol((await rpc.account(vc.protocol)).bytes).nextChangeId;
+    const change = async (id) => (await findPda(["change", vc.protocol, u64le(id)], vc.program))[0];
+    const propose = async (id, target) => send(rpc, admin, [{
+      programId: vc.program,
+      data: concat(Uint8Array.of(18, 3), key(target)),
+      accounts: [
+        { pubkey: admin.publicKey, signer: true, writable: true }, { pubkey: admin.publicKey, signer: true },
+        { pubkey: vc.protocol, writable: true }, { pubkey: await change(id), writable: true }, { pubkey: IDS.system },
+      ],
+    }]);
+    // The thief proposes first and gets the id the operators expected.
+    await propose(first, thief);
+    await propose(first + 1n, fresh);
+    const read = async (id) => decodeChange((await rpc.account(await change(id))).bytes);
+    const t0 = now();
+    while (!(await read(first)).vetoed) {
+      if (now() - t0 > 90) fail(`the thief's change ${first} was not vetoed within 90 s`);
+      await sleep(1000);
+    }
+    // Past the guardian's account scan (every 60 s), the approved one stands.
+    while (now() - t0 < 75) await sleep(1000);
+    const ours = await read(first + 1n);
+    if (ours.vetoed) fail(`the approved change ${first + 1n} was vetoed`);
+    if (ours.target !== fresh) fail("read the wrong change");
   },
 
   async cursor() {
