@@ -404,6 +404,7 @@ pub(crate) type GuardianSet = ([[u8; 32]; MAX_GUARDIANS], u8, u8, i64);
 pub(crate) fn parse_guardian_set(
     r: &mut state::R,
     admin: &[u8; 32],
+    recovery: &[u8; 32],
 ) -> Result<GuardianSet, ProgramError> {
     let count = r.u8()? as usize;
     if !(MIN_GUARDIAN_THRESHOLD as usize..=MAX_GUARDIANS).contains(&count) {
@@ -412,7 +413,7 @@ pub(crate) fn parse_guardian_set(
     let mut g = [[0u8; 32]; MAX_GUARDIANS];
     for i in 0..count {
         let k = r.key()?;
-        if k == [0; 32] || &k == admin || g[..i].contains(&k) {
+        if k == [0; 32] || &k == admin || &k == recovery || g[..i].contains(&k) {
             return Err(VaultError::InvalidGuardians.into());
         }
         g[i] = k;

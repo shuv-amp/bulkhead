@@ -1770,7 +1770,8 @@ fn the_recovery_key_can_only_replace_the_admin_or_itself() {
     assert_eq!(w.env.fails(&[ix], &[&recovery]), verr::INVALID_INSTRUCTION);
     let ix = w.m.propose_change_ix(&w.env, 3, &recovery.pubkey(), &[], None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
-    // It may replace itself; the admin may not, once one exists.
+    // It may replace itself; once one exists the admin may not alone (only
+    // with a live quorum, `replace_recovery`).
     let next = Keypair::new().pubkey();
     let mut ix = w.m.propose_change_ix(&w.env, 6, &next, &[], None);
     ix.accounts[1].pubkey = recovery.pubkey();
@@ -2597,4 +2598,95 @@ fn an_admin_rotation_is_refused_at_execution_if_its_key_became_a_guardian() {
     w.env.advance(3 * DAY);
     w.env.ok(&[execute_change_ix(&w, 1, &zero)], &[]);
     assert_eq!(w.env.fails(&[execute_change_ix(&w, admin_change, &zero)], &[]), verr::INVALID_INSTRUCTION);
+}
+
+#[test]
+fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardian() {
+    // replace_recovery is a loosening at once, so it obeys what every other
+    // loosening obeys: nothing changes while the seal is under review (T19),
+    // and an abdicated SetRecovery is fixed for good. And no key holds two
+    // roles: a guardian that is also the recovery key would never veto its
+    // own new admin.
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    let (g0, g1, g2) = (w.m.g[0].pubkey(), w.m.g[1].pubkey(), w.m.g[2].pubkey());
+    let admin = w.m.admin.pubkey();
+    let zero = Address::default();
+    let quorum: [&Keypair; 3] = [&w.m.admin, &w.m.g[0], &w.m.g[1]];
+    let set = |keys: &[Address]| {
+        let mut d = vec![keys.len() as u8];
+        keys.iter().for_each(|k| d.extend_from_slice(k.as_ref()));
+        d.push(2);
+        d.extend_from_slice(&(7 * DAY).to_le_bytes());
+        d
+    };
+
+    // Under seal review: refused; once a guardian vetoes the seal: allowed.
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    let ix = w.m.replace_recovery_ix(&admin, &Keypair::new().pubkey(), &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &quorum), verr::SEAL_UNDER_REVIEW);
+    let veto = w.m.vault_ix(6, &[], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(g0, true)]);
+    w.env.ok(&[veto], &[&w.m.g[0]]);
+    let ix = w.m.replace_recovery_ix(&admin, &Keypair::new().pubkey(), &[g0, g1]);
+    w.env.ok(&[ix], &quorum);
+    // ... and back to none, so the admin may propose one again below.
+    w.env.next_slot();
+    let ix = w.m.replace_recovery_ix(&admin, &zero, &[g0, g1]);
+    w.env.ok(&[ix], &quorum);
+    w.seal();
+    let quorum: [&Keypair; 3] = [&w.m.admin, &w.m.g[0], &w.m.g[1]];
+
+    // A guardian, through replace_recovery or SetRecovery.
+    let ix = w.m.replace_recovery_ix(&admin, &g2, &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &quorum), verr::INVALID_INSTRUCTION);
+    let ix = w.m.propose_change_ix(&w.env, 6, &g2, &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
+
+    // A SetRecovery (change 0) whose key becomes a guardian (change 1) while
+    // it waits is refused when executed.
+    let protocol = w.m.protocol;
+    let k = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 6, &k, &[], None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, k]), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 1, &protocol)], &[]);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 0, &protocol)], &[]), verr::INVALID_INSTRUCTION);
+
+    // A guardian set (change 2) whose new key becomes the recovery key while
+    // it waits is refused when executed, and can't be proposed again.
+    let r = Keypair::new().pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, r]), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = w.m.replace_recovery_ix(&admin, &r, &[g0, g1]);
+    w.env.ok(&[ix], &quorum);
+    w.env.advance(3 * DAY);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 2, &protocol)], &[]), verr::INVALID_GUARDIANS);
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, r]), None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_GUARDIANS);
+
+    // Abdicated: fixed for good, even for the admin with a quorum.
+    let ab = w.m.vault_ix(17, &[6], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(admin, true),
+        AccountMeta::new_readonly(g0, true),
+        AccountMeta::new_readonly(g1, true),
+    ]);
+    w.env.ok(&[ab], &quorum);
+    let ix = w.m.replace_recovery_ix(&admin, &Keypair::new().pubkey(), &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &quorum), verr::ABDICATED);
+    let ix = w.m.replace_recovery_ix(&admin, &zero, &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &quorum), verr::ABDICATED, "nor removed");
+
+    // Registration naming a guardian as the recovery key; a fresh key is fine.
+    let harbor = Address::new_unique();
+    w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let mut ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
+    ix.data.extend_from_slice(g1.as_ref());
+    assert_eq!(w.env.fails(&[ix], &[]), verr::INVALID_GUARDIANS);
+    let mut ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
+    ix.data.extend_from_slice(Keypair::new().pubkey().as_ref());
+    w.env.ok(&[ix], &[]);
 }

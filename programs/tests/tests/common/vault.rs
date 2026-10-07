@@ -28,6 +28,7 @@ pub mod verr {
     pub const NOT_ADMIN: u32 = 8005;
     pub const NOT_GUARDIAN: u32 = 8006;
     pub const NO_QUORUM: u32 = 8007;
+    pub const INVALID_GUARDIANS: u32 = 8023;
     pub const WRONG_CALLER: u32 = 8009;
     pub const EXTENSION_NOT_ALLOWED: u32 = 8013;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;

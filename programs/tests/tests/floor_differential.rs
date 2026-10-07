@@ -12,8 +12,10 @@
 //! owner with a quorum), and its proposals displace the owner's, survive
 //! stops, and stop holding the slot once vetoed or expired.
 //!
-//! Depth: `BULKHEAD_FLOOR_STEPS` steps per seed (default 300) and
-//! `BULKHEAD_FLOOR_SEEDS` seeds (default 8).
+//! Depth: `BULKHEAD_FLOOR_STEPS` steps per seed (default 1,500) and
+//! `BULKHEAD_FLOOR_SEEDS` seeds (default 16). The rarest path the test
+//! requires (a quorum's snapshot restore) comes about once per 1,000 steps,
+//! so the default's 24,000 steps take each one about 20 times.
 
 mod common;
 
@@ -154,8 +156,8 @@ impl Model {
 
 #[test]
 fn floor_matches_the_core_model_on_random_sequences() {
-    let steps = env_u64("BULKHEAD_FLOOR_STEPS", 300);
-    let seeds = env_u64("BULKHEAD_FLOOR_SEEDS", 8);
+    let steps = env_u64("BULKHEAD_FLOOR_STEPS", 1_500);
+    let seeds = env_u64("BULKHEAD_FLOOR_SEEDS", 16);
     let mut totals = BTreeMap::<String, u64>::new();
     for seed in 0..seeds {
         for (k, v) in run(0xF100_0000 + seed, steps) {
@@ -170,7 +172,7 @@ fn floor_matches_the_core_model_on_random_sequences() {
             assert!(n > 0, "{op} never {side}: {totals:?}");
         }
     }
-    for path in ["displace:recovery_over_owner", "displace:dead_recovery", "by_recovery:proposed", "by_recovery:survived_stop"] {
+    for path in ["displace:recovery_over_owner", "displace:dead_recovery", "by_recovery:proposed", "by_recovery:survived_stop", "raise:past_recovery", "refused:recovery_is_guardian"] {
         assert!(totals.get(path).copied().unwrap_or(0) > 0, "{path} never happened: {totals:?}");
     }
 }
@@ -258,6 +260,8 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             }
         };
         let mut displaced = "";
+        // A refusal the test must see happen (counted when refused).
+        let mut refused_path = "";
         let (op, sent, model_ok): (&str, bool, bool);
 
         // While a restore is pending, approvals are tried often: it is the
@@ -266,10 +270,15 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         // Stopped with nothing pending, a fix is often proposed, so restores
         // (and their approvals) come up as often as the rarer ops allow.
         let stopped_idle = md.aborted && md.pending.is_none();
+        // A recovery proposal waiting on a live program: a stop is tried
+        // often, the only window in which it can be seen to survive one.
+        let recovery_live = !md.aborted && matches!(&md.pending, Some(pd) if pd.by_recovery);
         let choice = if restore_pending && rng.below(3) == 0 {
             13
         } else if stopped_idle && rng.below(3) == 0 {
             7
+        } else if recovery_live && rng.below(4) == 0 {
+            12
         } else {
             rng.below(18)
         };
@@ -315,8 +324,14 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                 let who = proposer(&mut rng, &md);
                 let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_DELAY, &Address::default(), &d.to_le_bytes(), None)], &[ok_[who]]);
                 let free = md.slot_free(who, now);
-                let valid = md.may_propose(who, SET_DELAY) && free.is_some() && (MIN_UPGRADE_DELAY_S..=MAX_UPGRADE_DELAY_S).contains(&d);
-                if valid {
+                let in_range = (MIN_UPGRADE_DELAY_S..=MAX_UPGRADE_DELAY_S).contains(&d);
+                // A raise past a recovery-key proposal leaves it in the slot.
+                let past_recovery = !md.by_recovery(who) && md.pending.as_ref().is_some_and(|pd| pd.by_recovery) && d >= md.delay;
+                let valid = md.may_propose(who, SET_DELAY) && in_range && (free.is_some() || past_recovery);
+                if valid && past_recovery {
+                    md.delay = d;
+                    displaced = "raise:past_recovery";
+                } else if valid {
                     displaced = free.unwrap();
                     // A raise applies at once; whatever it displaced is gone too.
                     md.pending = None;
@@ -580,12 +595,16 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             // none, else only the recovery key; never the owner.
             15 => {
                 let none = rng.below(6) == 0;
+                let to_guardian = !none && rng.below(8) == 0;
                 let to = rng.below(5) as usize;
-                let target = if none { Address::default() } else { ok_[to].pubkey() };
+                let target = if none { Address::default() } else if to_guardian { gk[rng.pick(&md.guardians)].pubkey() } else { ok_[to].pubkey() };
                 let who = proposer(&mut rng, &md);
                 let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_RECOVERY, &target, &[], None)], &[ok_[who]]);
                 let free = md.slot_free(who, now);
-                let valid = md.may_propose(who, SET_RECOVERY) && free.is_some() && (none || to != md.owner);
+                let valid = md.may_propose(who, SET_RECOVERY) && free.is_some() && !to_guardian && (none || to != md.owner);
+                if to_guardian && md.may_propose(who, SET_RECOVERY) && free.is_some() {
+                    refused_path = "refused:recovery_is_guardian";
+                }
                 if valid {
                     displaced = free.unwrap();
                     md.last_id += 1;
@@ -602,15 +621,19 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             16 => {
                 let who = if rng.below(4) != 0 { md.owner } else { rng.below(5) as usize };
                 let none = rng.below(6) == 0;
+                let to_guardian = !none && rng.below(8) == 0;
                 let to = rng.below(5) as usize;
-                let target = if none { Address::default() } else { ok_[to].pubkey() };
+                let target = if none { Address::default() } else if to_guardian { gk[rng.pick(&md.guardians)].pubkey() } else { ok_[to].pubkey() };
                 let signers: Vec<usize> = md.guardians.iter().copied().filter(|_| rng.below(3) != 0).collect();
                 let keys: Vec<Address> = signers.iter().map(|&k| gk[k].pubkey()).collect();
                 let mut kps: Vec<&Keypair> = vec![ok_[who]];
                 kps.extend(signers.iter().map(|&k| gk[k]));
                 let r = env.send(&[f.replace_recovery(&ok_[who].pubkey(), &target, &keys)], &kps);
                 let alive = md.alive(now);
-                let ok = who == md.owner && (none || to != md.owner) && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold);
+                let ok = who == md.owner && !to_guardian && (none || to != md.owner) && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold);
+                if to_guardian && who == md.owner && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold) {
+                    refused_path = "refused:recovery_is_guardian";
+                }
                 if ok {
                     md.recovery = if none { None } else { Some(to) };
                     if matches!(&md.pending, Some(pd) if pd.by_recovery || pd.kind == SET_RECOVERY) {
@@ -649,6 +672,9 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         *counts.entry(format!("{op}:{}", if sent { "ok" } else { "refused" })).or_default() += 1;
         if sent && !displaced.is_empty() {
             *counts.entry(displaced.to_string()).or_default() += 1;
+        }
+        if !sent && !refused_path.is_empty() {
+            *counts.entry(refused_path.to_string()).or_default() += 1;
         }
         env.next_slot();
 

@@ -48,7 +48,9 @@ fn parse(
             }
             Parsed::Asset(a)
         }
-        change::SET_GUARDIANS => Parsed::Guardians(parse_guardian_set(&mut r, &p.admin)?),
+        change::SET_GUARDIANS => {
+            Parsed::Guardians(parse_guardian_set(&mut r, &p.admin, &p.recovery)?)
+        }
         change::SET_ADMIN | change::SET_LIFEBOAT_DESTINATION => {
             // The admin is never a guardian (as `parse_guardian_set` keeps it
             // from the other side): an admin who is also a guardian would get
@@ -67,7 +69,7 @@ fn parse(
         }
         // The admin and the recovery key stay distinct, or recovery means nothing.
         change::SET_RECOVERY => {
-            if *target == p.admin {
+            if *target == p.admin || p.guardians[..p.guardian_count as usize].contains(target) {
                 return Err(VaultError::InvalidInstruction.into());
             }
             Parsed::Key(*target)
@@ -478,10 +480,17 @@ pub fn replace_recovery(
     let recovery = R::args(args).key()?;
     let mut p = load_protocol(program_id, acc(accounts, 0)?)?;
     require_admin(&p, acc(accounts, 1)?)?;
-    if recovery == p.admin {
+    if recovery == p.admin || p.guardians[..p.guardian_count as usize].contains(&recovery) {
         return Err(VaultError::InvalidInstruction.into());
     }
-    let alive = p.alive_mask(now()?);
+    // An abdicated recovery key is fixed for good, and nothing changes while
+    // the seal is under review: the same rules as `propose_change`.
+    if Abdications(p.abdications).is_abdicated(change::SET_RECOVERY) {
+        return Err(VaultError::Abdicated.into());
+    }
+    let t = now()?;
+    crate::genesis::require_no_seal_review(&p, t)?;
+    let alive = p.alive_mask(t);
     let signers = guardian_signers(&p, accounts.get(2..).unwrap_or(&[]))?;
     if !quorum(signers & alive, alive, p.threshold) {
         return Err(VaultError::NoQuorum.into());

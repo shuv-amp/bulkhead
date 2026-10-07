@@ -744,7 +744,8 @@ fn the_floor_recovery_key_can_only_replace_the_owner_or_itself() {
     // Owner and recovery stay distinct, in both directions.
     assert_eq!(env.fails(&[f.propose(&recovery.pubkey(), SET_OWNER, &recovery.pubkey(), &[], None)], &[&recovery]), err::INVALID_INSTRUCTION);
     assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_OWNER, &recovery.pubkey(), &[], None)], &[&p.owner]), err::INVALID_INSTRUCTION);
-    // Once a recovery key exists, only it replaces itself.
+    // Once a recovery key exists, the owner alone cannot replace it (only with
+    // a live quorum, `replace_recovery`); the key can propose its successor.
     let other = solana_keypair::Keypair::new().pubkey();
     assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_RECOVERY, &other, &[], None)], &[&p.owner]), err::NOT_OWNER);
     env.ok(&[f.propose(&recovery.pubkey(), SET_RECOVERY, &other, &[], None)], &[&recovery]);
@@ -1025,4 +1026,83 @@ fn a_stolen_floor_recovery_key_is_replaced_by_the_owner_with_a_live_quorum() {
     assert_eq!(env.fails(&[f.propose(&stolen.pubkey(), SET_OWNER, &thief, &[], None)], &[&stolen]), err::NOT_OWNER);
     env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
     assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref(), "the new recovery key");
+}
+
+#[test]
+fn a_recovery_key_proposal_does_not_block_a_delay_raise() {
+    // Raising the delay is a tightening the owner may always make at once. A
+    // recovery-key proposal holds the slot and the owner cannot cancel it, so
+    // the raise goes past it and leaves it pending; a lowering still waits.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let r = with_recovery(&mut env, &p);
+    let thief = Keypair::new().pubkey();
+    env.ok(&[f.propose(&r.pubkey(), SET_OWNER, &thief, &[], None)], &[&r]);
+    let before = read_config(&env, f);
+    let d = (10 * DAY).to_le_bytes();
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_DELAY, &thief, &d, None)], &[&p.owner]);
+    let c = read_config(&env, f);
+    assert_eq!(
+        (c.upgrade_delay_s, c.pending_kind, c.pending_id, c.pending_eta),
+        (10 * DAY, SET_OWNER, before.pending_id, before.pending_eta),
+        "raised; the recovery proposal and its eta untouched"
+    );
+    // Out of range is refused even past it; a lowering still needs the slot.
+    let too_high = (31 * DAY).to_le_bytes();
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_DELAY, &thief, &too_high, None)], &[&p.owner]), err::INVALID_DELAY);
+    let lower = (4 * DAY).to_le_bytes();
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_DELAY, &thief, &lower, None)], &[&p.owner]), err::PROPOSAL_PENDING);
+    // The recovery key itself never touches the delay.
+    let d = (20 * DAY).to_le_bytes();
+    assert_eq!(env.fails(&[f.propose(&r.pubkey(), SET_DELAY, &thief, &d, None)], &[&r]), err::NOT_OWNER);
+    // The recovery proposal still executes on its own schedule.
+    env.advance(3 * DAY + 1);
+    env.ok(&[f.execute_config()], &[]);
+    assert_eq!(floor_owner(&env, f), thief.to_bytes());
+}
+
+#[test]
+fn a_guardian_is_never_the_recovery_key() {
+    // A guardian that is also the recovery key would never veto its own new
+    // owner. Every way in is refused: replace_recovery, SetRecovery, a guardian
+    // set naming the recovery key (when proposed and again when executed), and
+    // registration.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let zero = solana_address::Address::default();
+    assert_eq!(env.fails(&[f.replace_recovery(&p.owner.pubkey(), &gs[2], &[gs[0], gs[1]])], &[&p.owner, &p.g[0], &p.g[1]]), err::INVALID_INSTRUCTION);
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_RECOVERY, &gs[2], &[], None)], &[&p.owner]), err::INVALID_INSTRUCTION);
+
+    // An owner's guardian set waits; meanwhile one of its keys becomes the
+    // recovery key (the owner with a quorum, at once). That does not void the
+    // owner's proposal, so it is checked again at execution.
+    let r = Keypair::new().pubkey();
+    let with_r = Floor::guardian_set(&[gs[0], gs[1], r], 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &with_r, None)], &[&p.owner]);
+    env.ok(&[f.replace_recovery(&p.owner.pubkey(), &r, &[gs[0], gs[1]])], &[&p.owner, &p.g[0], &p.g[1]]);
+    assert_eq!(read_config(&env, f).pending_kind, SET_GUARDIANS);
+    env.advance(3 * DAY + 1);
+    assert_eq!(env.fails(&[f.execute_config()], &[]), err::INVALID_GUARDIANS);
+    env.ok(&[f.cancel(&p.owner.pubkey())], &[&p.owner]);
+    env.next_slot();
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &with_r, None)], &[&p.owner]), err::INVALID_GUARDIANS);
+
+    // Registration naming a guardian as the recovery key; a fresh key is fine.
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 1024);
+    let f = Floor::new(env.floor, program);
+    let owner = Keypair::new().pubkey();
+    let (a, b) = (Keypair::new().pubkey(), Keypair::new().pubkey());
+    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    ix.data.extend_from_slice(b.as_ref());
+    assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_GUARDIANS);
+    let fresh = Keypair::new().pubkey();
+    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    ix.data.extend_from_slice(fresh.as_ref());
+    env.ok(&[ix], &[&team]);
+    assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref());
 }
