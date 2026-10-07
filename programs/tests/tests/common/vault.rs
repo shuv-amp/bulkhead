@@ -28,6 +28,7 @@ pub mod verr {
     pub const NOT_ADMIN: u32 = 8005;
     pub const NOT_GUARDIAN: u32 = 8006;
     pub const NO_QUORUM: u32 = 8007;
+    pub const INVALID_GUARDIANS: u32 = 8023;
     pub const WRONG_CALLER: u32 = 8009;
     pub const EXTENSION_NOT_ALLOWED: u32 = 8013;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;
@@ -554,6 +555,13 @@ impl Market {
             a.push(AccountMeta::new(v.vault, false));
         }
         self.vault_ix(12, &args, a)
+    }
+
+    /// The admin with a live guardian quorum replaces the recovery key.
+    pub fn replace_recovery_ix(&self, admin: &Address, recovery: &Address, guardians: &[Address]) -> Instruction {
+        let mut a = vec![AccountMeta::new(self.protocol, false), AccountMeta::new_readonly(*admin, true)];
+        a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        self.vault_ix(29, recovery.as_ref(), a)
     }
 
     pub fn unfreeze_ix(&self, scope_vault: Option<&VaultRef>, guardians: &[Address]) -> Instruction {

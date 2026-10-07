@@ -14,6 +14,8 @@
 //   approvals  a stolen admin key proposes first and takes the id the
 //              operators expected; approvals name what a change does, so the
 //              thief's change is vetoed and theirs is not (finding 61)
+//   recovery   the admin and a guardian quorum replace the recovery key; the
+//              guardian reports it (finding 62)
 //   cursor     the node forgets the guardian's last signature on a quiet
 //              protocol; the guardian reads on and freezes an attack (49).
 //              Needs a validator with a small ledger (the .sh does that).
@@ -193,6 +195,28 @@ const scenarios = {
     const ours = await read(first + 1n);
     if (ours.vetoed) fail(`the approved change ${first + 1n} was vetoed`);
     if (ours.target !== fresh) fail("read the wrong change");
+  },
+
+  async recovery() {
+    await startGuardian();
+    const admin = Keypair.load(`${dir}/keys/admin.json`);
+    const g1 = Keypair.load(`${dir}/keys/guardian1.json`);
+    const g2 = Keypair.load(`${dir}/keys/guardian2.json`);
+    const fresh = Keypair.generate().address;
+    // The admin alone is refused; with two live guardians it lands.
+    try {
+      await send(rpc, admin, [vc.replaceRecovery(admin.publicKey, fresh, [])]);
+      fail("the admin alone replaced the recovery key");
+    } catch (e) {
+      if (!/NoQuorum|0x1f47|8007/.test(`${e.message} ${JSON.stringify(e.rpcError ?? {})}`)) fail(`refused for another reason: ${e.message.slice(0, 200)}`);
+    }
+    await send(rpc, admin, [vc.replaceRecovery(admin.publicKey, fresh, [g1.publicKey, g2.publicKey])], [g1, g2]);
+    const t0 = now();
+    while (!/recovery key was replaced/.test(log())) {
+      if (now() - t0 > 30) fail("the guardian did not report the replaced recovery key within 30 s");
+      await sleep(500);
+    }
+    if (!log().includes(fresh)) fail("the report does not name the new recovery key");
   },
 
   async cursor() {

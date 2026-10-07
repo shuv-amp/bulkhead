@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Guardian scenarios on a real validator (cloud/e2e/guardian-scenarios.mjs):
 # each scenario gets a fresh validator with the e2e world.
-#   cloud/e2e/guardian-scenarios.sh                    # hold restart failover approvals
+#   cloud/e2e/guardian-scenarios.sh                    # hold restart failover approvals recovery
 #   cloud/e2e/guardian-scenarios.sh cursor             # ~10 min of quiet first
 # Requires: the Agave CLI (solana-test-validator), Node >= 20, built programs.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH="$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH"
 scenarios=("$@")
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(hold restart failover approvals)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(hold restart failover approvals recovery)
 E="$(pwd)/target/e2e-scenarios"
 PORT="${PORT:-18699}"
 RPC="http://127.0.0.1:$PORT"

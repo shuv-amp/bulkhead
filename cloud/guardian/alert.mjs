@@ -11,6 +11,7 @@
 /** Warnings that need a person; any `error` line and any action do too. */
 const URGENT_WARNINGS = [
   /moved tokens into the lifeboat/,
+  /recovery key was replaced/,
   /no longer a live guardian/,
   /no longer has the cursor/,
   /floor not ready/,

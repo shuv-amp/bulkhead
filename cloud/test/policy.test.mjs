@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
-import { u64le, i64le, concat, key } from "../lib/solana.mjs";
+import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
 const worst1h = 400_000n * USDC; // 10M vault, default limits (golden G-6)
@@ -602,4 +602,11 @@ test("incident hold: a quorum unfreeze ends it; a freeze that runs out does not"
   openIncident(s, 70_000);
   assess(s, { kind: "unfrozen", scope: 1 }, { now: 70_100 });
   assert.equal(s.incidentSince, 70_000);
+});
+
+test("a replaced recovery key is decoded from both programs", () => {
+  const k = new Uint8Array(32).fill(7);
+  assert.deepEqual(decode({ name: "vault:recovery_replaced", fields: [k, Uint8Array.of(3)] }), { kind: "recovery_replaced", recovery: b58encodeForTest(k) });
+  const prog = new Uint8Array(32).fill(1);
+  assert.deepEqual(decode({ name: "floor:recovery_replaced", fields: [prog, k, Uint8Array.of(3)] }), { kind: "recovery_replaced", program: b58encodeForTest(prog), recovery: b58encodeForTest(k) });
 });

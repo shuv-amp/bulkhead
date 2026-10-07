@@ -47,6 +47,10 @@ export class VaultClient {
   vetoChange(change, guardian) {
     return this.ix(19, new Uint8Array(0), [r(this.protocol), w(change), s(guardian)]);
   }
+  /** The admin with a live guardian quorum replaces the recovery key at once (all-zero: none). */
+  replaceRecovery(admin, recovery, guardians) {
+    return this.ix(29, key(recovery), [w(this.protocol), s(admin), ...guardians.map((g) => s(g))]);
+  }
   vetoExit(vault, guardian) {
     return this.ix(28, new Uint8Array(0), [r(this.protocol), w(vault), s(guardian)]);
   }
@@ -138,11 +142,11 @@ export class FloorClient {
     if (kind === 1 || kind === 2) a.push(r(target));
     return this.ix(4, concat(Uint8Array.of(kind), key(target), payload), a);
   }
-  /** Anyone executes a pending upgrade or restore once it is allowed. */
   /** Execute a pending SetGuardians / SetOwner / SetDelay / SetRecovery (anyone). */
   executeConfig() {
     return this.ix(7, new Uint8Array(0), [w(this.config)]);
   }
+  /** Anyone executes a pending upgrade or restore once it is allowed; the spill is the owner. */
   executeUpgrade(buffer, spill) {
     return this.ix(7, new Uint8Array(0), [
       w(this.config), w(this.programdata), w(this.protected), w(buffer), w(spill),
@@ -158,5 +162,9 @@ export class FloorClient {
   }
   heartbeat(guardian) {
     return this.ix(9, new Uint8Array(0), [w(this.config), s(guardian)]);
+  }
+  /** The owner with a live guardian quorum replaces the recovery key at once (all-zero: none). */
+  replaceRecovery(owner, recovery, guardians) {
+    return this.ix(12, key(recovery), [w(this.config), s(owner), ...guardians.map((g) => s(g))]);
   }
 }

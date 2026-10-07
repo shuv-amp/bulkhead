@@ -13,7 +13,7 @@ use bulkhead_core::classify::{
     classify_asset, classify_delay, classify_limits, AssetConfig, Class, LimitConfig,
 };
 use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
-use bulkhead_core::governance::{can_execute, schedule, Abdications, Schedule};
+use bulkhead_core::governance::{can_execute, quorum, schedule, Abdications, Schedule};
 use bulkhead_core::limiter::{config_is_valid, params_from_config, rescale_windows};
 
 // A short-lived value on the stack; no allocator exists to box the guardian set.
@@ -48,7 +48,9 @@ fn parse(
             }
             Parsed::Asset(a)
         }
-        change::SET_GUARDIANS => Parsed::Guardians(parse_guardian_set(&mut r, &p.admin)?),
+        change::SET_GUARDIANS => {
+            Parsed::Guardians(parse_guardian_set(&mut r, &p.admin, &p.recovery)?)
+        }
         change::SET_ADMIN | change::SET_LIFEBOAT_DESTINATION => {
             // The admin is never a guardian (as `parse_guardian_set` keeps it
             // from the other side): an admin who is also a guardian would get
@@ -67,7 +69,7 @@ fn parse(
         }
         // The admin and the recovery key stay distinct, or recovery means nothing.
         change::SET_RECOVERY => {
-            if *target == p.admin {
+            if *target == p.admin || p.guardians[..p.guardian_count as usize].contains(target) {
                 return Err(VaultError::InvalidInstruction.into());
             }
             Parsed::Key(*target)
@@ -456,5 +458,49 @@ pub fn cancel_change(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     c.vetoed = true; // a withdrawn change can never execute
     save(&mut accounts[1], |d| c.store(d))?;
     sys::event(&[b"vault:change_cancelled", &c.id.to_le_bytes()]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 29. replace_recovery (the admin with a live guardian quorum, at once)
+// ---------------------------------------------------------------------------
+// Accounts: 0 protocol [w], 1 admin [s], 2.. guardians [s] forming a live quorum.
+// Data: the new recovery key[32] (all zero: none).
+//
+// A stolen recovery key can only propose, but it can do that forever: each
+// new admin it proposes stales the admin's own rotations, the guardians must
+// veto every one, and nothing else could replace it. The admin and a live
+// quorum together can; together they already decide more than this
+// (`abdicate`), and neither can alone.
+pub fn replace_recovery(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &[u8],
+) -> ProgramResult {
+    let recovery = R::args(args).key()?;
+    let mut p = load_protocol(program_id, acc(accounts, 0)?)?;
+    require_admin(&p, acc(accounts, 1)?)?;
+    if recovery == p.admin || p.guardians[..p.guardian_count as usize].contains(&recovery) {
+        return Err(VaultError::InvalidInstruction.into());
+    }
+    // An abdicated recovery key is fixed for good, and nothing changes while
+    // the seal is under review: the same rules as `propose_change`.
+    if Abdications(p.abdications).is_abdicated(change::SET_RECOVERY) {
+        return Err(VaultError::Abdicated.into());
+    }
+    let t = now()?;
+    crate::genesis::require_no_seal_review(&p, t)?;
+    let alive = p.alive_mask(t);
+    let signers = guardian_signers(&p, accounts.get(2..).unwrap_or(&[]))?;
+    if !quorum(signers & alive, alive, p.threshold) {
+        return Err(VaultError::NoQuorum.into());
+    }
+    p.recovery = recovery;
+    // What the replaced key proposed (a new admin, a new recovery key) and any
+    // pending new recovery key can no longer execute (`ChangeStale`).
+    p.versions[1] = p.versions[1].wrapping_add(1);
+    p.versions[4] = p.versions[4].wrapping_add(1);
+    save(&mut accounts[0], |d| p.store(d))?;
+    sys::event(&[b"vault:recovery_replaced", &recovery, &[signers & alive]]);
     Ok(())
 }

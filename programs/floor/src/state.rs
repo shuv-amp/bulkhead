@@ -70,7 +70,9 @@ pub struct Config {
     pub pending_payload: [u8; MAX_PAYLOAD],
     /// The recovery key (all zero: none). It may only propose a new owner or a
     /// new recovery key; the owner cannot cancel those, and a stop does not
-    /// clear them (docs/15, A4). In the old padding.
+    /// clear them (docs/15, A4). Once vetoed or expired they no longer hold
+    /// the slot; the owner with a live guardian quorum replaces the key at once
+    /// (`replace_recovery`). In the old padding.
     pub recovery: [u8; 32],
     /// 1 when the pending proposal came from the recovery key.
     pub pending_by_recovery: u8,

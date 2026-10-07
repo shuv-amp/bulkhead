@@ -88,6 +88,7 @@ pub mod ix {
     pub const HEARTBEAT: u8 = 9;
     pub const EJECT: u8 = 10;
     pub const CANCEL: u8 = 11;
+    pub const REPLACE_RECOVERY: u8 = 12;
 }
 
 /// Event tags (first field of every `Program data:` event).
@@ -105,6 +106,7 @@ pub mod ev {
     pub const EJECTED: &[u8] = b"floor:ejected";
     pub const CANCELLED: &[u8] = b"floor:cancelled";
     pub const DELAY_RAISED: &[u8] = b"floor:delay_raised";
+    pub const RECOVERY_REPLACED: &[u8] = b"floor:recovery_replaced";
 }
 
 pub fn process_instruction(
@@ -126,6 +128,7 @@ pub fn process_instruction(
         ix::HEARTBEAT => heartbeat(program_id, accounts),
         ix::EJECT => eject(program_id, accounts, args),
         ix::CANCEL => cancel(program_id, accounts),
+        ix::REPLACE_RECOVERY => replace_recovery(program_id, accounts, args),
         _ => Err(FloorError::InvalidInstruction.into()),
     }
 }
@@ -306,7 +309,11 @@ fn check_program_accounts(
 type GuardianSet = ([[u8; 32]; MAX_GUARDIANS], u8, u8, i64, usize);
 
 /// Parses `[count u8][count × 32][threshold u8][interval i64]`.
-fn parse_guardian_set(args: &[u8], owner: &[u8; 32]) -> Result<GuardianSet, ProgramError> {
+fn parse_guardian_set(
+    args: &[u8],
+    owner: &[u8; 32],
+    recovery: &[u8; 32],
+) -> Result<GuardianSet, ProgramError> {
     let count = *args.first().ok_or(FloorError::InvalidInstruction)? as usize;
     if !(MIN_GUARDIAN_THRESHOLD as usize..=MAX_GUARDIANS).contains(&count) {
         return Err(FloorError::InvalidGuardians.into());
@@ -319,7 +326,7 @@ fn parse_guardian_set(args: &[u8], owner: &[u8; 32]) -> Result<GuardianSet, Prog
     for i in 0..count {
         let mut k = [0u8; 32];
         k.copy_from_slice(&args[1 + 32 * i..1 + 32 * i + 32]);
-        if k == [0; 32] || &k == owner || g[..i].contains(&k) {
+        if k == [0; 32] || &k == owner || &k == recovery || g[..i].contains(&k) {
             return Err(FloorError::InvalidGuardians.into());
         }
         g[i] = k;
@@ -385,11 +392,14 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
         return Err(FloorError::InvalidGuardians.into());
     }
     let (guardians, count, threshold, interval, used) =
-        parse_guardian_set(args.get(32..).unwrap_or(&[]), &owner)?;
+        parse_guardian_set(args.get(32..).unwrap_or(&[]), &owner, &[0; 32])?;
     let delay = i64_arg(args, 32 + used)?;
     // Optional recovery key after the delay (absent or all zero: none).
     let recovery = k32_arg(args, 32 + used + 8).unwrap_or([0; 32]);
-    if recovery == owner {
+    // No key holds two roles: a guardian that is also the recovery key would
+    // never veto its own new owner (docs/09, finding 62).
+    if recovery == owner || (recovery != [0; 32] && guardians[..count as usize].contains(&recovery))
+    {
         return Err(FloorError::InvalidGuardians.into());
     }
     check_delay(delay)?;
@@ -737,8 +747,27 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
     } else if key(signer) != c.owner || (k == kind::SET_RECOVERY && c.recovery != [0; 32]) {
         return Err(FloorError::NotOwner.into());
     }
+    let t = now()?;
+    // Raising the delay is a tightening: instant. A recovery-key proposal in
+    // the slot, which the owner cannot cancel, must not keep the owner from
+    // it (docs/09, finding 62); it stays in the slot.
+    if k == kind::SET_DELAY && !by_recovery && c.pending_by_recovery == 1 {
+        let d = i64_arg(args.get(33..).unwrap_or(&[]), 0)?;
+        check_delay(d)?;
+        if d >= c.upgrade_delay_s {
+            c.upgrade_delay_s = d;
+            save_config(&mut accounts[0], &c)?;
+            sys::event(&[ev::DELAY_RAISED, &c.program, &d.to_le_bytes()]);
+            return Ok(());
+        }
+    }
     if c.pending_kind != kind::NONE {
-        if by_recovery && c.pending_by_recovery == 0 {
+        // A recovery proposal that can never execute (vetoed or expired) no
+        // longer holds the slot: only the recovery key may cancel it, so it
+        // would otherwise block every owner proposal for good.
+        let dead_recovery =
+            c.pending_by_recovery == 1 && (c.pending_vetoed != 0 || t >= c.pending_expires);
+        if (by_recovery && c.pending_by_recovery == 0) || dead_recovery {
             c.clear_pending();
         } else {
             return Err(FloorError::ProposalPending.into());
@@ -749,7 +778,6 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
     if payload.len() > MAX_PAYLOAD {
         return Err(FloorError::InvalidInstruction.into());
     }
-    let t = now()?;
     match k {
         kind::UPGRADE => {
             if c.status != STATUS_LIVE {
@@ -774,12 +802,12 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
             }
         }
         kind::SET_RECOVERY => {
-            if target == c.owner {
+            if target == c.owner || c.guardians[..c.guardian_count as usize].contains(&target) {
                 return Err(FloorError::InvalidInstruction.into());
             }
         }
         kind::SET_GUARDIANS => {
-            parse_guardian_set(payload, &c.owner)?;
+            parse_guardian_set(payload, &c.owner, &c.recovery)?;
         }
         kind::SET_DELAY => {
             let d = i64_arg(payload, 0)?;
@@ -1046,7 +1074,8 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
             payload[..len].copy_from_slice(&c.pending_payload[..len]);
             match c.pending_kind {
                 kind::SET_GUARDIANS => {
-                    let (g, n, th, interval, _) = parse_guardian_set(&payload[..len], &c.owner)?;
+                    let (g, n, th, interval, _) =
+                        parse_guardian_set(&payload[..len], &c.owner, &c.recovery)?;
                     c.guardians = g;
                     c.guardian_count = n;
                     c.threshold = th;
@@ -1062,7 +1091,9 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
                     c.owner = c.pending_target;
                 }
                 kind::SET_RECOVERY => {
-                    if c.pending_target == c.owner {
+                    if c.pending_target == c.owner
+                        || c.guardians[..c.guardian_count as usize].contains(&c.pending_target)
+                    {
                         return Err(FloorError::InvalidInstruction.into());
                     }
                     c.recovery = c.pending_target;
@@ -1229,5 +1260,52 @@ fn cancel(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     c.clear_pending();
     save_config(&mut accounts[0], &c)?;
     sys::event(&[ev::CANCELLED, &c.program, &id.to_le_bytes()]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 12. Replace the recovery key (the owner with a live guardian quorum, at once)
+// ---------------------------------------------------------------------------
+// Accounts: 0 config [w], 1 owner [s], 2.. guardians [s] forming a live quorum.
+// Data: the new recovery key[32] (all zero: none).
+//
+// A stolen recovery key can only propose, but it can do that forever: each
+// proposal takes the slot from the owner's, and nothing else could replace
+// it. The owner and a live quorum together can, at once (a delayed proposal
+// would sit in the slot the stolen key takes). Together they already decide
+// more than this (a guardian's stop and a quorum-approved restore install
+// code at once); neither can alone.
+fn replace_recovery(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &[u8],
+) -> ProgramResult {
+    let mut c = load_config(program_id, acc(accounts, 0)?)?;
+    let owner = acc(accounts, 1)?;
+    require_signer(owner)?;
+    if key(owner) != c.owner {
+        return Err(FloorError::NotOwner.into());
+    }
+    let recovery = k32_arg(args, 0)?;
+    if recovery == c.owner || c.guardians[..c.guardian_count as usize].contains(&recovery) {
+        return Err(FloorError::InvalidInstruction.into());
+    }
+    let alive = c.alive_mask(now()?);
+    let signers = guardian_signers(&c, accounts.get(2..).unwrap_or(&[]))?;
+    if !quorum(signers & alive, alive, c.threshold) {
+        return Err(FloorError::NoQuorum.into());
+    }
+    c.recovery = recovery;
+    // What the replaced key proposed, or a pending new recovery key, is void.
+    if c.pending_by_recovery == 1 || c.pending_kind == kind::SET_RECOVERY {
+        c.clear_pending();
+    }
+    save_config(&mut accounts[0], &c)?;
+    sys::event(&[
+        ev::RECOVERY_REPLACED,
+        &c.program,
+        &recovery,
+        &[signers & alive],
+    ]);
     Ok(())
 }

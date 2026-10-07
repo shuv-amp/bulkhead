@@ -204,7 +204,8 @@ pub struct Protocol {
     pub versions: [u32; 5],
     /// The recovery key (all zero: none). It may only propose a new admin or
     /// a new recovery key; each waits the delay, any guardian can veto it, and
-    /// the admin cannot cancel it (docs/15, A4). In the old padding.
+    /// the admin cannot cancel it (docs/15, A4). The admin with a live guardian
+    /// quorum replaces it at once (`replace_recovery`). In the old padding.
     pub recovery: [u8; 32],
 }
 

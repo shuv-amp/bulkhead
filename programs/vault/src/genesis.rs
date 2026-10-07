@@ -55,11 +55,14 @@ pub fn register_protocol(
     if admin == [0; 32] {
         return Err(VaultError::InvalidGuardians.into());
     }
-    let (guardians, count, threshold, interval) = parse_guardian_set(&mut r, &admin)?;
+    let (guardians, count, threshold, interval) = parse_guardian_set(&mut r, &admin, &[0; 32])?;
     let loosen_delay = r.i64()?;
     let destination = r.key()?;
     let recovery = r.key().unwrap_or([0; 32]);
-    if recovery == admin {
+    // No key holds two roles: a guardian that is also the recovery key would
+    // never veto its own new admin (docs/09, finding 62).
+    if recovery == admin || (recovery != [0; 32] && guardians[..count as usize].contains(&recovery))
+    {
         return Err(VaultError::InvalidGuardians.into());
     }
     if loosen_delay < MIN_LOOSEN_DELAY_S {

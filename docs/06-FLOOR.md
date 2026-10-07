@@ -93,7 +93,7 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 1 | `stage_abort` | anyone | Accepts a frozen buffer holding exactly a canonical abort binary that fits the programdata account |
 | 2 | `pin_snapshot` | anyone | Accepts a frozen buffer byte-identical to the live code (`sol_memcmp_`) |
 | 3 | `abort` | a live guardian; the owner only while fewer than a quorum of guardians are live | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Never fails because of the snapshot. Cancels any pending proposal. |
-| 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. Raising the delay is instant; everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop. |
+| 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. Raising the delay is instant, even past a recovery proposal in the slot (which stays); everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop; once vetoed or expired it no longer holds the slot. |
 | 5 | `veto` | any live guardian | Blocks the pending proposal. Data may be empty, or the proposal id (u64). A named id that is not the one pending is refused, so a retried veto cannot hit a proposal that replaced it. |
 | 6 | `approve` | live guardians | Approves the pending Restore (its exact buffer) |
 | 7 | `execute` | anyone | Runs the pending proposal once allowed. A Restore runs at once with a quorum's approval. |
@@ -101,6 +101,7 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 9 | `heartbeat` | a live guardian | Keeps it alive; a dead guardian can't revive itself |
 | 10 | `eject(target)` | a live quorum of the *other* guardians | Removes a guardian at once; never below the threshold |
 | 11 | `cancel` | whoever proposed it (owner or recovery key) | Withdraws the pending proposal |
+| 12 | `replace_recovery(key)` | the owner + a live guardian quorum | Replaces the recovery key at once (all zero: none; never the owner or a guardian) and voids its pending proposal (`09`, finding 62). No key is both a guardian and the recovery key, at registration, in a guardian set, or through SetRecovery |
 
 ## 7. Measured
 

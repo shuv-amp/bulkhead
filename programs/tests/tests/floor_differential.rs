@@ -7,10 +7,15 @@
 //! `upgrade_eta`). After every step the test compares whether the instruction
 //! succeeded, every config field the model tracks, and the live program bytes.
 //! Signers include stale guardians, keys that were never guardians, a former
-//! owner, and vetoes naming the wrong proposal or a malformed id.
+//! owner, and vetoes naming the wrong proposal or a malformed id. A recovery
+//! key comes and goes (proposed by the owner, by itself, or replaced by the
+//! owner with a quorum), and its proposals displace the owner's, survive
+//! stops, and stop holding the slot once vetoed or expired.
 //!
-//! Depth: `BULKHEAD_FLOOR_STEPS` steps per seed (default 300) and
-//! `BULKHEAD_FLOOR_SEEDS` seeds (default 8).
+//! Depth: `BULKHEAD_FLOOR_STEPS` steps per seed (default 1,500) and
+//! `BULKHEAD_FLOOR_SEEDS` seeds (default 16). The rarest path the test
+//! requires (a quorum's snapshot restore) comes about once per 1,000 steps,
+//! so the default's 24,000 steps take each one about 20 times.
 
 mod common;
 
@@ -28,6 +33,7 @@ const RESTORE: u8 = 2;
 const SET_GUARDIANS: u8 = 4;
 const SET_OWNER: u8 = 5;
 const SET_DELAY: u8 = 6;
+const SET_RECOVERY: u8 = 7;
 
 struct Rng(u64);
 impl Rng {
@@ -66,6 +72,8 @@ struct Pending {
     target: [u8; 32],
     eta: i64,
     expires: i64,
+    /// Proposed by the recovery key.
+    by_recovery: bool,
     /// What executing it changes.
     effect: Effect,
 }
@@ -76,12 +84,14 @@ enum Effect {
     Guardians(Vec<usize>, u8, i64),
     Owner(usize),
     Delay(i64),
+    Recovery(Option<usize>),
 }
 
-/// The model of one Floor config. Guardians and owners are indices into
-/// fixed key pools.
+/// The model of one Floor config. Guardians are indices into one key pool;
+/// the owner and the recovery key into another (`ok_`).
 struct Model {
     owner: usize,
+    recovery: Option<usize>,
     guardians: Vec<usize>,
     heartbeats: Vec<i64>,
     threshold: u8,
@@ -112,6 +122,29 @@ impl Model {
     fn live_guardian(&self, key: usize, now: i64) -> Option<usize> {
         self.index(key).filter(|&i| self.alive(now) & (1 << i) != 0)
     }
+    fn by_recovery(&self, who: usize) -> bool {
+        self.recovery == Some(who)
+    }
+    /// The recovery key proposes only a new owner or recovery key; the owner
+    /// anything, but a new recovery key only while there is none.
+    fn may_propose(&self, who: usize, kind: u8) -> bool {
+        if self.by_recovery(who) {
+            kind == SET_OWNER || kind == SET_RECOVERY
+        } else {
+            who == self.owner && (kind != SET_RECOVERY || self.recovery.is_none())
+        }
+    }
+    /// Whether the slot takes a proposal from `who`: empty, or holding an
+    /// owner proposal the recovery key displaces, or a recovery proposal that
+    /// can never execute (vetoed or expired). `Some` names the path taken.
+    fn slot_free(&self, who: usize, now: i64) -> Option<&'static str> {
+        match &self.pending {
+            None => Some(""),
+            Some(pd) if self.by_recovery(who) && !pd.by_recovery => Some("displace:recovery_over_owner"),
+            Some(pd) if pd.by_recovery && (pd.vetoed || now >= pd.expires) => Some("displace:dead_recovery"),
+            Some(_) => None,
+        }
+    }
     fn bits(&self, keys: &[usize]) -> Option<u8> {
         let mut b = 0u8;
         for k in keys {
@@ -123,8 +156,8 @@ impl Model {
 
 #[test]
 fn floor_matches_the_core_model_on_random_sequences() {
-    let steps = env_u64("BULKHEAD_FLOOR_STEPS", 300);
-    let seeds = env_u64("BULKHEAD_FLOOR_SEEDS", 8);
+    let steps = env_u64("BULKHEAD_FLOOR_STEPS", 1_500);
+    let seeds = env_u64("BULKHEAD_FLOOR_SEEDS", 16);
     let mut totals = BTreeMap::<String, u64>::new();
     for seed in 0..seeds {
         for (k, v) in run(0xF100_0000 + seed, steps) {
@@ -133,11 +166,14 @@ fn floor_matches_the_core_model_on_random_sequences() {
     }
     println!("floor-vs-model: {} steps; {totals:?}", steps * seeds);
     // Coverage: each instruction both succeeded and was refused.
-    for op in ["heartbeat", "veto", "propose_delay", "propose_guardians", "propose_owner", "propose_upgrade", "propose_restore", "execute", "cancel", "eject", "abort", "approve", "restore_snapshot", "stage_abort", "pin_snapshot"] {
+    for op in ["heartbeat", "veto", "propose_delay", "propose_guardians", "propose_owner", "propose_upgrade", "propose_restore", "propose_recovery", "execute", "cancel", "eject", "abort", "approve", "restore_snapshot", "stage_abort", "pin_snapshot", "replace_recovery"] {
         for side in ["ok", "refused"] {
             let n = totals.get(&format!("{op}:{side}")).copied().unwrap_or(0);
             assert!(n > 0, "{op} never {side}: {totals:?}");
         }
+    }
+    for path in ["displace:recovery_over_owner", "displace:dead_recovery", "by_recovery:proposed", "by_recovery:survived_stop", "raise:past_recovery", "refused:recovery_is_guardian"] {
+        assert!(totals.get(path).copied().unwrap_or(0) > 0, "{path} never happened: {totals:?}");
     }
 }
 
@@ -156,12 +192,17 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
     for k in &extra {
         env.fund(k);
     }
-    let other_owner = Keypair::new();
-    env.fund(&other_owner);
-    let ok_: Vec<&Keypair> = vec![&p.owner, &other_owner];
+    // The owner and recovery pool: 0 is the registered owner; any of them may
+    // become the owner or the recovery key.
+    let others = [Keypair::new(), Keypair::new(), Keypair::new(), Keypair::new()];
+    for k in &others {
+        env.fund(k);
+    }
+    let ok_: Vec<&Keypair> = std::iter::once(&p.owner).chain(others.iter()).collect();
 
     let mut md = Model {
         owner: 0,
+        recovery: None,
         guardians: vec![0, 1, 2],
         heartbeats: vec![env.time; 3],
         threshold: 2,
@@ -210,12 +251,37 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             }
         }
         let at = format!("seed {seed} step {step}");
+        // A proposer: mostly the owner, often the recovery key, sometimes anyone.
+        let proposer = |rng: &mut Rng, md: &Model| -> usize {
+            match rng.below(10) {
+                0..=5 => md.owner,
+                6..=7 => md.recovery.unwrap_or(md.owner),
+                _ => rng.below(5) as usize,
+            }
+        };
+        let mut displaced = "";
+        // A refusal the test must see happen (counted when refused).
+        let mut refused_path = "";
         let (op, sent, model_ok): (&str, bool, bool);
 
         // While a restore is pending, approvals are tried often: it is the
         // only window where one can succeed, and it is short.
         let restore_pending = matches!(&md.pending, Some(pd) if pd.kind == RESTORE);
-        let choice = if restore_pending && rng.below(3) == 0 { 13 } else { rng.below(16) };
+        // Stopped with nothing pending, a fix is often proposed, so restores
+        // (and their approvals) come up as often as the rarer ops allow.
+        let stopped_idle = md.aborted && md.pending.is_none();
+        // A recovery proposal waiting on a live program: a stop is tried
+        // often, the only window in which it can be seen to survive one.
+        let recovery_live = !md.aborted && matches!(&md.pending, Some(pd) if pd.by_recovery);
+        let choice = if restore_pending && rng.below(3) == 0 {
+            13
+        } else if stopped_idle && rng.below(3) == 0 {
+            7
+        } else if recovery_live && rng.below(4) == 0 {
+            12
+        } else {
+            rng.below(18)
+        };
         match choice {
             // Heartbeat, by a live, stale or unregistered key.
             0..=2 => {
@@ -255,16 +321,26 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             // Propose a delay: lower waits the delay, higher applies at once.
             4 => {
                 let d = rng.pick(&[MIN_UPGRADE_DELAY_S - 1, MIN_UPGRADE_DELAY_S, 4 * DAY, 10 * DAY, MAX_UPGRADE_DELAY_S, MAX_UPGRADE_DELAY_S + 1]);
-                let who = rng.below(2) as usize;
+                let who = proposer(&mut rng, &md);
                 let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_DELAY, &Address::default(), &d.to_le_bytes(), None)], &[ok_[who]]);
-                let valid = who == md.owner && md.pending.is_none() && (MIN_UPGRADE_DELAY_S..=MAX_UPGRADE_DELAY_S).contains(&d);
-                if valid {
+                let free = md.slot_free(who, now);
+                let in_range = (MIN_UPGRADE_DELAY_S..=MAX_UPGRADE_DELAY_S).contains(&d);
+                // A raise past a recovery-key proposal leaves it in the slot.
+                let past_recovery = !md.by_recovery(who) && md.pending.as_ref().is_some_and(|pd| pd.by_recovery) && d >= md.delay;
+                let valid = md.may_propose(who, SET_DELAY) && in_range && (free.is_some() || past_recovery);
+                if valid && past_recovery {
+                    md.delay = d;
+                    displaced = "raise:past_recovery";
+                } else if valid {
+                    displaced = free.unwrap();
+                    // A raise applies at once; whatever it displaced is gone too.
+                    md.pending = None;
                     if d >= md.delay {
                         md.delay = d;
                     } else {
                         md.last_id += 1;
                         let eta = upgrade_eta(now, md.delay);
-                        md.pending = Some(Pending { kind: SET_DELAY, id: md.last_id, vetoed: false, approvals: 0, target: [0; 32], eta, expires: eta + CHANGE_EXPIRY_S, effect: Effect::Delay(d) });
+                        md.pending = Some(Pending { kind: SET_DELAY, id: md.last_id, vetoed: false, approvals: 0, target: [0; 32], eta, expires: eta + CHANGE_EXPIRY_S, by_recovery: false, effect: Effect::Delay(d) });
                     }
                 }
                 (op, sent, model_ok) = ("propose_delay", r.is_ok(), valid);
@@ -291,48 +367,57 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     keys[0] = ok_[md.owner].pubkey();
                 }
                 let payload = Floor::guardian_set(&keys, th, interval);
-                let who = rng.below(2) as usize;
+                let who = proposer(&mut rng, &md);
                 let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_GUARDIANS, &Address::default(), &payload, None)], &[ok_[who]]);
-                let valid = who == md.owner
-                    && md.pending.is_none()
+                let free = md.slot_free(who, now);
+                let valid = md.may_propose(who, SET_GUARDIANS)
+                    && free.is_some()
                     && !duplicate
                     && !with_owner
                     && th >= 2
                     && th as usize <= n
                     && (MIN_HEARTBEAT_INTERVAL_S..=MAX_HEARTBEAT_INTERVAL_S).contains(&interval);
                 if valid {
+                    displaced = free.unwrap();
                     md.last_id += 1;
                     let eta = upgrade_eta(now, md.delay);
-                    md.pending = Some(Pending { kind: SET_GUARDIANS, id: md.last_id, vetoed: false, approvals: 0, target: [0; 32], eta, expires: eta + CHANGE_EXPIRY_S, effect: Effect::Guardians(set, th, interval) });
+                    md.pending = Some(Pending { kind: SET_GUARDIANS, id: md.last_id, vetoed: false, approvals: 0, target: [0; 32], eta, expires: eta + CHANGE_EXPIRY_S, by_recovery: false, effect: Effect::Guardians(set, th, interval) });
                 }
                 (op, sent, model_ok) = ("propose_guardians", r.is_ok(), valid);
             }
-            // Propose a new owner.
+            // Propose a new owner (by the owner or the recovery key); never the
+            // recovery key itself or a guardian.
             6 => {
-                let to = rng.below(2) as usize;
-                let who = rng.below(2) as usize;
-                let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_OWNER, &ok_[to].pubkey(), &[], None)], &[ok_[who]]);
-                let valid = who == md.owner && md.pending.is_none();
+                let to_guardian = rng.below(8) == 0;
+                let to = rng.below(5) as usize;
+                let target = if to_guardian { gk[md.guardians[0]].pubkey() } else { ok_[to].pubkey() };
+                let who = proposer(&mut rng, &md);
+                let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_OWNER, &target, &[], None)], &[ok_[who]]);
+                let free = md.slot_free(who, now);
+                let valid = md.may_propose(who, SET_OWNER) && free.is_some() && !to_guardian && md.recovery != Some(to);
                 if valid {
+                    displaced = free.unwrap();
                     md.last_id += 1;
                     let eta = upgrade_eta(now, md.delay);
-                    md.pending = Some(Pending { kind: SET_OWNER, id: md.last_id, vetoed: false, approvals: 0, target: ok_[to].pubkey().to_bytes(), eta, expires: eta + CHANGE_EXPIRY_S, effect: Effect::Owner(to) });
+                    md.pending = Some(Pending { kind: SET_OWNER, id: md.last_id, vetoed: false, approvals: 0, target: target.to_bytes(), eta, expires: eta + CHANGE_EXPIRY_S, by_recovery: md.by_recovery(who), effect: Effect::Owner(to) });
                 }
                 (op, sent, model_ok) = ("propose_owner", r.is_ok(), valid);
             }
             // Propose new code: an upgrade while live, a restore while stopped.
             7 => {
                 let code = rng.pick(&[Code::V1, Code::Fix]);
-                let restore = rng.below(2) == 0;
+                let restore = if rng.below(4) == 0 { !md.aborted } else { md.aborted };
                 let buffer = fresh_buffer(&mut env, code);
-                let who = rng.below(2) as usize;
+                let who = proposer(&mut rng, &md);
                 let kind = if restore { RESTORE } else { UPGRADE };
                 let r = env.send(&[f.propose(&ok_[who].pubkey(), kind, &buffer, &[], Some(&buffer))], &[ok_[who]]);
-                let valid = who == md.owner && md.pending.is_none() && md.aborted == restore;
+                let free = md.slot_free(who, now);
+                let valid = md.may_propose(who, kind) && free.is_some() && md.aborted == restore;
                 if valid {
+                    displaced = free.unwrap();
                     md.last_id += 1;
                     let eta = upgrade_eta(now, md.delay);
-                    md.pending = Some(Pending { kind, id: md.last_id, vetoed: false, approvals: 0, target: buffer.to_bytes(), eta, expires: eta + CHANGE_EXPIRY_S, effect: Effect::Code(code) });
+                    md.pending = Some(Pending { kind, id: md.last_id, vetoed: false, approvals: 0, target: buffer.to_bytes(), eta, expires: eta + CHANGE_EXPIRY_S, by_recovery: false, effect: Effect::Code(code) });
                 }
                 (op, sent, model_ok) = (if restore { "propose_restore" } else { "propose_upgrade" }, r.is_ok(), valid);
             }
@@ -356,6 +441,10 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                                 let alive = md.alive(now);
                                 md.aborted && can_restore(RestoreSource::Proposed, &pd.target, &pd.target, quorum(pd.approvals & alive, alive, md.threshold), pd.vetoed, now, pd.eta, pd.expires)
                             }
+                            // Checked again at execution: a new owner is never
+                            // the recovery key; a recovery key never the owner.
+                            SET_OWNER => can_execute(&sched, now, pd.vetoed, false, false).is_ok() && !matches!(pd.effect, Effect::Owner(o) if md.recovery == Some(o)),
+                            SET_RECOVERY => can_execute(&sched, now, pd.vetoed, false, false).is_ok() && !matches!(pd.effect, Effect::Recovery(Some(r)) if r == md.owner),
                             _ => can_execute(&sched, now, pd.vetoed, false, false).is_ok(),
                         };
                         let allowed = allowed && !((pd.kind == UPGRADE || pd.kind == RESTORE) && bad_spill);
@@ -375,6 +464,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                                 }
                                 Effect::Owner(o) => md.owner = o,
                                 Effect::Delay(d) => md.delay = d,
+                                Effect::Recovery(r) => md.recovery = r,
                             }
                             md.pending = None;
                         }
@@ -383,11 +473,16 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                 };
                 (op, sent, model_ok) = ("execute", r.is_ok(), ok);
             }
-            // The owner withdraws the pending proposal.
+            // Its proposer withdraws the pending proposal: the owner its own,
+            // the recovery key its own.
             10 => {
-                let who = rng.below(2) as usize;
+                let who = proposer(&mut rng, &md);
                 let r = env.send(&[f.cancel(&ok_[who].pubkey())], &[ok_[who]]);
-                let ok = who == md.owner && md.pending.is_some();
+                let ok = match &md.pending {
+                    None => false,
+                    Some(pd) if pd.by_recovery => md.by_recovery(who),
+                    Some(_) => who == md.owner,
+                };
                 if ok {
                     md.pending = None;
                 }
@@ -419,7 +514,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             12 => {
                 let by_owner = rng.below(4) == 0;
                 let (signer, ok_signer) = if by_owner {
-                    let who = rng.below(2) as usize;
+                    let who = rng.below(5) as usize;
                     // The owner stops only while no quorum of guardians is live.
                     (ok_[who], who == md.owner && md.alive(now).count_ones() < md.threshold as u32)
                 } else {
@@ -441,7 +536,12 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     md.live = Code::Abort;
                     md.aborted = true;
                     md.abort_staged = false;
-                    md.pending = None;
+                    // A recovery proposal survives a stop.
+                    if matches!(&md.pending, Some(pd) if pd.by_recovery) {
+                        displaced = "by_recovery:survived_stop";
+                    } else {
+                        md.pending = None;
+                    }
                 }
                 (op, sent, model_ok) = ("abort", r.is_ok(), ok);
             }
@@ -484,10 +584,63 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     md.aborted = false;
                     md.snapshot = None;
                     md.snapshot_valid = false;
-                    md.pending = None;
+                    if !matches!(&md.pending, Some(pd) if pd.by_recovery) {
+                        md.pending = None;
+                    }
                     snapshot_buffer = None;
                 }
                 (op, sent, model_ok) = ("restore_snapshot", r.is_ok(), ok);
+            }
+            // Propose a new recovery key (or none): the owner while there is
+            // none, else only the recovery key; never the owner.
+            15 => {
+                let none = rng.below(6) == 0;
+                let to_guardian = !none && rng.below(8) == 0;
+                let to = rng.below(5) as usize;
+                let target = if none { Address::default() } else if to_guardian { gk[rng.pick(&md.guardians)].pubkey() } else { ok_[to].pubkey() };
+                let who = proposer(&mut rng, &md);
+                let r = env.send(&[f.propose(&ok_[who].pubkey(), SET_RECOVERY, &target, &[], None)], &[ok_[who]]);
+                let free = md.slot_free(who, now);
+                let valid = md.may_propose(who, SET_RECOVERY) && free.is_some() && !to_guardian && (none || to != md.owner);
+                if to_guardian && md.may_propose(who, SET_RECOVERY) && free.is_some() {
+                    refused_path = "refused:recovery_is_guardian";
+                }
+                if valid {
+                    displaced = free.unwrap();
+                    md.last_id += 1;
+                    let eta = upgrade_eta(now, md.delay);
+                    let by_recovery = md.by_recovery(who);
+                    md.pending = Some(Pending { kind: SET_RECOVERY, id: md.last_id, vetoed: false, approvals: 0, target: target.to_bytes(), eta, expires: eta + CHANGE_EXPIRY_S, by_recovery, effect: Effect::Recovery(if none { None } else { Some(to) }) });
+                    if by_recovery && displaced.is_empty() {
+                        displaced = "by_recovery:proposed";
+                    }
+                }
+                (op, sent, model_ok) = ("propose_recovery", r.is_ok(), valid);
+            }
+            // The owner with a live quorum replaces the recovery key at once.
+            16 => {
+                let who = if rng.below(4) != 0 { md.owner } else { rng.below(5) as usize };
+                let none = rng.below(6) == 0;
+                let to_guardian = !none && rng.below(8) == 0;
+                let to = rng.below(5) as usize;
+                let target = if none { Address::default() } else if to_guardian { gk[rng.pick(&md.guardians)].pubkey() } else { ok_[to].pubkey() };
+                let signers: Vec<usize> = md.guardians.iter().copied().filter(|_| rng.below(3) != 0).collect();
+                let keys: Vec<Address> = signers.iter().map(|&k| gk[k].pubkey()).collect();
+                let mut kps: Vec<&Keypair> = vec![ok_[who]];
+                kps.extend(signers.iter().map(|&k| gk[k]));
+                let r = env.send(&[f.replace_recovery(&ok_[who].pubkey(), &target, &keys)], &kps);
+                let alive = md.alive(now);
+                let ok = who == md.owner && !to_guardian && (none || to != md.owner) && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold);
+                if to_guardian && who == md.owner && quorum(md.bits(&signers).unwrap() & alive, alive, md.threshold) {
+                    refused_path = "refused:recovery_is_guardian";
+                }
+                if ok {
+                    md.recovery = if none { None } else { Some(to) };
+                    if matches!(&md.pending, Some(pd) if pd.by_recovery || pd.kind == SET_RECOVERY) {
+                        md.pending = None;
+                    }
+                }
+                (op, sent, model_ok) = ("replace_recovery", r.is_ok(), ok);
             }
             // Anyone re-arms: a new abort buffer, or a snapshot of the live code.
             _ => {
@@ -517,6 +670,12 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         }
         assert_eq!(sent, model_ok, "{at}: {op} succeeded on chain = {sent}, model says {model_ok}");
         *counts.entry(format!("{op}:{}", if sent { "ok" } else { "refused" })).or_default() += 1;
+        if sent && !displaced.is_empty() {
+            *counts.entry(displaced.to_string()).or_default() += 1;
+        }
+        if !sent && !refused_path.is_empty() {
+            *counts.entry(refused_path.to_string()).or_default() += 1;
+        }
         env.next_slot();
 
         // The whole config the model tracks.
@@ -530,6 +689,9 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         let chain_heartbeats: Vec<i64> = (0..n).map(|i| i64_at(360 + 8 * i)).collect();
         assert_eq!(chain_heartbeats, md.heartbeats, "{at}: heartbeats after {op}");
         assert_eq!(k32(72), ok_[md.owner].pubkey().to_bytes(), "{at}: owner after {op}");
+        let recovery = md.recovery.map(|r| ok_[r].pubkey().to_bytes()).unwrap_or([0; 32]);
+        assert_eq!(k32(852), recovery, "{at}: recovery key after {op}");
+        assert_eq!(d[884] == 1, matches!(&md.pending, Some(pd) if pd.by_recovery), "{at}: proposed by the recovery key after {op}");
         assert_eq!((d[425], d[426] == 1, d[430] == 1, i64_at(432), i64_at(440)), (md.threshold, md.aborted, md.snapshot_valid, md.interval, md.delay), "{at}: threshold, status, snapshot validity, interval, delay after {op}");
         assert_eq!((k32(448) != [0; 32], k32(480) != [0; 32]), (md.abort_staged, md.snapshot.is_some()), "{at}: armed after {op}");
         assert_eq!(u64::from_le_bytes(d[528..536].try_into().unwrap()), md.last_id, "{at}: proposal id after {op}");
