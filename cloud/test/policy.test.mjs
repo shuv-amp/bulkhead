@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -84,8 +84,49 @@ test("unapproved loosenings are vetoed once; approved ones are not", () => {
   const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0)] });
   assert.equal(assess(s, ev, { worst1h, now: 0 })[0].type, "veto_change");
   assert.deepEqual(assess(s, ev, { worst1h, now: 1 }), []);
-  const s2 = newState();
-  assert.deepEqual(assess(s2, ev, { worst1h, now: 0 }, { ...DEFAULT_POLICY, approvedChangeIds: [3] }), []);
+  // The event has no payload: an approval of this kind and target leaves it
+  // to the account scan, which compares the payload.
+  const approved = { ...DEFAULT_POLICY, approvedChanges: [changeApproval({ kind: 0, target: mint, payload: Uint8Array.of(1, 2) })] };
+  assert.deepEqual(assess(newState(), ev, { worst1h, now: 0 }, approved), []);
+  const otherTarget = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(owner), i64le(0)] });
+  assert.equal(assess(newState(), otherTarget, { worst1h, now: 0 }, approved)[0].type, "veto_change");
+});
+
+test("an approval names what a change does, so a thief proposing first gets no approval", () => {
+  // The operators agree to rotate the admin to `fresh` and expect it to be
+  // change 9. A stolen admin key proposes its own rotation first: it gets id
+  // 9, and the operators' change becomes 10. Approving by id would have let
+  // the thief's change through and had the keeper execute it.
+  const fresh = owner;
+  const thief = mint;
+  const policy = checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [changeApproval({ kind: 3, target: fresh, payload: new Uint8Array(0) })] });
+  const theirs = { id: 9n, kind: 3, target: thief, payload: new Uint8Array(0), vetoed: false, executed: false, executableS: 1_000, expiresS: 2_000 };
+  const ours = { ...theirs, id: 10n, target: fresh };
+  const live = (c) => decode({ name: "vault:change_proposed", fields: [u64le(c.id), Uint8Array.of(c.kind), key(c.target), i64le(0)] });
+  assert.equal(assess(newState(), live(theirs), { worst1h, now: 0 }, policy)[0].changeId, 9n, "the thief's is vetoed live");
+  assert.deepEqual(assess(newState(), live(ours), { worst1h, now: 0 }, policy), []);
+  assert.equal(pendingChangeVeto(theirs, policy, 500, new Set()).changeId, 9n);
+  assert.equal(pendingChangeVeto(ours, policy, 500, new Set()), null);
+  assert.equal(dueApprovedChange(theirs, policy, 1_500, new Set()), null, "never executed");
+  assert.equal(dueApprovedChange(ours, policy, 1_500, new Set()).changeId, 10n);
+  // Same kind and target, another payload (looser limits for the approved
+  // vault): let through live, vetoed by the account scan, never executed.
+  const limits = { ...DEFAULT_POLICY, approvedChanges: [changeApproval({ kind: 0, target: mint, payload: Uint8Array.of(1) })] };
+  const looser = { ...theirs, kind: 0, target: mint, payload: Uint8Array.of(2) };
+  assert.deepEqual(assess(newState(), live(looser), { worst1h, now: 0 }, limits), []);
+  assert.equal(pendingChangeVeto(looser, limits, 500, new Set()).type, "veto_change");
+  assert.equal(dueApprovedChange(looser, limits, 1_500, new Set()), null);
+  assert.equal(dueApprovedChange({ ...looser, payload: Uint8Array.of(1) }, limits, 1_500, new Set()).kind, 0);
+});
+
+test("a policy that approves by id is refused at startup, as is a malformed approval", () => {
+  assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedChangeIds: [3] }), /approvedChangeIds is no longer read/);
+  assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedChanges: ["3"] }), /approvedChanges/);
+  assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [3] }), /approvedChanges/);
+  assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [`3:${mint}:abc`] }), /approvedChanges/, "odd hex");
+  assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedFloorProposals: [`${mint}:7`] }), /approvals by id were replaced/);
+  assert.doesNotThrow(() => checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [`3:${mint}:`, `0:${mint}:00ff`], approvedFloorProposals: [floorApproval({ program: mint, kind: 5, target: owner, payload: new Uint8Array(0) })] }));
+  assert.doesNotThrow(() => checkPolicy({ ...DEFAULT_POLICY }));
 });
 
 const frozenEvent = (scope, until) =>
@@ -298,14 +339,15 @@ test("a restart vetoes a loosening that is still pending and leaves a closed one
   const open = readPendingChange(bytes);
   assert.equal(open.id, 9n);
   assert.equal(open.kind, 4);
-  const policy = { ...DEFAULT_POLICY, approvedChangeIds: [] };
+  const policy = { ...DEFAULT_POLICY, approvedChanges: [] };
   const veto = pendingChangeVeto(open, policy, 1_000, new Set());
   assert.equal(veto.type, "veto_change");
   assert.equal(veto.changeId, 9n);
   assert.equal(pendingChangeVeto(open, policy, 1_000, new Set(["c9"])), null);
   assert.equal(pendingChangeVeto({ ...open, vetoed: true }, policy, 1_000, new Set()), null);
   assert.equal(pendingChangeVeto(open, policy, 5_000, new Set()), null);
-  assert.equal(pendingChangeVeto(open, { ...policy, approvedChangeIds: [9] }, 1_000, new Set()), null);
+  assert.equal(pendingChangeVeto(open, { ...policy, approvedChanges: [changeApproval(open)] }, 1_000, new Set()), null);
+  assert.equal(open.payload.length, 0);
   const floor = { program: "prog", pendingKind: 1, pendingId: 4n, pendingVetoed: false, pendingTarget: "buf" };
   assert.equal(pendingUpgradeVeto(floor, DEFAULT_POLICY, new Set()).proposalId, 4n);
   assert.equal(pendingUpgradeVeto(floor, { ...DEFAULT_POLICY, approvedUpgradeBuffers: ["buf"] }, new Set()), null);
@@ -396,16 +438,20 @@ test("every Floor proposal a stolen owner key could make is vetoed unless pre-ap
     assert.equal(actions.length, 1, `kind ${kind} is vetoed`);
     assert.equal(actions[0].proposalId, e.id);
   }
-  // Code is approved by buffer, everything else by program:id.
+  // Code is approved by buffer, everything else by what it does (never by id:
+  // the next id goes to whoever proposes first).
   const code = proposed(2, 12n);
   assert.deepEqual(assess(newState(), code, { now: 1 }, { ...DEFAULT_POLICY, approvedUpgradeBuffers: [code.target] }), []);
   const release = proposed(3, 13n);
-  assert.deepEqual(assess(newState(), release, { now: 1 }, { ...DEFAULT_POLICY, approvedFloorProposals: [`${release.program}:13`] }), []);
-  assert.equal(assess(newState(), release, { now: 1 }, { ...DEFAULT_POLICY, approvedFloorProposals: [`${release.program}:14`] }).length, 1);
-  // After a restart, the same rule from the config.
-  const pending = { program, pendingKind: 3, pendingId: 7n, pendingVetoed: false, pendingTarget: "attacker" };
+  const approveRelease = (target) => ({ ...DEFAULT_POLICY, approvedFloorProposals: [floorApproval({ program: release.program, kind: 3, target, payload: new Uint8Array(0) })] });
+  assert.deepEqual(assess(newState(), release, { now: 1 }, approveRelease(release.target)), []);
+  assert.equal(assess(newState(), release, { now: 1 }, approveRelease(owner)).length, 1, "another target");
+  // After a restart, the same rule from the account, payload included.
+  const pending = { program, pendingKind: 3, pendingId: 7n, pendingVetoed: false, pendingTarget: "attacker", pendingPayload: new Uint8Array(0) };
   assert.match(pendingUpgradeVeto(pending, DEFAULT_POLICY, new Set()).reason, /release of the upgrade authority/);
-  assert.equal(pendingUpgradeVeto(pending, { ...DEFAULT_POLICY, approvedFloorProposals: ["prog:7"] }, new Set()), null);
+  const approved = { ...DEFAULT_POLICY, approvedFloorProposals: [floorApproval({ program, kind: 3, target: "attacker", payload: new Uint8Array(0) })] };
+  assert.equal(pendingUpgradeVeto(pending, approved, new Set()), null);
+  assert.equal(pendingUpgradeVeto({ ...pending, pendingPayload: Uint8Array.of(1) }, approved, new Set()).proposalId, 7n, "another payload");
 });
 
 test("a queued release's ticket address travels from the event to the cancel", () => {
@@ -429,8 +475,9 @@ test("a queued release's ticket address travels from the event to the cancel", (
 });
 
 test("the keeper executes exactly the approved changes, only while they are due", () => {
-  const change = { id: 3n, kind: 2, target: "t", vetoed: false, executed: false, executableS: 1_000, expiresS: 2_000 };
-  const policy = { ...DEFAULT_POLICY, approvedChangeIds: [3] };
+  const target = "11111111111111111111111111111111";
+  const change = { id: 3n, kind: 2, target, payload: new Uint8Array(0), vetoed: false, executed: false, executableS: 1_000, expiresS: 2_000 };
+  const policy = { ...DEFAULT_POLICY, approvedChanges: [changeApproval(change)] };
   assert.equal(dueApprovedChange(change, policy, 1_000, new Set()).changeId, 3n);
   assert.equal(dueApprovedChange(change, policy, 999, new Set()), null, "not yet due");
   assert.equal(dueApprovedChange(change, policy, 2_000, new Set()), null, "expired");
@@ -453,19 +500,20 @@ test("the keeper executes exactly the approved changes, only while they are due"
 });
 
 test("the keeper executes approved Floor proposals when due, but never releases the authority", () => {
-  const floor = { program: "prog", pendingKind: 4, pendingId: 7n, pendingVetoed: false, pendingTarget: "x", pendingEta: 1_000, pendingExpires: 2_000 };
-  const policy = { ...DEFAULT_POLICY, approvedFloorProposals: ["prog:7"], approvedUpgradeBuffers: ["buf"] };
+  const floor = { program: "prog", pendingKind: 4, pendingId: 7n, pendingVetoed: false, pendingTarget: "x", pendingPayload: Uint8Array.of(2, 1), pendingEta: 1_000, pendingExpires: 2_000 };
+  const policy = { ...DEFAULT_POLICY, approvedFloorProposals: [floorApproval({ program: "prog", kind: 4, target: "x", payload: Uint8Array.of(2, 1) })], approvedUpgradeBuffers: ["buf"] };
   assert.equal(dueApprovedFloor(floor, policy, 1_000, new Set()).kind, 4);
   assert.equal(dueApprovedFloor(floor, policy, 999, new Set()), null);
   assert.equal(dueApprovedFloor(floor, policy, 2_000, new Set()), null);
   assert.equal(dueApprovedFloor(floor, DEFAULT_POLICY, 1_500, new Set()), null, "not approved");
   assert.equal(dueApprovedFloor({ ...floor, pendingVetoed: true }, policy, 1_500, new Set()), null);
   assert.equal(dueApprovedFloor(floor, policy, 1_500, new Set(["eprog:7"])), null);
+  assert.equal(dueApprovedFloor({ ...floor, pendingPayload: Uint8Array.of(2, 2) }, policy, 1_500, new Set()), null, "another guardian set");
   // Code by buffer.
   assert.equal(dueApprovedFloor({ ...floor, pendingKind: 1, pendingTarget: "buf" }, policy, 1_500, new Set()).kind, 1);
   assert.equal(dueApprovedFloor({ ...floor, pendingKind: 1, pendingTarget: "other" }, policy, 1_500, new Set()), null);
   // Releasing the upgrade authority closes Floor's config: always a person's call.
-  assert.equal(dueApprovedFloor({ ...floor, pendingKind: 3 }, { ...policy, approvedFloorProposals: ["prog:7"] }, 1_500, new Set()), null);
+  assert.equal(dueApprovedFloor({ ...floor, pendingKind: 3 }, { ...policy, approvedFloorProposals: [floorApproval({ program: "prog", kind: 3, target: "x", payload: Uint8Array.of(2, 1) })] }, 1_500, new Set()), null);
 });
 
 test("the keeper's execute instruction names the right target for each kind of change", async () => {

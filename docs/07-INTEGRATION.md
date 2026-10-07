@@ -40,7 +40,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
 7. **Read the outcome** of each `release` from return data: `backed | instant | queued | ticket_id | eta_s` (40 bytes, `05 §4`). Book the full amount against the user. If `queued > 0`, record `(ticket_id, queued, eta_s)` so your UI shows "arriving at ETA"; anyone can call `settle_ticket` once it's due.
 8. **A cancelled ticket** is a governance matter. The tokens stay in the vault. Never re-release automatically: cancellation usually means an incident.
 9. **Calibrate** (§4) before the seal. Tightening later is instant; loosening takes 72h.
-10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page. It vetoes every loosening, lifeboat exit and Floor proposal you have not pre-approved, and it is also your **keeper**: a change you did approve (`approvedChangeIds`, `approvedFloorProposals`, `approvedUpgradeBuffers`) is executed by it as soon as its delay ends. Solana programs never run on their own, so after a delay someone must send `execute`; anyone may, and the keeper makes sure someone does, before the 7-day expiry. It never executes the release of Floor's upgrade authority, which closes Floor's config.
+10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page. It vetoes every loosening, lifeboat exit and Floor proposal you have not pre-approved, and it is also your **keeper**: a change you did approve (`approvedChanges`, `approvedFloorProposals`, `approvedUpgradeBuffers`, each by what it does) is executed by it as soon as its delay ends. Solana programs never run on their own, so after a delay someone must send `execute`; anyone may, and the keeper makes sure someone does, before the 7-day expiry. It never executes the release of Floor's upgrade authority, which closes Floor's config.
 
 ## 3. The pattern, from Harbor (`programs/harbor`)
 
@@ -97,14 +97,14 @@ The guardian (`cloud/guardian/main.mjs`, Node 20+, no dependencies) is what turn
   "guardianKey": "/etc/bulkhead/keys/guardian.json",
   "stateFile": "/var/lib/bulkhead/<name>.state.json",
   "alert": { "url": "https://hooks.slack.com/services/...", "format": "slack" },
-  "policy": { "approvedChangeIds": [] } }
+  "policy": { "approvedChanges": [] } }
 ```
 
 - **Endpoints from different providers.** With `rpcs`, reads and sends move to the next endpoint when one fails, and every transaction also goes to all of them (`09`, findings 49 and 51). Prefer endpoints that keep transaction history.
 - **Alerts.** Freezes, failures and lifeboat moves need people: only a guardian quorum unfreezes or returns the lifeboat. Set `alert`, and keep its URL secret.
 - **Supervision.** The guardian exits on anything it cannot recover from, after logging and alerting it. Run it under `cloud/guardian/bulkhead-guardian@.service` (systemd: restarts it, never gives up, read-only filesystem except its state directory). The incident hold is kept across restarts in `stateFile` (under the unit, its state directory by default; `09`, findings 48 and 54).
 - **Liveness.** It heartbeats every 24h; a key that misses its on-chain interval stops counting toward the quorum. The status page shows each guardian's standing.
-- **Approvals are explicit.** It vetoes every loosening, lifeboat exit and Floor proposal not listed in its policy. Add a change's id to `approvedChangeIds` once the operators agree, and restart it.
+- **Approvals are explicit, and name what is approved.** It vetoes every loosening, lifeboat exit and Floor proposal not listed in its policy, as soon as it is proposed. Approve a change by what it does, never by its id: `approvedChanges` takes `"kind:target:payloadHex"`, `approvedFloorProposals` takes `"program:kind:target:payloadHex"` (code by buffer, in `approvedUpgradeBuffers`), and `approvedExits` takes `"mint:amount"`. An id is only the next counter, so a stolen key that proposes first would take an id approved in advance; the guardian refuses to start with `approvedChangeIds`. Add the approval and restart the guardian *before* proposing, so it never vetoes the change; `node cloud/deploy/approvals.mjs <rpc> <vault-program> <protocol> [floor-program protected-program]` prints the approval of each change already pending (`09`, finding 61).
 
 ## 7. Not in this build
 

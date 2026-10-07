@@ -7,6 +7,53 @@
 
 import { b58encode, Reader, decodeChange } from "../lib/solana.mjs";
 
+const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
+
+/** How a Vault change is approved in `approvedChanges`: the kind, target and
+ * payload of its `propose_change`, exactly as proposed. */
+export function changeApproval({ kind, target, payload }) {
+  return `${kind}:${target}:${hex(payload)}`;
+}
+
+/** How a Floor proposal other than code is approved in `approvedFloorProposals`. */
+export function floorApproval({ program, kind, target, payload }) {
+  return `${program}:${kind}:${target}:${hex(payload)}`;
+}
+
+const B58 = "[1-9A-HJ-NP-Za-km-z]{32,44}";
+const CHANGE_APPROVAL = new RegExp(`^\\d+:${B58}:([0-9a-f]{2})*$`);
+const FLOOR_APPROVAL = new RegExp(`^${B58}:\\d+:${B58}:([0-9a-f]{2})*$`);
+
+/**
+ * Refuses a policy whose approvals could not mean what the operators think.
+ * Approvals by id (`approvedChangeIds`, "program:id") were replaced: an id
+ * names whatever is proposed under it, so a guardian still reading one would
+ * let a thief's change through and execute it.
+ */
+export function checkPolicy(policy) {
+  if ("approvedChangeIds" in policy) {
+    throw new Error('policy.approvedChangeIds is no longer read: approve a change by what it does, in approvedChanges as "kind:target:payloadHex" (docs/07)');
+  }
+  for (const a of policy.approvedChanges ?? []) {
+    if (typeof a !== "string" || !CHANGE_APPROVAL.test(a)) throw new Error(`policy.approvedChanges: ${JSON.stringify(a)} is not "kind:target:payloadHex"`);
+  }
+  for (const a of policy.approvedFloorProposals ?? []) {
+    if (typeof a !== "string" || !FLOOR_APPROVAL.test(a)) throw new Error(`policy.approvedFloorProposals: ${JSON.stringify(a)} is not "program:kind:target:payloadHex" (approvals by id were replaced)`);
+  }
+  return policy;
+}
+
+/** A change account (decoded, with its payload) the operators approved. */
+function changeApproved(change, policy) {
+  return change.payload !== undefined && (policy.approvedChanges ?? []).includes(changeApproval(change));
+}
+
+/** A live proposal event names the kind and target but not the payload: it
+ * could be an approved change. The account scan then checks the payload. */
+function changeMayBeApproved(kind, target, policy) {
+  return (policy.approvedChanges ?? []).some((a) => a.startsWith(`${kind}:${target}:`));
+}
+
 export const DEFAULT_POLICY = {
   /** Freeze when unbacked outflow to non-allowlisted owners within the last
    * hour reaches this fraction of the program's own `worst_1h` figure. */
@@ -33,12 +80,17 @@ export const DEFAULT_POLICY = {
   allowlistedOwners: [],
   /** While frozen, cancel tickets to non-allowlisted owners. */
   cancelTicketsWhenFrozen: true,
-  /** Veto every loosening that isn't pre-approved by id. */
+  /** Veto every loosening that isn't pre-approved. A change is approved by
+   * what it does, "kind:target:payloadHex" (`changeApproval`), never by its
+   * id: an id is only the protocol's next counter, so whoever proposes first
+   * gets it, and a stolen admin key proposing just before the operators would
+   * take their approval (and the keeper would execute its change). */
   vetoLoosenings: true,
-  approvedChangeIds: [],
+  approvedChanges: [],
   /** Floor: veto every proposal not pre-approved. Upgrades and restores are
    * approved by buffer; anything else (release authority, owner, guardians, a
-   * lower delay) by "program:proposalId". A quorum's approval still runs an
+   * lower delay) by what it does, "program:kind:target:payloadHex"
+   * (`floorApproval`), for the same reason. A quorum's approval still runs an
    * honest restore over a veto. */
   approvedUpgradeBuffers: [],
   approvedFloorProposals: [],
@@ -388,8 +440,8 @@ export function heartbeatEverySeconds(everyS, chainIntervalS) {
 export function readPendingChange(bytes) {
   if (!bytes) return null;
   try {
-    const { protocol, id, kind, vetoed, executed, target, executableS, expiresS } = decodeChange(bytes);
-    return { protocol, id, kind, vetoed, executed, target, executableS, expiresS };
+    const { protocol, id, kind, vetoed, executed, target, executableS, expiresS, payload } = decodeChange(bytes);
+    return { protocol, id, kind, vetoed, executed, target, executableS, expiresS, payload };
   } catch {
     return null;
   }
@@ -403,8 +455,8 @@ export function pendingChangeVeto(change, policy, now, already) {
   if (Number.isFinite(change.expiresS) && now >= change.expiresS) return null;
   const id = BigInt(change.id);
   if (already?.has(`c${id}`)) return null;
-  if ((policy.approvedChangeIds ?? []).map(BigInt).includes(id)) return null;
-  return { type: "veto_change", changeId: id, reason: `loosening ${id} (kind ${change.kind}) is still pending` };
+  if (changeApproved(change, policy)) return null;
+  return { type: "veto_change", changeId: id, reason: `loosening ${id} (kind ${change.kind}) is still pending and not approved` };
 }
 
 function exitApproved(policy, mint, amount) {
@@ -422,13 +474,14 @@ export function pendingExitVeto(vault, policy, now, already) {
   return already?.has(vetoKey(action)) ? null : action;
 }
 
-/** A Vault change the keeper should execute now, or null: approved by id, not
- * vetoed or executed, due and not expired. `done` holds ids already sent. */
+/** A Vault change the keeper should execute now, or null: approved (by what
+ * it does), not vetoed or executed, due and not expired. `done` holds ids
+ * already sent. */
 export function dueApprovedChange(change, policy, now, done) {
   if (!policy.executeApproved || !change || change.vetoed || change.executed) return null;
   const id = BigInt(change.id);
   if (done?.has(`c${id}`)) return null;
-  if (!(policy.approvedChangeIds ?? []).map(BigInt).includes(id)) return null;
+  if (!changeApproved(change, policy)) return null;
   if (now < change.executableS || now >= change.expiresS) return null;
   return { type: "execute_change", changeId: id, kind: change.kind, target: change.target };
 }
@@ -441,7 +494,7 @@ export function dueApprovedFloor(floor, policy, now, done) {
   if (floor.pendingKind === 3) return null;
   const id = BigInt(floor.pendingId);
   if (done?.has(`e${floor.program}:${id}`)) return null;
-  if (floorProposalVeto({ program: floor.program, kind: floor.pendingKind, id, target: floor.pendingTarget }, policy)) return null;
+  if (floorProposalVeto({ program: floor.program, kind: floor.pendingKind, id, target: floor.pendingTarget, payload: floor.pendingPayload }, policy)) return null;
   if (now < floor.pendingEta || now >= floor.pendingExpires) return null;
   return { type: "execute_floor", program: floor.program, proposalId: id, kind: floor.pendingKind, target: floor.pendingTarget };
 }
@@ -453,15 +506,23 @@ const FLOOR_KINDS = { 1: "upgrade", 2: "restore", 3: "release of the upgrade aut
  * Why a Floor proposal must be vetoed, or null if it is pre-approved. Every
  * kind waits the delay and is vetoable, and every one can hand the program
  * to whoever holds the owner key: new code, the upgrade authority itself, the
- * owner, the guardians, or a shorter delay for all of those.
+ * owner, the guardians, or a shorter delay for all of those. Code is approved
+ * by buffer, anything else by what it does (`floorApproval`). A live event
+ * carries no payload (`payload` undefined): a proposal whose kind and target
+ * match an approval waits for the account scan, which compares the payload.
  */
-export function floorProposalVeto({ program, kind, id, target }, policy) {
+export function floorProposalVeto({ program, kind, target, payload }, policy) {
   const what = FLOOR_KINDS[kind] ?? `kind ${kind}`;
   if (kind === 1 || kind === 2) {
     if ((policy.approvedUpgradeBuffers ?? []).includes(target)) return null;
     return `${what} to unapproved buffer ${target}`;
   }
-  if ((policy.approvedFloorProposals ?? []).includes(`${program}:${BigInt(id)}`)) return null;
+  const approvals = policy.approvedFloorProposals ?? [];
+  if (payload === undefined) {
+    if (approvals.some((a) => a.startsWith(`${program}:${kind}:${target}:`))) return null;
+  } else if (approvals.includes(floorApproval({ program, kind, target, payload }))) {
+    return null;
+  }
   return `${what} (target ${target}) is not pre-approved`;
 }
 
@@ -472,7 +533,7 @@ export function pendingUpgradeVeto(floor, policy, already) {
   if (!floor || !floor.pendingKind || floor.pendingVetoed) return null;
   const id = BigInt(floor.pendingId);
   if (already?.has(`f${floor.program}:${id}`)) return null;
-  const why = floorProposalVeto({ program: floor.program, kind: floor.pendingKind, id, target: floor.pendingTarget }, policy);
+  const why = floorProposalVeto({ program: floor.program, kind: floor.pendingKind, target: floor.pendingTarget, payload: floor.pendingPayload ?? new Uint8Array(0) }, policy);
   if (!why) return null;
   return { type: "floor_veto", program: floor.program, proposalId: id, reason: `${why} is still pending` };
 }
@@ -580,7 +641,9 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       break;
     case "change_proposed":
       if (!act) break;
-      if (policy.vetoLoosenings && !policy.approvedChangeIds.map(BigInt).includes(e.id) && !state.vetoed.has(`c${e.id}`)) {
+      // The event has no payload: a change that may be approved is left to
+      // the account scan, which vetoes it unless its payload matches too.
+      if (policy.vetoLoosenings && !changeMayBeApproved(e.changeKind, e.target, policy) && !state.vetoed.has(`c${e.id}`)) {
         state.vetoed.add(`c${e.id}`);
         actions.push({ type: "veto_change", changeId: e.id, reason: `loosening ${e.id} (kind ${e.changeKind}) is not pre-approved` });
       }
@@ -596,7 +659,7 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
     case "floor_proposed":
       if (!act) break;
       {
-        const why = floorProposalVeto({ program: e.program, kind: e.proposalKind, id: e.id, target: e.target }, policy);
+        const why = floorProposalVeto({ program: e.program, kind: e.proposalKind, target: e.target }, policy);
         if (why && !state.vetoed.has(`f${e.program}:${e.id}`)) {
           state.vetoed.add(`f${e.program}:${e.id}`);
           actions.push({ type: "floor_veto", program: e.program, proposalId: e.id, reason: why });

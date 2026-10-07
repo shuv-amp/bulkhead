@@ -9,7 +9,7 @@ import { openChanges, openExit, protocolVersion, duration } from "../lib/changes
 // Change::store: disc, protocol, id, kind, vetoed, executed, bump, target,
 // proposer, created, executable, expires, payload_len, payload[300],
 // base_version, 2 zero bytes. Change::LEN = 448.
-function changeBytes({ id = 7n, kind = 0, vetoed = 0, executed = 0, executableS = 1000, expiresS = 2000, baseVersion = 3 } = {}) {
+function changeBytes({ id = 7n, kind = 0, vetoed = 0, executed = 0, executableS = 1000, expiresS = 2000, baseVersion = 3, payloadLen = 300 } = {}) {
   const d = new Uint8Array(448);
   const v = new DataView(d.buffer);
   d.set(new TextEncoder().encode("BHCHNG01"), 0);
@@ -21,7 +21,7 @@ function changeBytes({ id = 7n, kind = 0, vetoed = 0, executed = 0, executableS 
   v.setBigInt64(116, 500n, true);
   v.setBigInt64(124, BigInt(executableS), true);
   v.setBigInt64(132, BigInt(expiresS), true);
-  v.setUint16(140, 300, true);
+  v.setUint16(140, payloadLen, true);
   d.fill(0xaa, 142, 442);
   v.setUint32(442, baseVersion, true);
   return d;
@@ -40,8 +40,13 @@ test("decodeChange reads every field at the program's offsets", () => {
     createdS: 500,
     executableS: 1000,
     expiresS: 2000,
+    payload: new Uint8Array(300).fill(0xaa),
     baseVersion: 0xdeadbeef,
   });
+  // The payload is its first payload_len bytes, the field the guardian's
+  // approvals compare; a length past the field is not a change account.
+  assert.deepEqual(decodeChange(changeBytes({ payloadLen: 5 })).payload, new Uint8Array(5).fill(0xaa));
+  assert.throws(() => decodeChange(changeBytes({ payloadLen: 301 })), /payload/);
   assert.throws(() => decodeChange(changeBytes().subarray(0, 447)));
   const wrong = changeBytes(); wrong[0] = 0x41;
   assert.throws(() => decodeChange(wrong));
