@@ -100,6 +100,8 @@ A protocol whose admin can pay anyone anything is the worst case. Harbor shows t
 
 The guardian (`cloud/guardian/main.mjs`, Node 20+, no dependencies) is what turns G1's bound into a freeze within seconds. Each guardian key should run on its own host, under its own operator.
 
+**Stopping a program under Floor is a person's decision; the bot never does it.** In an incident, a guardian runs `node cloud/guardian/stop.mjs <guardian-config.json> <program>`. It reads Floor's config fresh before each attempt (the abort buffer and the current snapshot pin, which anyone may move), sizes the compute budget to the program, prices from recent fees, sends to every endpoint each slot until Floor shows the program stopped, then checks that calls fail. Measured on a local validator: **4.1 s (8 slots) every time** with no interference; **15–44 s** while an attacker extended the program every slot to block it (finding 77: `ExtendProgram` is permissionless and an upgrade is refused in a slot with an extension); the old code never ran meanwhile, and calls in a slot with an extension fail with `UnsupportedProgramId`, the attacker's own included. The Floor demo in the deploy rehearsal stops its program with this tool, so CI exercises it.
+
 ```json
 { "rpc": "https://your-primary-rpc", "rpcs": ["https://a-second-provider", "https://a-third"],
   "vaultProgram": "...", "protocolProgram": "...", "mints": ["..."],

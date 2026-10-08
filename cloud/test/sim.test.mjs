@@ -306,3 +306,14 @@ test("a Floor stop and an ejection alert urgently; a restore and an approval ale
   assert.match(restore.title, /notice/);
   assert.equal(alertFor({ msg: "floor ready", program: WATCHED }, new Map(), 0), null, "a plain info line still does not alert");
 });
+
+test("a hold renewal is never mistaken for a duplicate freeze, whatever the freeze length", async () => {
+  const { freezeAlreadyCovers } = await import("../guardian/policy.mjs");
+  // A 60 s freeze renewed 30 s before it ends: the chain shows 30 s left.
+  assert.equal(freezeAlreadyCovers(1_030, 1_000, 60), false);
+  // A 24h freeze renewed an hour before it ends.
+  assert.equal(freezeAlreadyCovers(1_000 + 3_600, 1_000, 86_400), false);
+  // Another guardian's freeze landed seconds ago: covered.
+  assert.equal(freezeAlreadyCovers(1_000 + 86_400 - 5, 1_000, 86_400), true);
+  assert.equal(freezeAlreadyCovers(1_000 + 59, 1_000, 60), true);
+});

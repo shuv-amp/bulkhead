@@ -557,6 +557,8 @@ export function decodeFloor(d) {
     upgradeDelayS: i64(440),
     abortStaged: !zero(at(448)),
     snapshotPinned: !zero(at(480)),
+    abortBuffer: zero(at(448)) ? null : b58encode(at(448)),
+    snapshotBuffer: zero(at(480)) ? null : b58encode(at(480)),
     pendingKind: d[520],
     pendingVetoed: d[521] === 1,
     pendingId: new DataView(d.buffer, d.byteOffset + 528, 8).getBigUint64(0, true),

@@ -631,7 +631,11 @@ export const FREEZE_COVER_SLACK_S = 600;
  * and a later end) and one critical alert per guardian (docs/09, finding 76).
  */
 export function freezeAlreadyCovers(chainFrozenUntil, now, secs, slackS = FREEZE_COVER_SLACK_S) {
-  return chainFrozenUntil > now && chainFrozenUntil >= now + secs - slackS;
+  // The slack scales with the freeze: an absolute 600 s made every renewal of
+  // a short freeze (the incident hold renews it before it ends) look covered,
+  // so the hold silently lapsed (the guardian scenarios caught it).
+  const slack = Math.min(slackS, Math.floor(secs / 20));
+  return chainFrozenUntil > now && chainFrozenUntil >= now + secs - slack;
 }
 
 /**
