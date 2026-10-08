@@ -131,6 +131,58 @@ export async function ingestSignatures(signatures, ingestOne, checkpoint = () =>
   }
 }
 
+/**
+ * Process a newest-first signature list oldest-first, with at most
+ * `concurrency` transactions fetched ahead (`fetchOne(s)`), each processed
+ * (`processOne(s, tx)`) strictly in order and checkpointed only once done.
+ * Stops starting new ones once `budgetMs` has passed, and returns what is
+ * left, still newest-first, for the next loop pass to continue.
+ *
+ * One "ingest" step used to fetch and process the whole backlog serially:
+ * cheap `attest` spam at 40 tx/s with ~100 ms RPC latency put guardians
+ * 178 s behind and growing, and the chain sync, freeze retry, ticket scan,
+ * veto retry and heartbeats behind it waited the whole time, with no alert
+ * (docs/09, finding 76). A failed fetch or process stops the batch at that
+ * signature (the ones before it are done) and throws; fetches already in
+ * flight are dropped quietly, never left as unhandled rejections.
+ */
+export async function ingestBudgeted(signatures, { fetchOne, processOne, checkpoint = () => {}, concurrency = 8, budgetMs = Infinity, nowMs = () => Date.now() }) {
+  const queue = [...signatures].reverse();
+  const started = nowMs();
+  const inflight = [];
+  let next = 0;
+  const fill = () => {
+    while (next < queue.length && inflight.length < concurrency) {
+      const s = queue[next++];
+      const p = Promise.resolve().then(() => fetchOne(s));
+      p.catch(() => {}); // awaited below, in order; a dropped one must not crash the process
+      inflight.push(p);
+    }
+  };
+  let done = 0;
+  while (done < queue.length) {
+    if (done > 0 && nowMs() - started >= budgetMs) break;
+    fill();
+    const tx = await inflight.shift();
+    await processOne(queue[done], tx);
+    checkpoint(queue[done].signature, queue[done]);
+    done++;
+  }
+  return queue.slice(done).reverse();
+}
+
+/**
+ * How far ingestion is behind: the oldest unprocessed signature's block time
+ * against the chain's latest block time, in seconds (0 with nothing left or
+ * a time unknown). Lagging past `lagAlertS` is an urgent alert: a guardian
+ * that reads a minute late freezes a minute late (docs/09, finding 76).
+ */
+export function ingestLagS(backlog, chainTimeS) {
+  const oldest = backlog?.at(-1)?.blockTime;
+  if (oldest == null || chainTimeS == null) return 0;
+  return Math.max(0, chainTimeS - oldest);
+}
+
 /** A missing transaction is not an empty transaction: leave its cursor uncommitted and retry. */
 export async function requireTransaction(rpc, signature) {
   const tx = await rpc.call("getTransaction", [signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);

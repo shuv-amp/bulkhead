@@ -364,7 +364,12 @@ pub(crate) fn touch_reference(v: &mut Vault, balance: u64, now_s: i64) {
         now_s,
         v.ref_initialized,
     );
-    v.ref_updated_s = now_s;
+    // Never back in time: a clock that stepped back would count the gap twice.
+    v.ref_updated_s = if v.ref_initialized {
+        v.ref_updated_s.max(now_s)
+    } else {
+        now_s
+    };
     v.ref_initialized = true;
 }
 

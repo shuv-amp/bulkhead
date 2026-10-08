@@ -22,7 +22,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { Rpc, key, b58encode, IDS, decodeFloor } from "../lib/solana.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
@@ -167,11 +167,17 @@ say("   the owner withdrew it");
 await refused("cancelling when nothing is pending", [f.cancel(owner.publicKey)], "NoProposal");
 
 say("\n4. ONE guardian stops the program");
+// Through the operator's tool (cloud/guardian/stop.mjs): the same command a
+// guardian runs in an incident, so CI exercises it.
 const t0 = Date.now();
-const stopSig = await send(rpc, guardians[0], [f.abort(guardians[0].publicKey, abortBuffer, snapshot)]);
+const stopConfig = `${dir}/stop-guardian.json`;
+writeFileSync(stopConfig, JSON.stringify({ rpc: url, guardianKey: `${dir}/keys/guardian0.json`, floorProgram }));
+const stopOut = execFileSync("node", ["cloud/guardian/stop.mjs", stopConfig, program, "--max-seconds", "120"], { encoding: "utf8" });
+const stopped = stopOut.trim().split("\n").map((l) => JSON.parse(l)).find((o) => o.msg?.startsWith("stopped"));
+if (!stopped) throw new Error(`stop.mjs did not stop the program:\n${stopOut}`);
 await nextSlot();
 const callStopped = await call();
-say(`   stop: ${stopSig} (${Date.now() - t0} ms to confirm)`);
+say(`   stop: cloud/guardian/stop.mjs, ${stopped.attempts} attempt(s), ${Date.now() - t0} ms until calls fail`);
 say(`   the same call now: fails with ${callStopped.err}, Floor's code 0x464C4F52 ("FLOR")`);
 for (const l of callStopped.logs.filter((l) => l.includes("Bulkhead Floor"))) say(`   log: ${l}`);
 await refused("stopping it again", [f.abort(guardians[1].publicKey, abortBuffer, snapshot)], "NotLive");

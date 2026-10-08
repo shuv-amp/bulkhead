@@ -317,7 +317,16 @@ pub fn release(
     let lookup = |m: &[u8; 32]| prices.lookup(m);
 
     // Backed lane: the largest amount the owner's ledger can pay soundly.
-    let backed = ledger.backed_amount(&v.mint, amount, &lookup);
+    // Beyond the owner's own balance of this mint it is a loan to the owner:
+    // backed only if the owner signed (any account of this instruction). A
+    // compromised caller could otherwise impose a loan on any collateral
+    // holder, draining this mint through the unfreezable backed lane and
+    // taking away the holder's instant own-deposit exit (docs/09, finding 74).
+    // Without the signature the excess is unbacked: limited and freezable.
+    let mut backed = ledger.backed_amount(&v.mint, amount, &lookup);
+    if !accounts.iter().any(|a| a.is_signer() && key(a) == owner) {
+        backed = backed.min(ledger.net(&v.mint).clamp(0, u64::MAX as i128) as u64);
+    }
     let unbacked = amount - backed;
 
     // Unbacked lane: the dual-bucket limiter.
@@ -487,7 +496,13 @@ pub fn settle_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     if t < p.frozen_until.max(v.frozen_until) {
         return Err(VaultError::Frozen.into());
     }
-    touch_reference(&mut v, token::balance(vault_tokens)?, t);
+    let balance = token::balance(vault_tokens)?;
+    // The program's own error, not the token program's, when the vault is
+    // short (the ticket stays; it settles once the tokens are back).
+    if balance < tk.amount {
+        return Err(VaultError::InsufficientBalance.into());
+    }
+    touch_reference(&mut v, balance, t);
     let signer = VaultSigner::new(&v);
     let seeds = signer.seeds();
     token::transfer_checked(

@@ -250,7 +250,12 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 let result = env.send(&[ix], &signers);
 
                 // The model.
-                let backed = ledger.backed_amount(&um, amount, &lookup);
+                let mut backed = ledger.backed_amount(&um, amount, &lookup);
+                // Without the owner's signature (an admin payout) nothing
+                // beyond its own USDC balance is backed (finding 74).
+                if signer.is_none() {
+                    backed = backed.min(ledger.net(&um).clamp(0, u64::MAX as i128) as u64);
+                }
                 let unbacked = amount - backed;
                 let reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                 let low = md.low.touch(md.balance, now, md.ref_init);
@@ -290,7 +295,9 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                         md.limiter = lim;
                         let mut l = ledger;
                         l.debit_backed(um, backed, &lookup).unwrap();
-                        md.ledgers.insert(owner.to_bytes(), l);
+                        // The program loads a ledger without the slots a zero
+                        // position left: the next new mint goes after the rest.
+                        md.ledgers.insert(owner.to_bytes(), compact(&l));
                         md.balance -= backed + instant;
                         if queued > 0 {
                             md.tickets.insert(id, (queued, eta));
@@ -370,4 +377,11 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
         assert_eq!(chain, model, "seed {seed}: ledger of {}", u.pubkey());
     }
     c
+}
+
+/// A ledger as the program reloads it (`Backing::ledger`): its non-zero
+/// positions in order, with no empty slots between them.
+fn compact(l: &Ledger) -> Ledger {
+    let list: Vec<([u8; 32], i128)> = l.positions().map(|p| (p.mint, p.net)).collect();
+    Ledger::from_positions(&list).unwrap()
 }

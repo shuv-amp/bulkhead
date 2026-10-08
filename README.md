@@ -58,7 +58,7 @@ On Solana, the one control an admin or upgrade key can't bypass is ownership of 
 |---|---|
 | The attacker orders | 12 payouts of 100,000 USDC, one every 800 ms |
 | The attacker receives | **100,000 USDC**. The burst is 2% of what is in the vault at each payout, so after the first 100,000 the second no longer fits. An attacker who sizes each payout exactly gets 199,000 (S8), never more than 2%. |
-| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts |
+| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts. In a local-validator run with three guardians: median 6–8 s after the first payout with a healthy or failed-over RPC, ~19 s with 1.5 s of RPC latency. A patient attacker who stays under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2) |
 | Afterwards | 9,900,000 USDC still in the vault; 0 payouts pending; the status page's figures equal the program's own `attest` |
 
 **Modeled, the Drift incident** (`reference/drift_model.py`). Inputs: Chainalysis per-asset amounts, and a $550M TVL **assumption** with vaults proportional to what was drained. It is a model, not a replay.
@@ -103,11 +103,11 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Bounded proofs (Kani) and exhaustive checks | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
 | Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 392M executions in the 6 Oct deep CI run (25 min per target), no crash; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-6-oct-2026)) |
 | Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 102/102: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (5,946 swaps refused) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 103/103: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (5,946 swaps refused) |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
 | On devnet | All three programs run this tree's build (PR #35, 8 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
-| What this process found in our own code and docs | 73 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | 77 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
