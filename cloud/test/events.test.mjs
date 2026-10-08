@@ -225,6 +225,18 @@ test("tokens sent to an allowlisted owner from elsewhere earn no credit", () => 
   assert.equal(truncatedOutflows(tx, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known: [], allowlist: ["treasury"] }).outflows.get("USDC"), 100n);
 });
 
+test("without inner instructions, no token gain earns allowlist credit", () => {
+  // The same attack as above, from an RPC that returns no inner instructions:
+  // the only trace is the balances, which cannot say where the treasury's 100
+  // came from. The drain counts in full.
+  const tx = truncatedTx({
+    keys: KEYS,
+    inner: null,
+    balances: { [VAULT_TOKENS]: [VAULT_PDA, 1_000, 900], [TREASURY_TOKENS]: ["treasury", 0, 100], [ATTACKER_TOKENS]: ["attacker", 150, 50] },
+  });
+  assert.equal(truncatedOutflows(tx, { vaultProgram: VAULT_PROGRAM, tokenMints: MINTS, vaultOf: VAULT_OF, known: [], allowlist: ["treasury"] }).outflows.get("USDC"), 100n);
+});
+
 test("a deposit in the same transaction does not hide a truncated release", () => {
   // 500 deposited, 500 released: the balance is unchanged, the transfer is not.
   const tx = truncatedTx({

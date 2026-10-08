@@ -1120,6 +1120,7 @@ fn eject_matches_its_definition() {
 #[test]
 fn governance_loosen_never_early_and_never_after_veto_or_expiry() {
     let mut r = Rng(0x60F);
+    let mut executable = 0;
     for _ in 0..cases() * 5 {
         let now = r.range(0, 1 << 40) as i64;
         let delay = r.range(0, 30 * 86_400) as i64;
@@ -1131,15 +1132,26 @@ fn governance_loosen_never_early_and_never_after_veto_or_expiry() {
         let res = governance::can_execute(&s, t, v, ex, ab);
         if res.is_ok() {
             assert!(t >= now + MIN_LOOSEN_DELAY_S && t < s.expires_s && !v && !ex && !ab);
+            executable += 1;
+        }
+        // And the converse: an honest change inside its window does execute.
+        if t >= s.executable_s && t < s.expires_s && !v && !ex && !ab {
+            assert_eq!(res, Ok(()), "a due, unvetoed change refused at {t}");
         }
         let tight = governance::schedule(now, Class::Tighten, delay);
         assert_eq!(tight.executable_s, now);
     }
+    // A can_execute that refused everything would pass the checks above.
+    assert!(
+        executable > cases() / 10,
+        "too few executable cases ({executable})"
+    );
 }
 
 #[test]
 fn governance_freeze_quorum_heartbeat_abdication() {
     let mut r = Rng(0x61F);
+    let (mut froze, mut quorate, mut alive) = (0, 0, 0);
     for _ in 0..cases() * 5 {
         let now = r.range(0, 1 << 40) as i64;
         let cur = r.range(0, 1 << 41) as i64;
@@ -1149,12 +1161,17 @@ fn governance_freeze_quorum_heartbeat_abdication() {
                 assert!(secs > 0 && secs <= 86_400);
                 assert!(u >= cur, "a freeze never shortens an existing freeze");
                 assert!(u <= cur.max(now + 86_400));
+                froze += 1;
             }
-            Err(e) => assert_eq!(e, GovError::InvalidDuration),
+            Err(e) => {
+                assert_eq!(e, GovError::InvalidDuration);
+                assert!(secs <= 0 || secs > 86_400, "a valid freeze of {secs}s refused");
+            }
         }
         let (ap, al, th) = (r.next() as u8, r.next() as u8, (r.next() % 9) as u8);
         if governance::quorum(ap, al, th) {
             assert!(th > 0 && (ap & al).count_ones() >= th as u32);
+            quorate += 1;
         }
         // dead guardians never count
         assert!(!governance::quorum(ap, 0, th));
@@ -1163,6 +1180,7 @@ fn governance_freeze_quorum_heartbeat_abdication() {
         let t = last + r.range(0, 40 * 86_400) as i64;
         if governance::guardian_alive(last, interval, t) {
             assert!(t - last <= interval && (86_400..=30 * 86_400).contains(&interval));
+            alive += 1;
         }
         let mask = Abdications(r.next() as u32);
         let k = (r.next() % 40) as u8;
@@ -1180,6 +1198,12 @@ fn governance_freeze_quorum_heartbeat_abdication() {
             );
         }
     }
+    // Each check above only fires on a yes: a freeze_until, quorum or
+    // guardian_alive that always said no would pass them all.
+    assert!(froze > cases() / 2, "too few valid freezes ({froze})");
+    assert!(quorate > cases() / 2, "too few quorums ({quorate})");
+    assert!(alive > cases() / 2, "too few live guardians ({alive})");
+    assert!(governance::quorum(0b0111, 0b0110, 2));
 }
 
 /// The low-water balance (finding 65) against an independent statement: after

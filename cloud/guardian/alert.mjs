@@ -14,6 +14,7 @@ const URGENT_WARNINGS = [
   /recovery key was replaced/,
   /recovery key was removed/,
   /no longer a live guardian/,
+  /no heartbeat sent/,
   /no longer has the cursor/,
   /floor not ready/,
   /log truncated/,

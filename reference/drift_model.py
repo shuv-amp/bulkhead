@@ -68,7 +68,21 @@ def time_to_lose(pct: int, dual: bool) -> F:
     return max(t_short, t_long, F(0)) / HOUR
 
 
+def check() -> None:
+    """The figures the README states, so `scripts/check.sh` can fail on them."""
+    claims = [
+        ("at most 4% of a vault in any hour", fraction(HOUR, **DUAL), F(4, 100)),
+        ("at most 10% of a vault in any day", fraction(DAY, **DUAL), F(10, 100)),
+        ("5% needs an hour and a half of silence", time_to_lose(5, True), F(3, 2)),
+        ("10% needs a day of silence", time_to_lose(10, True), F(24)),
+    ]
+    wrong = [f"{what}: got {got}, want {want}" for what, got, want in claims if got != want]
+    if wrong:
+        raise SystemExit("drift model disagrees with the stated bounds: " + "; ".join(wrong))
+
+
 def main() -> None:
+    check()
     print("## Drift loss model (assumed $550M TVL, vault mix proportional to what was drained)\n")
     print("| Nobody freezes for | Bulkhead dual bucket (2%/h + 5%/day) | Hourly bucket only (2%/h) | Without Bulkhead |")
     print("|---|---|---|---|")
