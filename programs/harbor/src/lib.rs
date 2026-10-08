@@ -34,7 +34,8 @@ pub const VAULT_ID: Address = Address::new_from_array(VAULT_ID_BYTES);
 pub mod ix {
     /// Register with Bulkhead (the caller PDA is the registrar). Data: Vault args.
     pub const REGISTER: u8 = 0;
-    /// A user deposits. Data: amount. Harbor account 2: the user [s].
+    /// A user deposits. Data: amount. Harbor account 2 is not read: the user
+    /// signs as the Vault deposit's source authority (Harbor account 8).
     pub const DEPOSIT: u8 = 1;
     /// A user withdraws to their own token account. Data: amount.
     /// Harbor account 2: the user [s], who must own the recipient account.
