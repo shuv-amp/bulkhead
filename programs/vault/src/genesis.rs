@@ -225,6 +225,7 @@ pub fn create_vault(
         tat_short_ms: 0,
         tat_long_ms: 0,
         ref_balance: 0,
+        low: bulkhead_core::ema::WindowLow::default(),
         ref_updated_s: 0,
         ref_initialized: false,
         decimals,
@@ -487,7 +488,12 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
             if mint != v.mint || owner != key(&pair[0]) {
                 return Err(VaultError::WrongVault.into());
             }
-            balance
+            // What a live exit will take out is not cover (finding 72).
+            if v.exit_amount > 0 && !v.exit_vetoed {
+                balance.saturating_sub(v.exit_amount)
+            } else {
+                balance
+            }
         };
         let held = (token::balance(&pair[1])? as u128)
             .checked_add(lifeboat_balance as u128)

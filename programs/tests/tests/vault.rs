@@ -8,7 +8,7 @@
 
 mod common;
 
-use bulkhead_core::ema::reference_update;
+use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterState};
 use common::vault::*;
@@ -325,9 +325,11 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
     // from the lower of the reference and the balance before the release.
     let mut model = LimiterState::default();
     let (mut reference, mut ref_at, mut ref_init) = (0u64, 0i64, false);
+    let mut low = WindowLow::default();
     let mut balance = 10_000_000 * USDC;
     // Deposits touched it at genesis with the pre-deposit balance of 0.
-    reference = reference_update(reference, ref_at, 0, T0, ref_init);
+    low = low.touch(0, T0, ref_init);
+    reference = ema_update(reference, ref_at, 0, T0, ref_init);
     ref_at = T0;
     ref_init = true;
 
@@ -341,9 +343,10 @@ fn s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue() {
         let m = w.env.ok(&[ix], &[&w.m.admin]);
         let o = outcome(&m);
         assert_eq!(o.backed, 0, "the attacker has no deposits: nothing is backed");
-        reference = reference_update(reference, ref_at, balance, w.env.time, ref_init);
+        low = low.touch(balance, w.env.time, ref_init);
+        reference = ema_update(reference, ref_at, balance, w.env.time, ref_init);
         ref_at = w.env.time;
-        let params = params_from_config(&cfg, capacity_base(reference, balance));
+        let params = params_from_config(&cfg, capacity_base(reference, balance.min(low.low())));
         match request(&mut model, &params, w.env.time * 1_000, amount, 0).unwrap() {
             Decision::Instant => {
                 assert_eq!((o.instant, o.queued), (amount, 0), "minute {minute}");
@@ -2926,7 +2929,8 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, r]), None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_GUARDIANS);
 
-    // Abdicated: fixed for good, even for the admin with a quorum.
+    // Abdicated: fixed for good, even for the admin with a quorum; only
+    // removing it stays possible (finding 72: it only takes power away).
     let ab = w.m.vault_ix(17, &[6], vec![
         AccountMeta::new(w.m.protocol, false),
         AccountMeta::new_readonly(admin, true),
@@ -2936,8 +2940,9 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     w.env.ok(&[ab], &quorum);
     let ix = w.m.replace_recovery_ix(&admin, &Keypair::new().pubkey(), &[g0, g1]);
     assert_eq!(w.env.fails(&[ix], &quorum), verr::ABDICATED);
+    w.env.next_slot();
     let ix = w.m.replace_recovery_ix(&admin, &zero, &[g0, g1]);
-    assert_eq!(w.env.fails(&[ix], &quorum), verr::ABDICATED, "nor removed");
+    w.env.ok(&[ix], &quorum);
 
     // Registration naming a guardian as the recovery key; a fresh key is fine.
     let harbor = Address::new_unique();
@@ -2961,4 +2966,128 @@ fn registration_refuses_a_cut_off_recovery_key() {
     assert_eq!(w.env.fails(&[ix], &[]), verr::INVALID_INSTRUCTION);
     let ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
     w.env.ok(&[ix], &[]);
+}
+
+/// Finding 65, the other side: a withdrawal taken straight back (or capital
+/// parked for under a window) lowers the base only until the low-water window
+/// has passed, not for a day as when the reference itself dropped. Capital
+/// parked for under a window still does not count.
+#[test]
+fn a_round_trip_lowers_the_burst_for_at_most_two_windows() {
+    use bulkhead_core::consts::LOW_WINDOW_S;
+    let mut w = World::new();
+    let small = w.user();
+    let whale = w.user();
+    w.deposit("usdc", &small, 1_000_000 * USDC);
+    let whale_acc = w.deposit("usdc", &whale, 9_000_000 * USDC);
+    w.seal();
+    w.env.advance(2 * DAY);
+    assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 200_000 * USDC);
+    // One transaction: out and straight back in.
+    let out = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_000_000 * USDC, &w.usdc_prices(false));
+    let back = w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_000_000 * USDC);
+    w.env.ok(&[out, back], &[&whale]);
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!((a.balance, a.available_now), (10_000_000 * USDC, 20_000 * USDC), "the 1M low counts within the window");
+    // Capital parked for under a window: still the 1M low.
+    w.env.advance(LOW_WINDOW_S / 2);
+    assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 20_000 * USDC);
+    // After two windows the low has rolled off; the 24h reference never moved.
+    w.env.advance(2 * LOW_WINDOW_S);
+    assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 200_000 * USDC, "back in full, not a day later");
+}
+
+fn r2_lifeboat(w: &World) -> Address {
+    pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program)
+}
+
+fn r2_move_in(w: &World, amount: u64) -> Instruction {
+    w.m.vault_ix(24, &amount.to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(w.usdc.vault_tokens, false),
+        AccountMeta::new(r2_lifeboat(w), false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ])
+}
+
+fn r2_propose_exit(w: &World, amount: u64) -> Instruction {
+    w.m.vault_ix(26, &amount.to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+    ])
+}
+
+/// Finding 72: a freeze stops the admin parking the vault in the lifeboat, so
+/// a stolen admin key cannot re-park it after every quorum return while own-
+/// deposit exits wait for recovery.
+#[test]
+fn the_admin_cannot_park_the_vault_while_it_is_frozen() {
+    let mut w = World::new();
+    let alice = w.user();
+    let acc = w.deposit("usdc", &alice, 1_000_000 * USDC);
+    w.seal();
+    let g0 = w.m.g[0].pubkey();
+    let freeze = w.m.freeze_ix(&g0, None, 86_400);
+    w.env.ok(&[freeze], &[&w.m.g[0]]);
+    let all = w.env.balance(&w.usdc.vault_tokens);
+    assert_eq!(w.env.fails(&[r2_move_in(&w, all)], &[&w.m.admin]), verr::FROZEN);
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &alice.pubkey(), &acc, 1_000_000 * USDC, &w.usdc_prices(false));
+    w.env.ok(&[ix], &[&alice]);
+    assert_eq!(w.env.balance(&acc), 1_000_000 * USDC, "own deposit out during the freeze");
+}
+
+/// Finding 72: the admin is never the lifeboat destination, from either side.
+#[test]
+fn the_admin_never_becomes_the_lifeboat_destination() {
+    let mut w = World::new();
+    w.seal();
+    let dest = w.m.destination.pubkey();
+    let ix = w.m.propose_change_ix(&w.env, 3, &dest, &[], None);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
+}
+
+/// Finding 72: lifeboat tokens a live exit will take out do not cover claims
+/// at the seal.
+#[test]
+fn the_seal_does_not_count_tokens_a_pending_exit_will_take() {
+    let mut w = World::new();
+    let alice = w.user();
+    w.deposit("usdc", &alice, 1_000_000 * USDC);
+    w.env.advance(3 * DAY + 1); // the registration destination is now 72h old
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.refresh_prices();
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
+}
+
+/// Finding 72: an abdicated recovery key can still be removed (it only takes
+/// power away), or a stolen one would stale every admin rotation for good.
+#[test]
+fn an_abdicated_recovery_key_can_still_be_removed() {
+    let mut w = World::new();
+    w.seal();
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let admin = w.m.admin.pubkey();
+    let rec = Keypair::new().pubkey();
+    let signers: [&Keypair; 3] = [&w.m.admin, &w.m.g[0], &w.m.g[1]];
+    w.env.ok(&[w.m.replace_recovery_ix(&admin, &rec, &[g0, g1])], &signers);
+    let ab = w.m.vault_ix(17, &[6], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(admin, true),
+        AccountMeta::new_readonly(g0, true),
+        AccountMeta::new_readonly(g1, true),
+    ]);
+    w.env.ok(&[ab], &signers);
+    let ix = w.m.replace_recovery_ix(&admin, &Keypair::new().pubkey(), &[g0, g1]);
+    assert_eq!(w.env.fails(&[ix], &signers), verr::ABDICATED);
+    w.env.ok(&[w.m.replace_recovery_ix(&admin, &Address::default(), &[g0, g1])], &signers);
 }

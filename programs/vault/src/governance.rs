@@ -59,6 +59,9 @@ fn parse(
             // guardian set changed in between cannot slip one in.
             if *target == [0; 32]
                 || (kind == change::SET_LIFEBOAT_DESTINATION && *target == p.admin)
+                // The admin parks the vault; the destination receives its
+                // exit. One key must never be both (docs/09, finding 72).
+                || (kind == change::SET_ADMIN && *target == p.lifeboat_destination)
                 || (kind == change::SET_ADMIN
                     && (*target == p.recovery
                         || p.guardians[..p.guardian_count as usize].contains(target)))
@@ -509,7 +512,9 @@ pub fn replace_recovery(
     }
     // An abdicated recovery key is fixed for good, and nothing changes while
     // the seal is under review: the same rules as `propose_change`.
-    if Abdications(p.abdications).is_abdicated(change::SET_RECOVERY) {
+    // Removing the key only takes power away: allowed even then, or a stolen
+    // key could stale every admin rotation for good (finding 62).
+    if recovery != [0; 32] && Abdications(p.abdications).is_abdicated(change::SET_RECOVERY) {
         return Err(VaultError::Abdicated.into());
     }
     let t = now()?;

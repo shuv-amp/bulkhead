@@ -149,6 +149,20 @@ def ema_update(reference: int, last_s: int, balance: int, now_s: int, initialize
     return reference - (reference - balance) * f // TAU_S
 
 
+LOW_WINDOW_S = 1_800
+
+
+def window_low_touch(prev: int, cur: int, window: int, balance: int, now_s: int, initialized: bool):
+    """The low-water balance after a touch (Rust `WindowLow::touch`): the least
+    balance seen before an operation in the current and the previous window."""
+    w = now_s // LOW_WINDOW_S                      # floor division: div_euclid
+    if not initialized or w > window + 1:
+        return balance, balance, w
+    if w == window + 1:
+        return cur, balance, w
+    return prev, min(cur, balance), window
+
+
 # ---------------------------------------------------------------------------
 # Value conversion and conservative prices
 # ---------------------------------------------------------------------------

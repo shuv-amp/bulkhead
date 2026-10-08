@@ -5,14 +5,14 @@
 //! `|balance - reference| * min(dt, TAU) / TAU`, truncated toward the old
 //! reference, so it never overshoots the balance.
 //!
-//! The program does not use the average alone: it caps it at the balance
-//! before the operation, so the reference rises slowly and drops at once
-//! (docs/03 §3). Capacity then uses `min(reference, live balance)`, so:
-//! - an attacker cannot raise the limit by depositing right before an attack,
-//!   or between two payouts in one transaction;
-//! - a drain shrinks the limit at once.
+//! Capacity uses `min(reference, live balance, WindowLow::low)`, so:
+//! - an attacker cannot raise the limit by depositing right before an attack
+//!   (the reference moves slowly), nor by depositing and withdrawing around a
+//!   payout in one transaction (the low-water balance remembers the balance
+//!   before the deposit);
+//! - a drain shrinks the limit at once (the live balance).
 
-use crate::consts::TAU_S;
+use crate::consts::{LOW_WINDOW_S, TAU_S};
 
 pub fn ema_update(reference: u64, last_s: i64, balance: u64, now_s: i64, initialized: bool) -> u64 {
     if !initialized {
@@ -30,17 +30,50 @@ pub fn ema_update(reference: u64, last_s: i64, balance: u64, now_s: i64, initial
     }
 }
 
-/// The reference after a touch with the balance before an operation: the EMA
-/// step, but never above that balance. It rises slowly and drops at once, so
-/// capital deposited and withdrawn (backed) within one transaction cannot lift
-/// `capacity_base` back to a reference lagging above what is really left
-/// (docs/09, finding 65).
-pub fn reference_update(
-    reference: u64,
-    last_s: i64,
-    balance: u64,
-    now_s: i64,
-    initialized: bool,
-) -> u64 {
-    ema_update(reference, last_s, balance, now_s, initialized).min(balance)
+/// The lowest balance any touch saw (before its operation) in the current
+/// and the previous window of `LOW_WINDOW_S`, so it always covers between one
+/// and two windows of history. Capacity uses `min(reference, balance, low)`:
+/// capital deposited and taken back (backed) within a transaction, or parked
+/// for less than a window, cannot lift the base back to a reference still
+/// lagging above what is really left (docs/09, finding 65). Unlike dropping
+/// the reference itself, a withdrawal that comes straight back lowers the base
+/// for at most two windows, not for a day.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowLow {
+    pub prev: u64,
+    pub cur: u64,
+    /// `now_s.div_euclid(LOW_WINDOW_S)` of the window `cur` covers.
+    pub window: i64,
+}
+
+impl WindowLow {
+    /// After a touch with the balance before an operation. `initialized`:
+    /// whether any touch came before (else this one starts the history).
+    pub fn touch(self, balance: u64, now_s: i64, initialized: bool) -> WindowLow {
+        let w = now_s.div_euclid(LOW_WINDOW_S);
+        if !initialized || w > self.window.saturating_add(1) {
+            // No operation since at least one whole window: the balance has
+            // been what it is now throughout.
+            WindowLow {
+                prev: balance,
+                cur: balance,
+                window: w,
+            }
+        } else if w == self.window + 1 {
+            WindowLow {
+                prev: self.cur,
+                cur: balance,
+                window: w,
+            }
+        } else {
+            WindowLow {
+                cur: self.cur.min(balance),
+                ..self
+            }
+        }
+    }
+
+    pub fn low(self) -> u64 {
+        self.prev.min(self.cur)
+    }
 }

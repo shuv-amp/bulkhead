@@ -5,9 +5,10 @@
 //! number of cases (default 3_000 per property; CI runs 20_000).
 
 use bulkhead_core::classify::{classify_asset, classify_limits, AssetConfig, Class, LimitConfig};
+use bulkhead_core::consts::LOW_WINDOW_S;
 use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
 use bulkhead_core::consts::{MAX_SLOTS, MIN_UPGRADE_DELAY_S, TAU_S};
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::floor::{
     can_restore, deployable_after_simd0500, elf_info, snapshot_matches, upgrade_eta, RestoreSource,
 };
@@ -1177,6 +1178,56 @@ fn governance_freeze_quorum_heartbeat_abdication() {
                 governance::can_execute(&s, 1, false, false, m2.is_abdicated(k)),
                 Err(GovError::Abdicated)
             );
+        }
+    }
+}
+
+/// The low-water balance (finding 65) against an independent statement: after
+/// a touch at `now` it is the least balance any touch saw in the current or
+/// the previous window. So it is at most every balance touched in the last
+/// `LOW_WINDOW_S` seconds (a deposit cannot lift it for that long), and it
+/// forgets a balance at most two windows old (a round trip cannot lower it for
+/// longer).
+#[test]
+fn the_low_water_balance_is_the_least_balance_of_the_last_one_or_two_windows() {
+    let mut r = Rng(0x10_3A7E);
+    for case in 0..cases() / 10 {
+        let mut now = r.range(0, 1 << 40) as i64 - (1 << 20);
+        let mut low = WindowLow::default();
+        let mut seen: Vec<(i64, u64)> = Vec::new();
+        for _ in 0..r.range(1, 60) {
+            now += pick(
+                &[
+                    0,
+                    1,
+                    59,
+                    600,
+                    LOW_WINDOW_S - 1,
+                    LOW_WINDOW_S,
+                    2 * LOW_WINDOW_S + 1,
+                    r.range(0, 10 * LOW_WINDOW_S as u64) as i64,
+                ],
+                r.next(),
+            );
+            let balance = pick(&[0, 1, u64::MAX, r.range(0, 1 << 40), r.next()], r.next());
+            low = low.touch(balance, now, !seen.is_empty());
+            seen.push((now, balance));
+            let w = now.div_euclid(LOW_WINDOW_S);
+            let spec = seen
+                .iter()
+                .filter(|(t, _)| t.div_euclid(LOW_WINDOW_S) >= w - 1)
+                .map(|(_, b)| *b)
+                .min()
+                .unwrap();
+            assert_eq!(low.low(), spec, "case {case}");
+            for (t, b) in &seen {
+                if now - t < LOW_WINDOW_S {
+                    assert!(
+                        low.low() <= *b,
+                        "case {case}: a balance of the last window is forgotten"
+                    );
+                }
+            }
         }
     }
 }

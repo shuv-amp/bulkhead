@@ -18,7 +18,7 @@
 mod common;
 
 use bulkhead_core::classify::{classify_limits, Class, LimitConfig};
-use bulkhead_core::ema::reference_update;
+use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{available_now, capacity_base, max_unbacked_over, params_from_config, request, rescale_windows, reset_backlog, Decision, LimiterState};
 use common::vault::*;
@@ -101,6 +101,8 @@ struct Model {
     reference: u64,
     ref_at: i64,
     ref_init: bool,
+    /// The low-water balance (finding 65), touched as the program does.
+    low: WindowLow,
     limiter: LimiterState,
     protocol_frozen: i64,
     vault_frozen: i64,
@@ -119,9 +121,15 @@ impl Model {
     }
     /// The reference as the program sees it after `touch_reference` at `now`.
     fn touched(&self, now: i64) -> u64 {
-        reference_update(self.reference, self.ref_at, self.balance, now, self.ref_init)
+        ema_update(self.reference, self.ref_at, self.balance, now, self.ref_init)
+    }
+    /// The base capacities come from after a touch at `now` (`unbacked_base`).
+    fn base(&self, now: i64) -> u64 {
+        let low = self.low.touch(self.balance, now, self.ref_init);
+        capacity_base(self.touched(now), self.balance.min(low.low()))
     }
     fn touch(&mut self, now: i64) {
+        self.low = self.low.touch(self.balance, now, self.ref_init);
         self.reference = self.touched(now);
         self.ref_at = now;
         self.ref_init = true;
@@ -147,7 +155,7 @@ fn program_matches_the_core_model_with_caps_freezes_and_the_lifeboat() {
     for k in [
         "deposit", "release", "backed", "instant", "queued", "refused", "quote", "settle", "cancel",
         "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_refused", "reset", "reset_refused",
-        "lifeboat_in", "lifeboat_out", "lifeboat_refused", "insufficient", "tighten", "loosen_waits",
+        "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "insufficient", "tighten", "loosen_waits",
         "loosen_executed", "loosen_stale", "loosen_early",
     ] {
         let n = totals.get(k).copied().unwrap_or(0);
@@ -186,6 +194,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
         reference: 0,
         ref_at: 0,
         ref_init: false,
+        low: WindowLow::default(),
         limiter: LimiterState::default(),
         protocol_frozen: 0,
         vault_frozen: 0,
@@ -270,8 +279,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 // The model: exactly the program's order of checks.
                 let backed = ledger.backed_amount(&um, amount, &lookup);
                 let unbacked = amount - backed;
-                let reference = md.touched(now);
-                let params = params_from_config(&md.cfg, capacity_base(reference, md.balance));
+                let params = params_from_config(&md.cfg, md.base(now));
                 let mut lim = md.limiter;
                 let decision = if unbacked > 0 {
                     request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until() * 1_000).map(Some).map_err(|_| "limiter")
@@ -470,7 +478,10 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                     AccountMeta::new_readonly(SYSTEM, false),
                 ]);
                 let r = env.send(&[mv], &[&m.admin]);
-                if amount > md.balance {
+                if now < md.frozen_until() {
+                    assert!(r.is_err(), "{}", at("lifeboat move while frozen (finding 72)"));
+                    count("lifeboat_refused_frozen");
+                } else if amount > md.balance {
                     assert!(r.is_err(), "{}", at("lifeboat move beyond the balance"));
                     count("lifeboat_refused");
                 } else {
@@ -586,8 +597,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
 
         // Every attest field equals the core's figures for the model's state.
         let a = m.attest(&mut env, &usdc);
-        let reference = md.touched(now);
-        let params = params_from_config(&md.cfg, capacity_base(reference, md.balance));
+        let params = params_from_config(&md.cfg, md.base(now));
         let instant = if now < md.frozen_until() { 0 } else { available_now(&md.limiter, &params, now * 1_000).min(md.balance) };
         let cap = |x: u128| x.min(u64::MAX as u128) as u64;
         assert_eq!(

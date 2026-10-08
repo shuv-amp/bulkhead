@@ -32,6 +32,13 @@ pub fn move_in(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
     let p = load_protocol(program_id, protocol)?;
     require_admin(&p, acc(accounts, 6)?)?;
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
+    let t = now()?;
+    // A freeze stops the admin parking the vault: otherwise a stolen admin key
+    // moves it back in after every quorum return, and own-deposit exits fail
+    // for as long as recovery takes (docs/09, finding 72).
+    if t < p.frozen_until.max(v.frozen_until) {
+        return Err(VaultError::Frozen.into());
+    }
     let (vault_tokens, lifeboat, mint, token_program) = (
         acc(accounts, 2)?,
         acc(accounts, 3)?,
@@ -63,7 +70,6 @@ pub fn move_in(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
         )?;
         token::initialize_account(token_program, lifeboat, mint, acc(accounts, 1)?.address())?;
     }
-    let t = now()?;
     touch_reference(&mut v, token::balance(vault_tokens)?, t);
     let signer = VaultSigner::new(&v);
     let seeds = signer.seeds();

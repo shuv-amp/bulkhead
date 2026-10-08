@@ -39,10 +39,11 @@ pub use state::{change, Asset, Backing, Change, Protocol, Ticket, Vault, MAX_GUA
 pub use pyth::{parse as parse_price_update, PriceUpdate};
 pub use token::{mint_policy_decimals, token_account_fields};
 
-use bulkhead_core::ema::reference_update;
+use bulkhead_core::ema::ema_update;
 use bulkhead_core::governance::{
     MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
 };
+use bulkhead_core::limiter::capacity_base;
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
 use pinocchio::error::ProgramError;
 use pinocchio::instruction::{InstructionAccount, InstructionView};
@@ -352,11 +353,11 @@ impl VaultSigner {
     }
 }
 
-/// Updates the reference balance (EMA) with the balance *before* an operation.
-/// It rises slowly but drops at once (`reference_update`, finding 65); a
-/// deposit touches with the balance before it, so it cannot raise the base.
+/// Updates the reference balance (EMA) and the low-water balance with the
+/// balance *before* an operation.
 pub(crate) fn touch_reference(v: &mut Vault, balance: u64, now_s: i64) {
-    v.ref_balance = reference_update(
+    v.low = v.low.touch(balance, now_s, v.ref_initialized);
+    v.ref_balance = ema_update(
         v.ref_balance,
         v.ref_updated_s,
         balance,
@@ -365,6 +366,14 @@ pub(crate) fn touch_reference(v: &mut Vault, balance: u64, now_s: i64) {
     );
     v.ref_updated_s = now_s;
     v.ref_initialized = true;
+}
+
+/// The base capacities are computed from, after a touch: the reference, the
+/// live balance and the low-water balance, whichever is least. Capital that
+/// arrived within the window does not count (finding 65), and money that has
+/// left stops counting at once (A1).
+pub(crate) fn unbacked_base(v: &Vault, balance: u64) -> u64 {
+    capacity_base(v.ref_balance, balance.min(v.low.low()))
 }
 
 /// Guardian bitmap of `signers`: each must sign and be a current guardian.

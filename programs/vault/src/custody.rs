@@ -5,7 +5,7 @@ use crate::state::{Asset, Backing, Protocol, Ticket, Vault};
 use crate::*;
 use bulkhead_core::consts::MAX_SLOTS;
 use bulkhead_core::ledger::{Ledger, Pricing};
-use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterError};
+use bulkhead_core::limiter::{params_from_config, request, Decision, LimiterError};
 
 /// Loads the backing ledger of `owner`, creating it if it does not exist.
 pub(crate) fn load_or_create_backing(
@@ -323,9 +323,10 @@ pub fn release(
     // Unbacked lane: the dual-bucket limiter.
     let balance = token::balance(vault_tokens)?;
     touch_reference(&mut v, balance, t);
-    // Capacities from min(reference, live balance): money that has left stops
-    // counting at once (docs/15, A1).
-    let params = params_from_config(&v.limits, capacity_base(v.ref_balance, balance));
+    // Capacities from min(reference, live balance, low-water balance): money
+    // that has left stops counting at once (docs/15, A1), and money that
+    // arrived within the window does not count yet (finding 65).
+    let params = params_from_config(&v.limits, unbacked_base(&v, balance));
     let frozen_until_ms = p.frozen_until.max(v.frozen_until).saturating_mul(1_000);
     let mut state = v.limiter_state();
     let (mut instant, mut queued, mut eta_s) = (0u64, 0u64, 0i64);
