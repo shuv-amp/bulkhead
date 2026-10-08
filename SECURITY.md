@@ -6,7 +6,7 @@
 
 | Component | State | Checked by |
 |---|---|---|
-| `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 14 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
+| `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 15 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, a JavaScript-vs-Python differential, the end-to-end run |
 | Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep, 6 Oct, 7 Oct and 8 Oct (below) | All three programs run the canonical build (Linux x86_64; CI publishes it) of the PR #34 commit of 8 Oct, matched byte for byte. The on-chain parts of findings 63–73 are not deployed yet, so `scripts/verify-devnet.sh` fails on this tree until devnet is upgraded |

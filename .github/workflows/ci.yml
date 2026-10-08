@@ -257,7 +257,7 @@ jobs:
           retention-days: 30
 
   kani:
-    # Bounded model checking of the core's 14 harnesses (proofs.rs). Kani is
+    # Bounded model checking of the core's 15 harnesses (proofs.rs). Kani is
     # installed at a pinned version from crates.io, not through an action.
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.kani == 'true'
