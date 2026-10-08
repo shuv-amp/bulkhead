@@ -652,9 +652,14 @@ fn pin_snapshot(program_id: &Address, accounts: &mut [AccountView]) -> ProgramRe
 // decide, by leaving it out, that the quorum may not restore it (docs/09,
 // finding 53). It always exists while pinned (Floor holds its authority; a
 // restore that consumes it clears the pin), and comparing it costs about one
-// unit per 250 bytes, so naming it cannot keep an honest stop from landing. Its
-// contents never stop the abort: if they ever differed from the live code,
-// only the quorum's fast restore would be unavailable.
+// unit per 250 bytes. An honest stop that names the pin it read cannot fail
+// because of the snapshot, even after someone re-pins: any frozen buffer
+// byte-identical to the live code is accepted and becomes the pin (docs/09,
+// finding 66). A stop that omits account 10, or names the abort buffer or a
+// buffer not byte-identical to the live code (other than the current pin),
+// is refused (`SnapshotMismatch`). If the current pin's contents ever
+// differed from the live code, the stop still lands; only the quorum's fast
+// restore would be unavailable.
 fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
     let t = now()?;

@@ -16,7 +16,7 @@
 
 A protocol points its program's upgrade authority at a Floor PDA. Its existing multisig becomes Floor's **owner**.
 - **Upgrades** wait at least 72 hours (a constant; **7 days recommended**, the L2BEAT Stage-1 exit window). Every pending upgrade is public, and any guardian can veto it.
-- **Stop:** any single guardian (or the owner) can swap in a two-instruction abort binary in one transaction. Every instruction of the protected program then fails. All accounts and funds stay where they are.
+- **Stop:** any single live guardian (or the owner, only while fewer than a quorum of guardians are live) can swap in a two-instruction abort binary in one transaction. Every instruction of the protected program then fails. All accounts and funds stay where they are.
 - **Restore:**
   - Fast, if a guardian quorum approves a specific buffer. The buffer is Floor-owned, so its bytes can't change after review.
   - Otherwise slow: after the 72h delay with no veto.
@@ -34,7 +34,7 @@ The protocol moves its vault token accounts (and optionally mint authority) unde
 Two lanes:
 - **Backed lane (never throttled, never frozen by Bulkhead):** paying an owner back what their own ledger supports. That means their own deposit, plus borrowing against allowlisted collateral at conservative prices.
 - **Unbacked lane (rate-limited):** everything else. Borrows against unlisted collateral, profits, bonuses, admin withdrawals, unbacked mints.
-  - Instant up to 2% of the vault per hour and 5% per day, measured on the lower of the live balance and its 24-hour average (the reference balance). Absolute caps in tokens bound capital an attacker parks in the vault first ([15](15-ADVERSARIAL-REVIEW.md)).
+  - Instant up to 2% of the vault per hour and 5% per day, measured on the least of the live balance, its 24-hour average (the reference balance) and the low-water balance (the lowest balance of the last 30 to 60 minutes). Absolute caps in tokens bound capital an attacker parks in the vault first ([15](15-ADVERSARIAL-REVIEW.md)).
   - Beyond that, the request becomes a public **ticket** that waits at least 6 hours.
   - Guardians can freeze the lane or cancel tickets.
 
@@ -46,7 +46,7 @@ These are the product. Each has a proof or a test (`03`, `09`).
 
 | ID | Plain words | Precise statement |
 |---|---|---|
-| **G1** | Unbacked money leaves at most 2% per hour and 5% per day of the vault | For any `t0, T ≥ 0`: the unbacked amount requested in `[t0, t0+T]` and paid by `t0+T` is ≤ `C_s·(W_s+T)/W_s` and ≤ `C_l·(W_l+T)/W_l`. It holds with the protocol's admin and upgrade keys compromised. `C` is a fraction of `min(reference, live balance)`, clamped to the absolute caps when set (`03 §3`); over a window, the largest `C` in it applies. |
+| **G1** | Unbacked money leaves at most 2% per hour and 5% per day of the vault | For any `t0, T ≥ 0`: the unbacked amount requested in `[t0, t0+T]` and paid by `t0+T` is ≤ `C_s·(W_s+T)/W_s` and ≤ `C_l·(W_l+T)/W_l`. It holds with the protocol's admin and upgrade keys compromised. `C` is a fraction of `min(reference, live balance, low-water balance)`, clamped to the absolute caps when set (`03 §3`); over a window, the largest `C` in it applies. |
 | **G2** | Your own deposit is never throttled, frozen or priced | An owner with no liabilities is paid at least `min(amount, own net deposit)` of that mint through the backed lane: no prices are needed, and no freeze or limit applies. (Whether the tokens are in the vault is the pool's liquidity: lending moves deposits out, and a bounded unbacked loss reduces the pool; `03 §4.6`.) |
 | **G3** | The backed lane never pays more than the owner's ledger supports | After any backed payment, either nobody in that ledger owes anything, or health ≥ 0 at conservative prices, or the payment was the owner's own deposit of a mint that is not allowlisted (worth 0 as collateral anyway) |
 | **G4** | Tighten now, loosen later | A change that tightens every field applies instantly. Any other change waits ≥ 72 hours (a constant), is public, any guardian can veto it, and it expires 7 days after becoming executable. With its guardian quorum, a protocol may **abdicate** loosening a change kind forever; tightening it stays instant. |
@@ -101,8 +101,9 @@ When frozen: "Frozen: $0 can leave unbacked until {time}."
 | **Owner** | The wallet or PDA whose tokens actually arrived in a deposit; backing belongs to it and pays only to it |
 | **Backing / ledger** | Up to 8 positions `(mint, net)` per owner; positive = deposited, negative = backed borrowing |
 | **Backed / unbacked** | Whether a payout is supported by the owner's ledger (G3) or must use the limiter (G1) |
-| **Burst, daily cap** | The two GCRA buckets: default 2%/1h and 5%/24h of the lower of the reference and the live balance, optionally capped in tokens |
-| **Reference balance** | A slow (24h) average of the vault balance. Capacities come from the lower of it and the live balance |
+| **Burst, daily cap** | The two GCRA buckets: default 2%/1h and 5%/24h of the least of the reference, the live balance and the low-water balance, optionally capped in tokens |
+| **Reference balance** | A slow (24h) average of the vault balance: it rises and falls at most `dt/24h` of the way to the balance. Capacities come from the least of it, the live balance and the low-water balance |
+| **Low-water balance** | The least balance any touch saw before its operation in the current and the previous 30-minute window. Capital counts toward capacity only once it has stayed a full window, so a flash deposit can't lift it; a withdrawal that comes straight back lowers it for at most an hour (`03 §3`) |
 | **Ticket** | A queued unbacked payout with an ETA; guardians may cancel or extend it |
 | **Freeze** | Guardian action: the unbacked lane queues everything and tickets cannot settle, ≤ 24h per call |
 | **Lifeboat** | Bulkhead-held holding account for emergency moves; exits wait 72h to a pre-committed destination |

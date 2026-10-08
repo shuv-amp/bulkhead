@@ -16,7 +16,7 @@ See `03 §2–§5`.
 The people who want the admin constrained are the ones whose money sits under it: depositors, curators, allocators, insurers. Bulkhead gives them a worst case enforced on-chain (`attest`: "at most $X now, $Y in the next hour, $Z in a day"). Protocols pay for Bulkhead Cloud: a hosted guardian, calibration on their own flows, and the attestation feed. The core stays free and open source. See `11`.
 
 **What exactly does "2% per hour and 5% per day" mean?**
-Each rate refills a bucket of the same size. So the most unbacked money that can leave in any window of length `T` is `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault (of the lower of its live balance and its 24-hour average, `03 §3`):
+Each rate refills a bucket of the same size. So the most unbacked money that can leave in any window of length `T` is `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault (of the least of its live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes, `03 §3`):
 - up to 4% in any hour;
 - up to 10% in any day;
 - half a vault takes 9 days with nobody responding.
@@ -81,7 +81,7 @@ No. Tokens sit in accounts owned by the Vault program's PDA. No key can transfer
 **What if Bulkhead has a bug?**
 It is the top risk, so every rule is stated independently more than once and checked:
 - a Rust core against a Python reference, over 6.9M differential lines;
-- property tests, 13 Kani harnesses, exhaustive tests and mutation testing;
+- property tests, 14 Kani harnesses, exhaustive tests and mutation testing;
 - the programs against a model built from the core;
 - every finding listed in `09 §4`.
 
@@ -95,12 +95,12 @@ Measured on the real runtime, through a protocol's CPI:
 
 | Instruction | Compute units |
 |---|---|
-| `deposit` | ~9.8k |
-| `release`, own deposit | ~12.8k |
-| `release`, priced borrow | ~17.5k |
-| Floor stop of a 200 KB program | ~10k |
+| `deposit` | ~10.6k |
+| `release`, own deposit | ~13.8k |
+| `release`, priced borrow | ~18.4k |
+| Floor stop of a 200 KB program | ~10.3k |
 
-See `05 §10` and `06 §7`.
+Measured 8 Oct 2026 on a macOS build. See `05 §10` and `06 §7`.
 
 **Is it live?**
-On devnet, since 28 Sep 2026, with test tokens only (ids in the README). Those binaries match the 29 Sep upgrade, not every later commit in this repository. Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.
+On devnet, since 28 Sep 2026, with test tokens only (ids in the README). Devnet runs the PR #34 build of 8 Oct; the on-chain parts of findings 63–73 are not deployed yet, so `scripts/verify-devnet.sh` fails on this tree until devnet is upgraded. Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.

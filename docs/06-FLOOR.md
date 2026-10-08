@@ -10,7 +10,7 @@ Floor is a small program (`programs/floor`, Pinocchio, one dependency: `bulkhead
 
 It is a separate program from the Vault so each has a small audit surface and its own blast radius.
 
-Status: built, tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`). Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`). The bytes on devnet are that deployment, not this tree (the upgrade-delay cap changed). The full lifecycle has run there (§7). Unaudited.
+Status: built, tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`). Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`). Devnet runs the PR #34 build of 8 Oct, not this tree: the on-chain parts of findings 63–73 are not deployed (`SECURITY.md`). The full lifecycle has run there (§7). Unaudited.
 
 ## 1. Why it exists
 
@@ -92,7 +92,7 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 0 | `register(owner, guardians, threshold, interval, delay, recovery?)` | the **current** upgrade authority | Refuses a recovery key that is also a guardian or the owner. Creates the config and moves the authority to Floor's PDA **in the same instruction** (CPI `SetAuthority`). There is no window in which Floor holds a key but someone else chose the guardians. Survives a pre-funded config address. |
 | 1 | `stage_abort` | anyone | Accepts a frozen buffer holding exactly a canonical abort binary that fits the programdata account |
 | 2 | `pin_snapshot` | anyone | Accepts a frozen buffer byte-identical to the live code (`sol_memcmp_`) |
-| 3 | `abort` | a live guardian; the owner only while fewer than a quorum of guardians are live | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Account 10 is the pinned buffer, or any other frozen buffer byte-identical to the live code, which then becomes the pin. Anyone may re-pin, so a re-pin just before the stop cannot make an honest stop fail. Never fails because of the snapshot. Cancels any pending proposal. |
+| 3 | `abort` | a live guardian; the owner only while fewer than a quorum of guardians are live | Re-checks the snapshot against the live bytes, then CPIs `Upgrade(abort buffer)`. Account 10 is the pinned buffer, or any other frozen buffer byte-identical to the live code, which then becomes the pin. An honest stop naming the pin it read cannot fail because of the snapshot, even after a re-pin. A stop that omits account 10 while a snapshot is pinned, or names the abort buffer or a buffer not byte-identical to the live code (other than the current pin), is refused (`SnapshotMismatch`). Cancels a pending owner proposal; a recovery-key proposal survives the stop. |
 | 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. The recovery key is never a guardian: SetGuardians and SetRecovery refuse a set where one key holds both roles. Raising the delay is instant, even while a recovery proposal holds the slot (which stays); everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop; once vetoed or expired it no longer holds the slot. |
 | 5 | `veto` | any live guardian | Blocks the pending proposal. Data may be empty, or the proposal id (u64). A named id that is not the one pending is refused, so a retried veto cannot hit a proposal that replaced it. |
 | 6 | `approve` | live guardians | Approves the pending Restore (its exact buffer) |
@@ -105,12 +105,12 @@ Account lists and data layouts are documented above each handler in `programs/fl
 
 ## 7. Measured
 
-Real agave loader, LiteSVM with the mainnet feature set (`programs/tests/tests/floor.rs`):
+Real agave loader, LiteSVM with the mainnet feature set (`programs/tests/tests/floor.rs`), measured 8 Oct 2026 on a macOS (arm64) build of this tree:
 
 | Operation | Compute units |
 |---|---|
-| Stop a ~200 KB program, including byte-for-byte snapshot verification | 10,261 |
-| Restore the ~200 KB snapshot (guardian quorum) | 8,110 |
+| Stop a ~200 KB program, including byte-for-byte snapshot verification | 10,312 |
+| Restore the ~200 KB snapshot (guardian quorum) | 8,149 |
 
 A snapshot buffer costs rent for a copy of the program (about 5,080 lamports per byte at current rent, the same on mainnet and devnet on 28 Sep 2026; about 1.04 SOL for 200 KB). The rent is returned when a restore consumes the buffer. That is the price of a one-instruction, trustless undo.
 

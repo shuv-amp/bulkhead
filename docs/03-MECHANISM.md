@@ -131,7 +131,7 @@ The property test `g1_dual_bucket_bound_holds_with_freezes_cancels_and_resets` c
 
 - It bounds the **unbacked** lane only. The backed lane is bounded by G3 instead.
 - It is per vault. A protocol with vaults `v` loses at most `Σ_v bound_v`. With every vault at the same percentages, that is the same percentage of TVL.
-- It assumes capacity is constant over the window. Capacity comes from `min(reference, live balance)` (§3): the reference moves at most `dt/24h` toward the live balance, and the live balance changes with every payment. Using the maximum capacity over the window keeps the bound valid.
+- It assumes capacity is constant over the window. Capacity comes from `min(reference, live balance, low)` (§3): the reference moves at most `dt/24h` toward the live balance, the low-water balance follows the least balance of the last 30 to 60 minutes, and the live balance changes with every payment. Using the maximum capacity over the window keeps the bound valid.
 
 ## 3. The reference balance (EMA)
 
@@ -141,14 +141,17 @@ ema_update(ref, last_s, balance, now_s, initialized):
     f = min(max(0, now_s − last_s), 86 400)
     d = ⌊|balance − ref| · f / 86 400⌋
     return ref + d if balance ≥ ref, else ref − d     (toward balance, truncated toward ref)
-ref        = min(ema_update(ref, last_s, balance, now_s, init), balance)   (the program's touch)
-base       = min(ref, balance)                     (capacity_base; balance before the operation)
+ref        = ema_update(ref, last_s, balance, now_s, init)          (the program's touch)
+low        = WindowLow.touch(balance, now_s, init).low()           (least balance seen this window and the last)
+base       = min(ref, balance, low)                (balance before the operation)
 capacity_k = clamp(⌊base · bps_k / 10 000⌋, floor_k, cap_k if cap_k > 0)   (saturating at u64::MAX)
 ```
 
-It is updated on every touch, **before** the operation, from the balance before the transfer. The program caps the result at that balance, so the reference **drops at once** and **rises slowly**.
+Both are updated on every touch, **before** the operation, from the balance before the transfer (`touch_reference`, `unbacked_base` in the Vault). The reference **rises and falls slowly**: at most `dt/24h` of the way. The low-water balance (core `ema::WindowLow`) is the least balance any touch saw before its operation in the current and the previous 30-minute window (`LOW_WINDOW_S = 1800`), so it covers between 30 and 60 minutes of history.
 
-**Why the lower of the two** (`15`, A1). An average alone rises slowly, which is the point (G-8), but it also falls slowly: after a large backed exit or a bank run, capacity stayed sized for money that had left (7.8× the daily bound on what was left, in the adversarial test). With `min`, money that arrives still counts slowly and money that leaves stops counting at once. It only ever lowers a capacity, so it is a tightening at every instant. Every unbacked payout also shrinks the base, so a burst is 2% of what is in the vault at each payout: 100,000 of a 10,000,000 vault, then 99,000 of the 9,900,000 left (S8). The reference itself drops at once to the balance before each transfer, and a deposit later in the same transaction moves it by `dt = 0`, i.e. not at all. So capital deposited within the transaction cannot raise the base back between payouts.
+**Why the lower of the two** (`15`, A1). An average alone rises slowly, which is the point (G-8), but it also falls slowly: after a large backed exit or a bank run, capacity stayed sized for money that had left (7.8× the daily bound on what was left, in the adversarial test). With `min`, money that arrives still counts slowly and money that leaves stops counting at once. It only ever lowers a capacity, so it is a tightening at every instant. Every unbacked payout also shrinks the base, so a burst is 2% of what is in the vault at each payout: 100,000 of a 10,000,000 vault, then 99,000 of the 9,900,000 left (S8).
+
+**Why the low-water balance** (`09`, finding 65). `min(reference, live balance)` alone was not enough: the live balance is read inside the release's transaction. After a large exit the reference lags above the balance; a compromised protocol could deposit up to the reference, take an unbacked payout sized from it, and withdraw the deposit through the backed lane, all in one transaction (with a flash loan, at no cost). The low-water balance remembers the balance before that deposit, so the base stays at what is really left. Capital counts toward the base only once it has stayed at least one 30-minute window; a flash deposit, or capital parked for less than 30 minutes, cannot lift it. An honest withdrawal that comes straight back lowers the base for at most two windows (one hour), not for a day.
 
 **Absolute caps** (`cap_k`, in tokens; 0 means none). `min` does not help against capital the attacker parks in the vault itself: deposit, wait for the reference, drain while the deposit is still there, then take it back through the backed lane (`15`, A1b: 19.8% of the honest depositors' money in a 2-minute attack on a 10M vault next to 90M parked). Caps near the vault's honest size bring that back to the G1 bound (2.1%). Setting or lowering a cap is a tightening (instant); raising it is a loosening (72h). Calibration sets both (`07 §4`).
 
@@ -214,7 +217,7 @@ Soundness is monotone in `b` (health after is non-increasing in `b`), so the val
 2. **Full amount valid:** if paying the whole amount is valid, return it (the largest valid `b ≤ a`, by definition).
 3. **Otherwise:** binary search on `[0, a − 1]` (≤ 64 steps).
 
-On-chain, rules 1 and 2 take a priced borrow from ~73k to ~17k compute units (`05 §10`).
+On-chain, rules 1 and 2 take a priced borrow from ~73k to ~18k compute units (`05 §10`).
 
 **One exception to monotonicity, found by the differential.** Collateral whose value computation overflows u128 counts as 0 (fail closed; the intermediate product overflows only for positions worth on the order of $3·10¹⁶ or more). There, paying *less* can be invalid while paying *more* is valid. In that region the search may stop below the true maximum, which is conservative. An earlier early exit ("if one unit is invalid, nothing is") assumed an interval and was rejected when the differential caught it (`09 §4`). The Rust core and the Python reference run the identical search, and 20 regression fixtures pin such cases. Golden E7 pins the search itself there: with the valid set `[4, 6]`, a request of 7 is paid 0 through the backed lane and a request of 6 is paid 6. (Mutation testing showed the search's upper bound was otherwise untested, `09 §6`.)
 
@@ -301,7 +304,7 @@ Examples (golden G-12):
 
 **A change of window keeps the bucket's used fraction.** This is the policy, confirmed in the design review: it is also what the state does when capacity drifts (the TAT stays, `C` moves), so one invariant covers both. A bucket's state is a backlog in milliseconds, and the same backlog is a smaller share of a longer window. So whenever a vault's limits change, each backlog becomes `⌈backlog · W_new / W_old⌉` (`rescale_windows`). Without it, lengthening a window (a tightening, applied at once) made a just-drained bucket look partly full, and a stolen admin key could repeat that to take the burst again and again (`09 §4`, finding 30). With it, a tightening never raises the instant room, at the moment it applies or later: the room is `(1 − f)·C_new ≤ (1 − f)·C_old`, and it refills no faster.
 
-**Known liveness caveat.** A compromised admin can tighten instantly (for example, capacity 0 closes the unbacked lane), and undoing that takes 72h. That is denial of service on unbacked flows, not theft. Own-deposit exits keep working. We publish this.
+**Known liveness caveat.** A compromised admin can tighten instantly (for example, capacity 0 closes the unbacked lane), and undoing that takes 72h. That is denial of service on unbacked flows, not theft. Own-deposit exits keep working while the tokens are in the vault. A stolen admin key can still park the vault in the lifeboat (`lifeboat_move`) when no freeze is in force; G2 does not promise the tokens are in the vault (`00`, D24). A guardian freeze stops `lifeboat_move` (`Frozen`, finding 72), so a quorum's `lifeboat_return` sticks while the freeze lasts. We publish this.
 
 ## 6. Tickets, freezes, lifeboat
 
@@ -309,13 +312,13 @@ Examples (golden G-12):
 |---|---|---|---|
 | `settle_ticket` | anyone (crank) | Pays the stored recipient once `now ≥ eta` and not frozen | Only the stored recipient |
 | `cancel_ticket` | any live guardian (not the admin, A4) | Ticket closed; tokens stay in the vault; the protocol decides by governance whether to re-release | No refund of reservation (§2.5); names the ticket id it expects, since a ticket's address can be reused |
-| `extend_ticket` | any guardian | `eta += x` | ≤ 24h per call, ≤ 7 days total; names the ticket id it expects |
-| `freeze` | any guardian, admin | `frozen_until = max(frozen_until, now + x)` | `x ≤ 24h`; re-freezable |
+| `extend_ticket` | any live guardian | `eta += x` | ≤ 24h per call, ≤ 7 days total; names the ticket id it expects |
+| `freeze` | any live guardian, admin | `frozen_until = max(frozen_until, now + x)` | `x ≤ 24h`; re-freezable |
 | `unfreeze` | guardian quorum | `frozen_until = now` | |
 | `reset_backlog` | admin or guardian | §2.2 | Only with zero pending tickets |
-| `lifeboat_move` | admin | Vault → lifeboat, instant, any amount | Destination is the lifeboat PDA only |
-| `lifeboat_return` | admin | Lifeboat → vault, instant | |
-| `lifeboat_exit` | admin proposes; anyone executes after delay | Lifeboat → committed destination | ≥ 72h; guardian veto; destination committed ≥ 72h earlier |
+| `lifeboat_move` | admin | Vault → lifeboat, instant, any amount | Destination is the lifeboat PDA only; refused while the protocol or the vault is frozen (`Frozen`) |
+| `lifeboat_return` | admin, or a live guardian quorum | Lifeboat → vault, instant | |
+| `lifeboat_exit` | admin proposes; anyone executes after delay | Lifeboat → committed destination | ≥ 72h; guardian veto; destination committed ≥ 72h earlier; the destination is never the admin (`SetAdmin` refuses it, `SetLifeboatDestination` refuses the admin); the seal does not count tokens a live exit will take |
 
 ## 7. The worst-case attestation
 
@@ -380,7 +383,7 @@ Why each rule exists: `14 §3–4`.
 |---|---|---|
 | `cost` | ceil; saturates at 2^61 ms | The requester pays at least the exact time; TAT can't overflow |
 | capacity | floor; saturates at `u64::MAX` | Smaller budget. (Saturation was a real bug; see `09 §4`.) |
-| EMA step | truncate toward the old reference | Moves slowly in both directions, never overshoots; the program then caps it at the balance, so it drops at once |
+| EMA step | truncate toward the old reference | Moves slowly in both directions, never overshoots; money that leaves stops counting at once through `min` with the live balance and the low-water balance |
 | collateral value | floor; overflow → 0 | Conservative |
 | liability value | ceil; overflow → unknown → nothing backed | Conservative |
 | health sum | checked; overflow → unknown | Conservative |

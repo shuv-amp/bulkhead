@@ -22,7 +22,7 @@ A security product with a bug is worse than no product. This file lists every ad
 
 | # | Adversary | Capability | Bulkhead's bound | Residual (stated publicly) |
 |---|---|---|---|---|
-| T1 | **Protocol admin key compromised** (Drift) | Any protocol setting; can propose Bulkhead changes; can tighten | Unbacked outflow ≤ G1 bound until freeze; loosening waits 72h and is vetoable; emergency moves only to the lifeboat | Can tighten to 0 (DoS of the unbacked lane ≥ 72h). Own-deposit exits keep working. |
+| T1 | **Protocol admin key compromised** (Drift) | Any protocol setting; can propose Bulkhead changes; can tighten | Unbacked outflow ≤ G1 bound until freeze; loosening waits 72h and is vetoable; emergency moves only to the lifeboat | Can tighten to 0 (DoS of the unbacked lane ≥ 72h). Own-deposit exits keep working while the tokens are in the vault. The key can still park the vault in the lifeboat when no freeze is in force (G2 does not promise the tokens are in the vault, `00` D24); a guardian freeze stops `lifeboat_move` (`Frozen`, finding 72), so a quorum's `lifeboat_return` sticks while it lasts. |
 | T2 | **Protocol upgrade key compromised** | Arbitrary protocol code signing as the caller PDA | Vault: same as T1, every outflow still goes through Bulkhead. Floor: a new binary waits ≥ 72h, any guardian vetoes; any guardian can stop the program; a quorum restores the verified snapshot in one instruction. | Without Floor, the attacker can brick the protocol program (funds stay in Bulkhead vaults; the lifeboat can move them to the committed destination after 72h) |
 | T3 | **Protocol logic bug** (Mango, Cashio, Loopscale, Crema) | Wrong internal accounting | Backed lane uses Bulkhead's own ledger and prices; everything else goes through the limiter | Genuine appreciation of real collateral is real value, not a loss |
 | T4 | **Atomic single-transaction drain** (44% of incidents; 4 KB since 15 Sep) | Many steps in one transaction or bundle | The limiter runs inside every release, so one transaction gets at most the available burst | None beyond G1 |
@@ -70,8 +70,8 @@ A security product with a bug is worse than no product. This file lists every ad
 | I12 | No token leaves a vault except release, settle, lifeboat | program-vs-model differential (vault balance equals the model after every step) |
 | I13 | Releases fail before the seal | program `nothing_can_be_released_before_the_seal…` |
 | I14 | `vault.queued_amount == Σ pending tickets` | program-vs-model differential, after every step |
-| I15 | Floor: no new binary before 72h unless a quorum approved that exact frozen buffer during a restore, or the snapshot is restored | 21 Floor tests on the real loader (`programs/tests/tests/floor.rs`) |
-| I16 | Python reference and Rust core agree on every input | diff (6,943,561 identical lines in the final 6-seed run; 35 fixtures with expected outputs) |
+| I15 | Floor: no new binary before 72h unless a quorum approved that exact frozen buffer during a restore, or the snapshot is restored | 36 Floor tests on the real loader (`programs/tests/tests/floor.rs`) |
+| I16 | Python reference and Rust core agree on every input | diff (6,943,561 identical lines in the final 6-seed run; 36 fixtures with expected outputs) |
 
 ## 4. The #1 risk: a bug in Bulkhead itself
 

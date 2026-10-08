@@ -17,7 +17,7 @@ Status (28 Sep 2026):
 | S7 slow loosening | `tests/vault.rs::s7_…`, `an_unvetoed_loosening…` | **Runs** |
 | S8 one-transaction attack | `tests/vault.rs::s8_…` | **Runs** |
 | S9 honest borrower | `tests/vault.rs::s9_…` | **Runs** |
-| S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle` (+ 20 more Floor tests); on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
+| S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle` (+ 35 more Floor tests); on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
 | S11 liquidation cascade | core only: `crates/bulkhead-core/tests/cascade.rs`; synthetic market | **Runs** (core); a program-level run and a replay of real Pyth history are not done |
 
 ## S1: a compromised admin (Drift class)
@@ -27,7 +27,7 @@ Status (28 Sep 2026):
 **LiteSVM, golden G-1 on-chain** (`s1_compromised_admin_gets_exactly_the_burst_then_a_public_queue`):
 - Setup: 10,000,000 USDC vault, default limits, sealed.
 - The attacker orders 150k, 50k, 10k, 400k and 1M USDC, one per minute (the Drift cadence).
-- Every outcome and every ticket ETA equals the core model's to the second, including the capacity following the draining balance (the lower of the EMA reference and the live balance): the last ticket is due in 54h 37m, not the golden vector's 53h 12m at a fixed capacity.
+- Every outcome and every ticket ETA equals the core model's to the second, including the capacity following the draining balance (the least of the EMA reference, the live balance and the low-water balance, `03 §3`): the last ticket is due in 54h 37m, not the golden vector's 53h 12m at a fixed capacity.
 - The attacker receives **exactly 200,000 USDC** (the 2% burst); three requests wait in public.
 - A guardian freezes; a due ticket then can't settle (`Frozen`); guardians cancel all tickets; the attacker keeps the burst only.
 
@@ -141,7 +141,7 @@ Not done: the same run on the programs (LiteSVM), and a replay of a real crash d
 
 ## Devnet signatures
 
-Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep; all three upgraded in place on 6 Oct (#8, #12, #16). Every transaction below is finalized and succeeded. Program ids, hashes and the upgrade authority are in `SECURITY.md`.
+Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep; all three upgraded in place on 6 Oct (#8, #12, #16); Floor and Vault last on 8 Oct, to the PR #34 build. The on-chain parts of findings 63–73 are not deployed yet, so `scripts/verify-devnet.sh` fails on this tree until devnet is upgraded. Every transaction below is finalized and succeeded. Program ids, hashes and the upgrade authority are in `SECURITY.md`.
 
 **Programs**
 
@@ -163,7 +163,7 @@ Deployed 28 Sep 2026; the Vault upgraded in place on 29 Sep; all three upgraded 
 | Vault upgraded in place, 8 Oct: `replace_recovery` (the admin with a live quorum; never during the seal review or once abdicated), no key both guardian and recovery key (`09`, finding 62). CI's build `067434af…`, after its LiteSVM tests, the account sweep, the end-to-end run and the deploy rehearsal; verified byte-identical; the market reads unchanged (`vault-check`: the same admin, guardians, limits and caps, and `attest` equal to the status page's figures) | [`3wvN6uVn…`](https://explorer.solana.com/tx/3wvN6uVnrfYrwgHGxNzim12tgNYLBRUGGVqGVoASAvsK6x3DwSdmsbU1oaJFUmJQCnLv71cdpU4LReRv6Dq2tRcw?cluster=devnet) |
 | Harbor upgraded in place, 6 Oct (built-in Vault id, A11): `543be60b…`, verified byte-identical | [`ZkpJvwHA…`](https://explorer.solana.com/tx/ZkpJvwHARZ7EpjSdNnYvP8EaEgcyeF8HMKMXC3gSSWpCMH1fGpz89swWac4so9FBfnJi7KUa1jqSkxHNxSSJFqL?cluster=devnet) |
 | Guardians 1 and 2 had gone stale (last heartbeat 27 Sep). The admin proposed the same guardian set again (change 0, executable from 9 Oct 06:17 UTC; anyone executes it with `market.mjs execute-change`) | [`5vkjPJKP…`](https://explorer.solana.com/tx/5vkjPJKP5UUM2F5ektPRfQtANLtXTFcEujdMdfo9Z4cfYhjuy44ws5ga7a3W55qQXcM42xZiMx32A167Bddz3iT7?cluster=devnet) |
-| The admin proposed a recovery key for the market (change 1, executable from 9 Oct 06:17 UTC; `09 §4`, finding 38). Until both execute, run S1 on devnet with `APPROVED_CHANGES` set to the two approvals `node cloud/deploy/approvals.mjs` prints for them (comma-separated), or its guardian vetoes them. `node cloud/deploy/finish-renewals.mjs <rpc> <market-dir> <payer> <floor> <target>` executes all three once due (safe to run any time; it skips what is done and reports what is not yet due) | [`3TGZtTtk…`](https://explorer.solana.com/tx/3TGZtTtkMKyQVzf2heEEnXFs1exrvshWqnkqRz3ne6q1gu9Xq7gN4pkSjp3HqnTpqRLKLafWWG2frzbSM1xNh8Ee?cluster=devnet) |
+| The admin proposed a recovery key for the market (change 1, executable from 9 Oct 06:17 UTC; `09 §4`, finding 38). Until both execute, run S1 on devnet with `APPROVED_CHANGES` set to the two approvals `node cloud/deploy/approvals.mjs` prints for them (comma-separated), or its guardian vetoes them. This tree's guardian drops every event of a Vault build that predates finding 64 (its events name no protocol), and the devnet Vault is such a build: upgrade the devnet Vault before running this guardian against devnet. `node cloud/deploy/finish-renewals.mjs <rpc> <market-dir> <payer> <floor> <target>` executes all three once due (safe to run any time; it skips what is done and reports what is not yet due) | [`3TGZtTtk…`](https://explorer.solana.com/tx/3TGZtTtkMKyQVzf2heEEnXFs1exrvshWqnkqRz3ne6q1gu9Xq7gN4pkSjp3HqnTpqRLKLafWWG2frzbSM1xNh8Ee?cluster=devnet) |
 | Floor S10 target: all three guardians stale; the owner proposed the same set again (executable from 9 Oct 06:17 UTC) | [`GMAF37tw…`](https://explorer.solana.com/tx/GMAF37twXPr9o3DqKm7aw3nX4GvcBvN6zm7NxpU8bHE6CSZJX1s71bTUAQccXWKSuZvMuZHK3hDzYajKNNbS4UM?cluster=devnet) |
 
 **The demo market**: protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet), vault [`7qrrXwX5…`](https://explorer.solana.com/address/7qrrXwX5uYeCDTfdQbbRNJC7tdLYRFCLfq6sswKuZqZw?cluster=devnet), test USDC mint [`CBK36QrH…`](https://explorer.solana.com/address/CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB?cluster=devnet); 3 guardians, quorum 2; 2% per hour, 5% per day.
