@@ -18,6 +18,15 @@ const URGENT_WARNINGS = [
   /floor not ready/,
   /log truncated/,
   /no attest for/,
+  // docs/09, finding 76: a patient drip, a guardian reading late, a stale
+  // node, and Floor's stop and ejection, none of which used to alert.
+  /unbacked outflow at \d+% of the 24h freeze threshold/,
+  /sustained drip/,
+  /ingest lagging/,
+  /RPC endpoint is (behind|missing recent transactions)/,
+  /no 72-hour figure/,
+  /was stopped on Floor/,
+  /guardian was ejected on Floor/,
 ];
 
 /** Actions sent on chain: each one is news. */
@@ -37,7 +46,9 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   if (line.skipped) return null;
   const level = line.level ?? "info";
   const message = line.msg ?? line.error ?? "";
-  const urgent = level === "error" || ACTIONS.has(action) || (level === "warn" && URGENT_WARNINGS.some((r) => r.test(message)));
+  // `notify`: an info line people should still hear about (a Floor restore,
+  // a restore approval; finding 76). It alerts as a warning.
+  const urgent = level === "error" || ACTIONS.has(action) || line.notify === true || (level === "warn" && URGENT_WARNINGS.some((r) => r.test(message)));
   if (!urgent) return null;
   const subject = [line.changeId, line.proposalId, line.program, line.mint, line.what].filter((x) => x != null).join("/");
   const kind = `${level}:${action ?? ""}:${subject}:${message.slice(0, 60)}`;
@@ -45,7 +56,7 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   const window = action === "freeze" ? failedFreezeMs : windowMs;
   if (!landedFreeze && nowMs - (seen.get(kind) ?? -Infinity) < window) return null;
   seen.set(kind, nowMs);
-  const what = action ? `${action}${line.signature ? " sent" : " failed"}` : level;
+  const what = action ? `${action}${line.signature ? " sent" : " failed"}` : level === "info" ? "notice" : level;
   const detail = [line.reason, message, line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
     .filter(Boolean).join(" | ");
   return { severity: level === "error" || action === "freeze" ? "critical" : "warning", title: `Bulkhead guardian: ${what}`, detail, at: line.t };

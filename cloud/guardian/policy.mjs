@@ -191,12 +191,39 @@ export const DEFAULT_POLICY = {
   freezeFractionOfWorst1h: 0.5,
   /** Freeze when unbacked outflow to non-allowlisted owners within the last
    * 24 hours reaches this fraction of the program's own `worst_24h` figure.
-   * Without it, an attacker who keeps every rolling hour just under the
-   * 1-hour rule drips out the daily bucket (5%/day by default) forever
-   * (cloud/test/adversarial.test.mjs). 0 disables the rule. Keep it above the
-   * calibrated honest daily unbacked flow (docs/07 §4: defaults are 1.5× that
-   * ceiling, so 5% / 1.5 ≈ 3.3% a day). */
+   * It stops a greedy drip: an attacker who keeps every rolling hour just
+   * under the 1-hour rule is frozen within hours (cloud/test/adversarial.test.mjs).
+   * It does not stop a patient one. With the default limits 0.5 × worst_24h
+   * is 5% of the base a day, which is the program's own sustained daily rate
+   * (longBps 500): an attacker who stays under it in every rolling 24 hours
+   * loses nothing but the first day's burst, and took ~77% of a 10M vault in
+   * 30 days with no freeze and no alert (docs/09, finding 76). The 72-hour
+   * rule and the outflow alerts below are the answer to that, not this rule.
+   * 0 disables the rule. Keep it above the calibrated honest daily unbacked
+   * flow (docs/07 §4: defaults are 1.5× that ceiling, so 5% / 1.5 ≈ 3.3% a day). */
   freezeFractionOfWorst24h: 0.5,
+  /** Freeze when unbacked outflow to non-allowlisted owners within the last
+   * 72 hours reaches this fraction of the worst the program allows over 72
+   * hours (the limiter port, `maxUnbackedOver(params, 72h)`: 20% of the base
+   * with the defaults). At 0.55 that is 11% of the base per 72 hours, ~3.7%
+   * a day: just above the honest ceiling (3.3% a day, docs/07 §4). 0.5 is the
+   * ceiling itself, and froze honest flow at it on a vault with no deposits
+   * after ~69h, since the window looks back at a larger base. A patient
+   * attacker is cut from the program's 5% of the base a day to ~3.7%, and no
+   * lower: measured over 30 days on a 10M vault, ~65% taken instead of ~77%
+   * (cloud/test/adversarial.test.mjs). A threshold bot cannot tell a drip
+   * under the honest ceiling from honest flow; the alerts below tell people,
+   * who can (docs/09, finding 76). 0 disables. */
+  freezeFractionOfWorst72h: 0.55,
+  /** Alert (urgent, not a freeze) once unbacked outflow to non-allowlisted
+   * owners over 24 hours reaches this fraction of the 24-hour freeze
+   * threshold, at most once per `outflowAlertEveryS` per mint; and alert a
+   * sustained drip when that happened on at least `sustainedDays` of the
+   * last 3 UTC days. Release events alone are info lines and never alerted:
+   * a patient attacker used to take most of a vault in silence (finding 76). */
+  alertFractionOfThreshold: 0.5,
+  sustainedDays: 2,
+  outflowAlertEveryS: 6 * 3_600,
   freezeSecs: 86_400,
   /** Incident hold: after this guardian freezes for a breach, renew the
    * freeze before it ends, until a guardian quorum unfreezes (the program's
@@ -279,7 +306,7 @@ export function floorAlerts(fl) {
 }
 
 export function newState() {
-  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false, incidentSince: null, consumed: new Map(), executedSeen: new Set(), changeBaseline: false };
+  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false, incidentSince: null, consumed: new Map(), executedSeen: new Set(), changeBaseline: false, drip: new Map() };
 }
 
 /** Keep ticket cancellation state outside the rolling outflow windows. */
@@ -376,6 +403,25 @@ function decodeFields(ev) {
     // seen pending (Floor) says which approval that was.
     case "vault:change_executed":
       return { kind: "change_executed", id: u64(f[0]), changeKind: f[1]?.[0] };
+    // A stop, a guardian ejected, a restore and a restore approval
+    // (programs/floor/src/lib.rs, `ev::ABORTED` and the others). These went
+    // to "other" and were dropped: a stop was noticed only by the minute's
+    // config check (45 s late on a validator), and one a quorum undid within
+    // the minute, an ejection or a restore approval never at all (docs/09,
+    // finding 76). Exact field counts, so a layout this guardian does not know
+    // is dropped, never misread.
+    case "floor:aborted":
+      if (f.length !== 4 || f[0]?.length !== 32 || f[1]?.length !== 32 || f[3]?.length !== 8) return { kind: "other", name: ev.name };
+      return { kind: "floor_aborted", program: b58encode(f[0]), by: b58encode(f[1]), snapshotValid: f[2]?.[0] === 1, at: Number(new Reader(f[3]).i64()) };
+    case "floor:restored":
+      if (f.length !== 2 || f[0]?.length !== 32 || f[1]?.length !== 1) return { kind: "other", name: ev.name };
+      return { kind: "floor_restored", program: b58encode(f[0]), signers: f[1][0] };
+    case "floor:ejected":
+      if (f.length !== 2 || f[0]?.length !== 32 || f[1]?.length !== 32) return { kind: "other", name: ev.name };
+      return { kind: "floor_ejected", program: b58encode(f[0]), removed: b58encode(f[1]) };
+    case "floor:approved":
+      if (f.length !== 3 || f[0]?.length !== 32 || f[1]?.length !== 8 || f[2]?.length !== 1) return { kind: "other", name: ev.name };
+      return { kind: "floor_approved", program: b58encode(f[0]), proposalId: u64(f[1]), approvals: f[2][0] };
     case "floor:executed":
       // A release of the authority names its target where the others name an id.
       return f[1]?.[0] === 3 ? { kind: "other", name: ev.name } : { kind: "floor_executed", program: b58encode(f[0]), proposalKind: f[1]?.[0], id: u64(f[2]) };
@@ -423,23 +469,48 @@ export function watchedEvents(logs, { vaultProgram = null, protocol = null, floo
   return { events: out, truncated, foreign, unnamed };
 }
 
+/** How long outflows are kept: the longest rule's window (the 72-hour rule). */
+export const OUTFLOW_KEEP_S = 3 * DAY_S;
+
 function sumsFor(state, mint, now) {
-  // Drop only what is already older than a day. An outflow dated after `now`
-  // stays: a decision made at an earlier timestamp must not erase it, and it
-  // does not count until `now` catches up.
-  state.outflows = state.outflows.filter((o) => o.t > now || now - o.t <= DAY_S);
+  // Drop only what is already older than the longest window. An outflow
+  // dated after `now` stays: a decision made at an earlier timestamp must not
+  // erase it, and it does not count until `now` catches up.
+  state.outflows = state.outflows.filter((o) => o.t > now || now - o.t <= OUTFLOW_KEEP_S);
   const rows = state.outflows.filter((o) => o.mint === mint);
   const sumSince = (secs) => rows.filter((o) => o.t <= now && now - o.t <= secs).reduce((s, o) => s + o.amount, 0n);
-  return { lastHour: sumSince(HOUR_S), lastDay: sumSince(DAY_S) };
+  return { lastHour: sumSince(HOUR_S), lastDay: sumSince(DAY_S), last72h: sumSince(OUTFLOW_KEEP_S) };
 }
 
 function limitsFor(ctx, policy) {
   const fraction24h = policy.freezeFractionOfWorst24h ?? 0;
+  const fraction72h = policy.freezeFractionOfWorst72h ?? 0;
   return {
     limit: scaleBy(ctx.worst1h ?? 0n, policy.freezeFractionOfWorst1h),
     limit24h: ctx.worst24h !== undefined && fraction24h > 0 ? scaleBy(ctx.worst24h, fraction24h) : null,
     fraction24h,
+    // Skipped while the 72-hour figure is unknown (it is computed from the
+    // vault account, not returned by `attest`).
+    limit72h: ctx.worst72h != null && fraction72h > 0 ? scaleBy(ctx.worst72h, fraction72h) : null,
+    fraction72h,
   };
+}
+
+/** The freeze rule `sums` breaks under `limits`, or null. An empty sum is not
+ * a breach, even when a limit is 0. */
+function brokenRule(sums, limits, policy) {
+  const { lastHour, lastDay, last72h } = sums;
+  const { limit, limit24h, fraction24h, limit72h, fraction72h } = limits;
+  if (lastHour > 0n && lastHour >= limit) {
+    return `unbacked outflow to non-allowlisted owners in the last hour: ${lastHour} ≥ ${limit} (${policy.freezeFractionOfWorst1h} × worst_1h)`;
+  }
+  if (lastDay > 0n && limit24h !== null && lastDay >= limit24h) {
+    return `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)`;
+  }
+  if (last72h > 0n && limit72h !== null && last72h >= limit72h) {
+    return `unbacked outflow to non-allowlisted owners in the last 72 hours: ${last72h} ≥ ${limit72h} (${fraction72h} × worst_72h; docs/09, finding 76)`;
+  }
+  return null;
 }
 
 /**
@@ -448,15 +519,58 @@ function limitsFor(ctx, policy) {
  * An empty window is not a breach, even when the limit is 0.
  */
 export function breach(state, mint, ctx, policy = DEFAULT_POLICY) {
-  const { lastHour, lastDay } = sumsFor(state, mint, ctx.now);
-  const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
-  if (lastHour > 0n && lastHour >= limit) {
-    return { type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last hour: ${lastHour} ≥ ${limit} (${policy.freezeFractionOfWorst1h} × worst_1h)` };
+  const reason = brokenRule(sumsFor(state, mint, ctx.now), limitsFor(ctx, policy), policy);
+  return reason ? { type: "freeze", secs: policy.freezeSecs, reason } : null;
+}
+
+/** UTC day number of a unix time. */
+const dayOf = (t) => Math.floor(t / DAY_S);
+
+/**
+ * The alerts unbacked outflow of `mint` calls for at `ctx.now`, and the
+ * record they are based on (`state.drip`, kept in the state file).
+ *
+ * A threshold bot cannot tell a drip under the honest ceiling from honest
+ * flow, so it does not pretend to: it tells people. With the defaults a
+ * patient attacker who stayed under both freeze rules took ~77% of a 10M
+ * vault in 30 days, never frozen and with zero alerts, since release events
+ * were info lines (docs/09, finding 76). Now:
+ *   "outflow":   the 24-hour sum crossed `alertFractionOfThreshold` of the
+ *                24-hour freeze threshold (at most once per
+ *                `outflowAlertEveryS`);
+ *   "sustained": it did on at least `sustainedDays` of the last 3 UTC days
+ *                (each day's highest fraction is kept, so a restart, or a
+ *                lost day of history, still counts it), at most once a day.
+ * `alert` false records the day's maximum and returns nothing (a replay).
+ */
+export function outflowAlerts(state, mint, ctx, policy = DEFAULT_POLICY, alert = true) {
+  const f = policy.alertFractionOfThreshold ?? 0;
+  const { limit24h } = limitsFor(ctx, policy);
+  if (!(f > 0) || limit24h === null || limit24h <= 0n) return [];
+  const { lastDay } = sumsFor(state, mint, ctx.now);
+  const rec = state.drip.get(mint) ?? { days: new Map(), alertedS: null, sustainedS: null };
+  state.drip.set(mint, rec);
+  // Fraction of the threshold, in thousandths (integers: amounts are BigInt).
+  const permille = Number((lastDay * 1000n) / limit24h);
+  const today = dayOf(ctx.now);
+  if (permille > (rec.days.get(today) ?? 0)) rec.days.set(today, permille);
+  for (const d of rec.days.keys()) if (d < today - 2) rec.days.delete(d);
+  if (!alert) return [];
+  const every = policy.outflowAlertEveryS ?? 6 * HOUR_S;
+  const due = (at, secs = every) => at === null || ctx.now - at >= secs;
+  const bar = Math.round(f * 1000);
+  const out = [];
+  if (permille >= bar && due(rec.alertedS)) {
+    rec.alertedS = ctx.now;
+    out.push({ code: "outflow", mint, msg: `unbacked outflow at ${(permille / 10).toFixed(0)}% of the 24h freeze threshold (${lastDay} of ${limit24h} in the last 24 hours, to non-allowlisted owners): check these payouts are honest; the bot freezes only past the threshold` });
   }
-  if (lastDay > 0n && limit24h !== null && lastDay >= limit24h) {
-    return { type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)` };
+  const hot = [...rec.days.entries()].filter(([d, m]) => d >= today - 2 && m >= bar).length;
+  // Once a day: it is a judgement for people to make, not news every hour.
+  if (hot >= (policy.sustainedDays ?? 2) && due(rec.sustainedS, DAY_S)) {
+    rec.sustainedS = ctx.now;
+    out.push({ code: "sustained", mint, msg: `sustained drip: unbacked outflow reached ${(f * 100).toFixed(0)}% of the 24h freeze threshold on ${hot} of the last 3 days. A patient attacker under the thresholds is not frozen by this bot; only the on-chain limits bound it. Decide whether to freeze (docs/15, A2)` });
   }
-  return null;
+  return out;
 }
 
 /**
@@ -493,6 +607,47 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
  */
 export function retirePendingFreeze(pending, chainFrozenUntil, now) {
   return pending && chainFrozenUntil > now ? null : pending;
+}
+
+/**
+ * Whether the active-ticket scan runs this loop pass: on its cadence, or at
+ * once after a truncated transaction was read live. A queued release moves
+ * no tokens, so the truncated log's balance fallback cannot see it; the scan
+ * finds its ticket, judges its release and, while frozen, cancels it
+ * (docs/09, finding 76).
+ */
+export function ticketScanDue(nowMs, nextAtMs, truncatedSeen) {
+  return truncatedSeen || nowMs >= nextAtMs;
+}
+
+/** How much shorter than intended a freeze already on chain may be and still
+ * stand for ours. Independent guardians see the same breach seconds apart. */
+export const FREEZE_COVER_SLACK_S = 600;
+
+/**
+ * Whether the protocol, read at confirmed commitment just before sending a
+ * freeze of `secs`, is already frozen about as long as that freeze would make
+ * it. Every guardian used to send its own: duplicate freezes (each one fees,
+ * and a later end) and one critical alert per guardian (docs/09, finding 76).
+ */
+export function freezeAlreadyCovers(chainFrozenUntil, now, secs, slackS = FREEZE_COVER_SLACK_S) {
+  return chainFrozenUntil > now && chainFrozenUntil >= now + secs - slackS;
+}
+
+/**
+ * The earliest replayed time at which `mint`'s window broke a freeze rule
+ * (the current worst-case figures, `figure`), or null. A guardian that lost
+ * its state file, starting while the protocol is frozen for a breach, rebuilds
+ * its incident hold from it (docs/09, finding 76); before, the hold did not
+ * resume and the freeze simply ran out.
+ */
+export function replayedBreachTime(state, mint, figure, now, policy = DEFAULT_POLICY) {
+  const times = [...new Set(state.outflows.filter((o) => o.mint === mint && o.t <= now).map((o) => o.t))].sort((a, b) => a - b);
+  for (const t of times) {
+    const probe = { outflows: state.outflows.filter((o) => o.mint === mint) };
+    if (breach(probe, mint, { ...figure, now: t }, policy)) return t;
+  }
+  return null;
 }
 
 /** Judge the startup window at the later of the wall clock and the newest outflow. */
@@ -560,6 +715,19 @@ export function programErrorCode(e) {
  * a ticket closes, so the one decided on is gone).
  */
 const CANCEL_FINAL = new Map([[8010, "WrongVault"], [8052, "WrongTicket"]]);
+/** WrongAccountType: the ticket account is closed, so the ticket is gone. */
+const TICKET_CLOSED = 8001;
+
+/**
+ * Whether a cancel failed because the ticket is already gone: a peer guardian
+ * cancelled it first, or it settled. That is the outcome a cancel wants, not
+ * an error: logged as one, it raised a critical alert per ticket per guardian
+ * (14 false critical alerts for 11 tickets in one simulated incident; docs/09,
+ * finding 76).
+ */
+export function ticketAlreadyGone(error) {
+  return programErrorCode(error) === TICKET_CLOSED;
+}
 /** NotGuardian: this key is not a live guardian now. It can be again (a
  * heartbeat while in range, or a quorum adding it back), so the cancel waits
  * the longest backoff instead of being dropped until a restart (docs/09,
@@ -882,16 +1050,12 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       if (unbacked === 0n || policy.allowlistedOwners.includes(e.owner)) break;
       // `e.at` is when the outflow happened. `ctx.now` is when the decision is made.
       state.outflows.push({ t: e.at ?? ctx.now, amount: unbacked, owner: e.owner, mint: e.mint, ticketId: queued > 0n ? ticket : null });
-      const { lastHour, lastDay } = sumsFor(state, e.mint, ctx.now);
-      const { limit, limit24h, fraction24h } = limitsFor(ctx, policy);
       // An empty sum is not a breach. A future-dated outflow is kept but not
       // counted yet, and `0 ≥ 0` would freeze whenever the worst case is 0.
-      if (act && !frozen && lastHour > 0n && lastHour >= limit) {
+      const reason = brokenRule(sumsFor(state, e.mint, ctx.now), limitsFor(ctx, policy), policy);
+      if (act && !frozen && reason) {
         state.freezing = true;
-        actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last hour: ${lastHour} ≥ ${limit} (${policy.freezeFractionOfWorst1h} × worst_1h)` });
-      } else if (act && !frozen && lastDay > 0n && limit24h !== null && lastDay >= limit24h) {
-        state.freezing = true;
-        actions.push({ type: "freeze", secs: policy.freezeSecs, reason: `unbacked outflow to non-allowlisted owners in the last 24 hours: ${lastDay} ≥ ${limit24h} (${fraction24h} × worst_24h)` });
+        actions.push({ type: "freeze", secs: policy.freezeSecs, reason });
       }
       if (act && (frozen || state.freezing) && policy.cancelTicketsWhenFrozen) {
         actions.push(...pendingCancels(state, policy));

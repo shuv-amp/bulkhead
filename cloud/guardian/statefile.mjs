@@ -6,7 +6,11 @@
 // content once more, and an execution it forgot would spend one again); each
 // watched Floor config's cursor and the proposal last seen pending there (a
 // restart reads on from the cursor, so an execution while it was down still
-// spends its approval); and the live proposals waiting to be read by id.
+// spends its approval); the live proposals waiting to be read by id; and,
+// per mint, each recent day's highest unbacked outflow as a fraction of the
+// 24h freeze threshold, with when it was last alerted (`outflowAlerts`): a
+// sustained drip spans days, longer than a restart's replay (docs/09,
+// finding 76).
 
 import { writeFileSync, renameSync, chmodSync } from "node:fs";
 
@@ -24,6 +28,7 @@ export function stateJson({ protocol, incidentSince, frozenUntil, state, floorCu
     floorCursors: Object.fromEntries(floorCursors),
     floorPendingSeen: Object.fromEntries([...floorPendingSeen].map(([p, s]) => [p, { id: String(s.id), approval: s.approval }])),
     changeChecks: Object.fromEntries([...changeChecks].map(([id, c]) => [String(id), c.sinceS])),
+    drip: Object.fromEntries([...(state.drip ?? new Map())].map(([mint, r]) => [mint, { days: Object.fromEntries(r.days), alertedS: r.alertedS, sustainedS: r.sustainedS }])),
   });
 }
 
@@ -58,6 +63,12 @@ export function restoreState(text, protocol, state) {
   }
   for (const [id, sinceS] of Object.entries(s.changeChecks ?? {})) {
     if (/^\d+$/.test(id) && Number.isFinite(sinceS)) out.changeChecks.set(BigInt(id), { sinceS, warned: false });
+  }
+  for (const [mint, r] of Object.entries(s.drip ?? {})) {
+    const days = new Map();
+    for (const [d, m] of Object.entries(r?.days ?? {})) if (/^\d+$/.test(d) && Number.isFinite(m)) days.set(Number(d), m);
+    const at = (x) => (Number.isFinite(x) ? x : null);
+    state.drip.set(mint, { days, alertedS: at(r?.alertedS), sustainedS: at(r?.sustainedS) });
   }
   return out;
 }

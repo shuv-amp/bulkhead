@@ -309,13 +309,23 @@ export class Rpc {
 /**
  * JSON-RPC errors that are about the endpoint, not the request: another node
  * may answer. Node unhealthy (-32005), min context slot not reached (-32016),
- * long-term storage unreachable (-32019), and HTTP 429 / 5xx.
+ * long-term storage unreachable (-32019), and HTTP 429 / 5xx. Also a method
+ * this node does not serve: -32010 (getProgramAccounts disabled, or the
+ * program excluded from its secondary indexes) and -32601 (method not
+ * found). Those used to come back as final answers, so a primary that
+ * refused the ticket or change scan kept the guardian from them while a
+ * backup would have answered (docs/09, finding 76).
  */
 export function endpointTrouble(e) {
   const code = e?.rpcError?.code;
   if (code === undefined) return true; // no answer: refused, dropped, timed out
-  return code === -32005 || code === -32016 || code === -32019 || code === 429 || (code >= 500 && code < 600);
+  return code === -32005 || code === -32016 || code === -32019 || code === -32010 || code === -32601 || code === 429 || (code >= 500 && code < 600);
 }
+
+/** Slots a primary may trail the best endpoint before it is switched away from (~60 s). */
+export const SLOT_LAG_SWITCH = 150;
+/** How long a backup may show a signature the primary does not before the switch. */
+export const SIGNATURE_LAG_SWITCH_MS = 30_000;
 
 /**
  * Several endpoints behind one `Rpc` interface. Each call goes to the endpoint
@@ -332,6 +342,66 @@ export class FailoverRpc extends Rpc {
     this.active = 0;
     this.onSwitch = onSwitch;
   }
+  /** Make endpoint `at` the one asked first, and say so (`onSwitch`). */
+  switchTo(at, cause) {
+    if (at === this.active) return;
+    this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, cause);
+    this.active = at;
+    this.url = this.endpoints[at].url;
+  }
+
+  /**
+   * Failover moves only when an endpoint fails to answer. A node that answers
+   * successfully but stale (behind on slots, or missing the newest
+   * transactions on an account) kept the guardian blind while its backups
+   * were current (docs/09, finding 76). This cross-check, run periodically,
+   * asks every endpoint for its slot, and every backup for the newest
+   * signature on `address`:
+   *   - the active endpoint more than `slotLag` slots behind the best: switch
+   *     to the best;
+   *   - a backup's newest signature that the active endpoint does not list
+   *     among its newest `depth` for more than `sigLagMs`: switch to that backup.
+   * Returns `{ switched, reason, slots }`. An endpoint that does not answer
+   * is skipped here (the failover handles that).
+   */
+  async crossCheck(address, { slotLag = SLOT_LAG_SWITCH, sigLagMs = SIGNATURE_LAG_SWITCH_MS, depth = 100, nowMs = Date.now() } = {}) {
+    this.missing ??= new Map(); // signature -> { at: first seen missing, from: endpoint index }
+    const quiet = (p) => p.then((v) => v, () => undefined);
+    const slots = await Promise.all(this.endpoints.map((e) => quiet(e.call("getSlot", [{ commitment: "confirmed" }]))));
+    const active = this.active;
+    let best = active;
+    for (let i = 0; i < slots.length; i++) if (slots[i] != null && (slots[best] == null || slots[i] > slots[best])) best = i;
+    if (slots[best] != null && slots[active] != null && slots[best] - slots[active] > slotLag) {
+      const reason = `RPC endpoint is behind: ${slots[best] - slots[active]} slots behind the best of ${this.endpoints.length} endpoints`;
+      this.switchTo(best, new Error(reason));
+      this.missing.clear();
+      return { switched: true, reason, slots };
+    }
+    if (this.endpoints.length < 2) return { switched: false, reason: null, slots };
+    const q = (limit) => [address, { limit, commitment: "confirmed" }];
+    const [mine, ...theirs] = await Promise.all([
+      quiet(this.endpoints[active].call("getSignaturesForAddress", q(depth))),
+      ...this.endpoints.map((e, i) => (i === active ? Promise.resolve(undefined) : quiet(e.call("getSignaturesForAddress", q(1))))),
+    ]);
+    if (!mine) return { switched: false, reason: null, slots };
+    const listed = new Set(mine.map((x) => x.signature));
+    theirs.forEach((list, i) => {
+      const sig = list?.[0]?.signature;
+      if (i !== active && sig && !listed.has(sig) && !this.missing.has(sig)) this.missing.set(sig, { at: nowMs, from: i });
+    });
+    for (const [sig, m] of this.missing) {
+      if (listed.has(sig) || nowMs - m.at > 600_000) {
+        this.missing.delete(sig);
+      } else if (nowMs - m.at > sigLagMs) {
+        const reason = `RPC endpoint is missing recent transactions: a backup has had ${sig} for ${Math.round((nowMs - m.at) / 1000)}s and the primary does not return it`;
+        this.switchTo(m.from, new Error(reason));
+        this.missing.clear();
+        return { switched: true, reason, slots };
+      }
+    }
+    return { switched: false, reason: null, slots };
+  }
+
   async call(method, params = []) {
     let last;
     for (let i = 0; i < this.endpoints.length; i++) {

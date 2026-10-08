@@ -58,7 +58,7 @@ On Solana, the one control an admin or upgrade key can't bypass is ownership of 
 |---|---|
 | The attacker orders | 12 payouts of 100,000 USDC, one every 800 ms |
 | The attacker receives | **100,000 USDC**. The burst is 2% of what is in the vault at each payout, so after the first 100,000 the second no longer fits. An attacker who sizes each payout exactly gets 199,000 (S8), never more than 2%. |
-| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts |
+| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts. In a local-validator run with three guardians: median 6–8 s after the first payout with a healthy or failed-over RPC, ~19 s with 1.5 s of RPC latency. A patient attacker who stays under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2) |
 | Afterwards | 9,900,000 USDC still in the vault; 0 payouts pending; the status page's figures equal the program's own `attest` |
 
 **Modeled, the Drift incident** (`reference/drift_model.py`). Inputs: Chainalysis per-asset amounts, and a $550M TVL **assumption** with vaults proportional to what was drained. It is a model, not a replay.

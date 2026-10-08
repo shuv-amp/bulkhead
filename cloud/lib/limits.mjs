@@ -98,6 +98,8 @@ export function attestLocal(vault, protocol, balance, nowS) {
     availableNow: nowS < frozenUntil ? 0n : min64(availableNow(vault.tatShortMs, vault.tatLongMs, params, nowMs), live),
     worst1h: cap(maxUnbackedOver(params, 3_600_000n)),
     worst24h: cap(maxUnbackedOver(params, 86_400_000n)),
+    // Not an `attest` figure: the guardian's 72-hour rule (docs/09, finding 76).
+    worst72h: cap(maxUnbackedOver(params, 259_200_000n)),
     balance: BigInt(balance),
     frozenUntil,
     queued: vault.queuedAmount,

@@ -18,6 +18,15 @@
 // `stallAlertS` (default 120): a loop step failing that long without a break
 // raises an urgent alert (a guardian that cannot read is blind).
 //
+// `ingestBudgetMs` (default 3000), `ingestConcurrency` (default 8),
+// `lagAlertS` (default 60): one loop pass ingests for at most the budget,
+// fetching transactions that many at a time, and carries the rest to the next
+// pass, so a spammed protocol account cannot starve the chain sync, freeze
+// retry, ticket scan, vetoes and heartbeats; ingestion more than `lagAlertS`
+// behind the chain raises an urgent alert (docs/09, finding 76).
+// `freshnessCheckS` (default 60): with backup endpoints, how often they are
+// cross-checked for a primary that answers but is stale (FailoverRpc.crossCheck).
+//
 // With `floorProtected`, the bot also follows each program's Floor config
 // transactions (its proposals, executions and recovery-key changes), and checks it every
 // minute and logs a warning whenever what is missing changes: no abort buffer
@@ -27,8 +36,8 @@
 // the reason, the transaction, and the latency from the triggering
 // transaction's block time to the guardian's own confirmation.
 //
-// The 24-hour rule needs the last day of releases. On startup the bot replays
-// that window from chain history (block times, not the wall clock) and, if it
+// The 24- and 72-hour rules need the last days of releases. On startup the bot
+// replays that window (72 hours with the 72-hour rule on) from chain history (block times, not the wall clock) and, if it
 // is already over a threshold and the protocol is not frozen, freezes once.
 // A failed freeze is retried; it does not stick in `state.freezing`.
 //
@@ -62,12 +71,13 @@ import { basename, dirname } from "node:path";
 import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
-import { ingestSignatures, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
+import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
+import { attestLocal } from "../lib/limits.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 // Alerts (alert.mjs) and the fatal path come first, before anything that can
@@ -154,6 +164,9 @@ let floorPendingSeen = new Map();
 let floorCursors = new Map();
 const persisted = () => stateJson({ protocol: protocolKey, incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil, state, floorCursors, floorPendingSeen, changeChecks });
 let saved = persisted();
+// Whether a state file of this protocol was read: without one, the incident
+// hold may have to be rebuilt from chain (`rebuildIncident`).
+let restoredState = false;
 {
   let text = null;
   try {
@@ -164,7 +177,10 @@ let saved = persisted();
   if (text !== null) {
     const r = restoreState(text, protocolKey, state);
     if (r.incidentSince !== null) state.incidentSince = r.incidentSince;
-    if (r.frozenUntil !== null) lastChainFrozenUntil = r.frozenUntil;
+    if (r.frozenUntil !== null) {
+      lastChainFrozenUntil = r.frozenUntil;
+      restoredState = true;
+    }
     ({ floorCursors, floorPendingSeen, changeChecks } = r);
     saved = persisted();
   }
@@ -205,6 +221,9 @@ const floorReported = new Map();
 
 const worst1h = new Map();
 const worst24h = new Map();
+// The 72-hour rule's figure, computed from the vault account with the limiter
+// port (`attestLocal`): `attest` returns no 72-hour figure (finding 76).
+const worst72h = new Map();
 const warned = new Set();
 let pendingFreeze = null;
 let pendingVetoes = [];
@@ -214,6 +233,12 @@ let vetoNotBefore = 0;
 const cancelRetry = new Map();
 const VETO_RETRY_MS = 15_000;
 let nextTicketScanAt = 0;
+// The minute's Floor config check; a Floor stop or restore event sets it to 0
+// so the next pass checks at once (finding 76).
+let lastFloorCheck = 0;
+const ingestBudgetMs = cfg.ingestBudgetMs ?? 3_000;
+const lagAlertS = cfg.lagAlertS ?? 60;
+const freshnessEveryMs = (cfg.freshnessCheckS ?? 60) * 1000;
 let nextChangeScanAt = 0;
 let sweptFreezeUntil = 0;
 
@@ -224,7 +249,7 @@ function wallNow() {
 /** This mint's own worst case. Missing attest is 0: any unbacked outflow freezes. */
 function worstFor(mint) {
   if (worst1h.has(mint)) {
-    return { worst1h: worst1h.get(mint), worst24h: worst24h.get(mint) ?? 0n };
+    return { worst1h: worst1h.get(mint), worst24h: worst24h.get(mint) ?? 0n, worst72h: worst72h.get(mint) };
   }
   if (!warned.has(mint)) {
     warned.add(mint);
@@ -239,8 +264,30 @@ async function refreshWorstCase() {
       const a = await vc.attest(rpc, guardian.publicKey, mint);
       worst1h.set(mint, a.worst1h);
       worst24h.set(mint, a.worst24h);
+      if (policy.freezeFractionOfWorst72h > 0) await refreshWorst72h(mint, a.clockS);
     } catch (e) {
       log({ level: "warn", msg: `attest failed for ${mint}: ${e.message}` });
+    }
+  }
+}
+
+/**
+ * The most the program lets out over 72 hours, by the limiter port on the
+ * vault account at the attest's own clock. Unreadable, the last figure
+ * stands; never read, the 72-hour rule waits and says so once.
+ */
+const warned72h = new Set();
+async function refreshWorst72h(mint, clockS) {
+  try {
+    const { vault, vaultTokens } = await vc.vault(mint);
+    const [v, t] = await Promise.all([rpc.account(vault), rpc.account(vaultTokens)]);
+    if (!v || !t) throw new Error("vault account missing");
+    const balance = new DataView(t.bytes.buffer, t.bytes.byteOffset).getBigUint64(64, true);
+    worst72h.set(mint, attestLocal(decodeVault(v.bytes), { frozenUntil: 0 }, balance, clockS).worst72h);
+  } catch (e) {
+    if (!worst72h.has(mint) && !warned72h.has(mint)) {
+      warned72h.add(mint);
+      log({ level: "warn", msg: `no 72-hour figure for ${mint} yet (${e.message}): the 72-hour rule waits for it`, mint });
     }
   }
 }
@@ -334,9 +381,24 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
   try {
     let ixs;
     switch (action.type) {
-      case "freeze":
+      case "freeze": {
+        // Another guardian may have frozen for the same breach seconds ago.
+        // A fresh read (confirmed, never older than the last) that already
+        // covers this freeze stands for it: no duplicate freeze, no duplicate
+        // critical alert (docs/09, finding 76). An unreadable account is no
+        // reason to hold a freeze back.
+        const acc = await readProtocolAccount().catch(() => null);
+        const until = acc ? decodeProtocol(acc.bytes).frozenUntil : 0;
+        if (freezeAlreadyCovers(until, wallNow(), action.secs)) {
+          state.frozenUntil = Math.max(state.frozenUntil, until);
+          openIncident(state, wallNow());
+          saveIncident();
+          log({ action: "freeze", skipped: `already frozen until ${until} by another freeze`, reason: action.reason });
+          return true;
+        }
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
+      }
       case "cancel": {
         // The caller returns a failed cancel to the sweep; this one waits.
         const retry = cancelRetry.get(action.ticketId);
@@ -348,8 +410,17 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         const ticket = address ? key(address) : null;
         const acc = ticket ? await rpc.account(ticket) : null;
         if (!acc) {
-          // A lagging read is not proof the ticket settled. Retry; leaving it
-          // marked cancelled would let it pay out when the freeze ends.
+          // A missing account with history is a ticket that was there and is
+          // closed now (a peer cancelled it, or it settled): done, not an
+          // error (docs/09, finding 76).
+          const history = ticket ? await rpc.call("getSignaturesForAddress", [b58encode(ticket), { limit: 1, commitment: "confirmed" }]).catch(() => null) : null;
+          if (history?.length) {
+            log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
+            return true;
+          }
+          // No history either: a lagging read is not proof the ticket settled.
+          // Retry; leaving it marked cancelled would let it pay out when the
+          // freeze ends.
           log({ action: "cancel", skipped: "ticket account missing; will retry", ticketId: action.ticketId });
           cancelRetry.set(action.ticketId, { failures: retry?.failures ?? 0, at: Date.now() + CANCEL_RETRY_MS, final: null });
           return false;
@@ -436,6 +507,12 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
     });
     return true;
   } catch (e) {
+    if (action.type === "cancel" && ticketAlreadyGone(e)) {
+      // A peer guardian's cancel landed first: the outcome wanted. Info, no
+      // retry, no alert (docs/09, finding 76).
+      log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
+      return true;
+    }
     log({ level: "error", action: action.type, error: e.message, ticketId: action.ticketId });
     if (action.type === "cancel") {
       const next = afterCancelFailure(cancelRetry.get(action.ticketId), e, Date.now());
@@ -583,6 +660,12 @@ async function consider(e, signature, now, act) {
   // Only a release needs the worst case; other events carry no mint.
   const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
   const actions = assess(state, e, ctx, policy, act);
+  // Outflow under the freeze thresholds still goes to people once it is a
+  // large share of them, or keeps up for days: a patient attacker under the
+  // thresholds is not frozen by this bot (docs/09, finding 76). A replay
+  // records each day's high only.
+  const drip = e.kind === "released" ? outflowAlerts(state, e.mint, ctx, policy, act) : [];
+  if (e.kind === "released") saveIncident();
   if (!act) {
     // Replay sends nothing, but a replayed proposal is read by id once
     // acting starts (docs/09, finding 71).
@@ -590,6 +673,21 @@ async function consider(e, signature, now, act) {
     return;
   }
   log({ event: e.kind, signature, ...e });
+  for (const a of drip) log({ level: "warn", msg: a.msg, mint: a.mint, alert: a.code });
+  // Floor's stop, ejection, restore and restore approvals, for the programs
+  // this guardian watches (watchedEvents drops the rest): a stop used to be
+  // seen only by the minute's config check, and the others never (finding 76).
+  if (e.kind === "floor_aborted") {
+    log({ level: "warn", msg: `the program was stopped on Floor (by ${e.by}); a guardian quorum restores the snapshot${e.snapshotValid ? "" : ", but none is pinned"}`, program: e.program });
+    lastFloorCheck = 0; // re-read its config now, not within the minute
+  } else if (e.kind === "floor_ejected") {
+    log({ level: "warn", msg: `a guardian was ejected on Floor by a quorum of the others: ${e.removed}`, program: e.program });
+  } else if (e.kind === "floor_restored") {
+    log({ notify: true, msg: `Floor restored the stopped program's snapshot (guardians ${e.signers.toString(2)})`, program: e.program });
+    lastFloorCheck = 0;
+  } else if (e.kind === "floor_approved") {
+    log({ notify: true, msg: `guardians approved Floor restore proposal ${e.proposalId} (approvals ${e.approvals.toString(2)})`, program: e.program, proposalId: e.proposalId });
+  }
   if (e.kind === "lifeboat_in") {
     log({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short until a guardian quorum or the admin returns them", mint: e.mint, amount: e.amount });
   }
@@ -675,54 +773,72 @@ async function knownTickets() {
 
 let unnamedLogged = false;
 
+// A truncated transaction seen live: its queued tickets moved no tokens, so
+// the balance fallback cannot see them. The ticket scan runs at once, out of
+// its cadence, and judges and cancels them (docs/09, finding 76).
+let truncatedSeen = false;
+
 /**
  * Transactions on the Vault protocol account: its events and, for a truncated
  * log, its balances. `floor` instead reads one watched Floor config's
- * transactions for that program's events alone (followFloor).
+ * transactions for that program's events alone (followFloor). Fetched
+ * `ingestConcurrency` at a time and processed in order; with `budgetMs`, it
+ * stops after that long and returns the signatures left (newest-first).
  */
-async function ingest(sigs, act, checkpoint = () => {}, floor = null) {
-  await ingestSignatures(sigs, async (s) => {
-    if (s.err) return;
-    const tx = await requireTransaction(rpc, s.signature);
-    const now = s.blockTime ?? tx?.blockTime ?? wallNow();
-    const { events: decoded, truncated, unnamed } = watchedEvents(tx?.meta?.logMessages, floor
-      ? { floorProgram: cfg.floorProgram, floorPrograms: [floor] }
-      : { vaultProgram: cfg.vaultProgram, protocol: protocolKey });
-    if (unnamed && !unnamedLogged) {
-      unnamedLogged = true;
-      log({ level: "error", msg: "Vault events that name no protocol were dropped: this Vault build predates finding 64, so this guardian cannot tell this protocol's events from another's. Upgrade the Vault program.", signature: s.signature });
-    }
-    for (const e of decoded) await noteExecution(e, act);
-    if (floor) {
-      for (const e of decoded) await consider(e, s.signature, now, act);
-      return;
-    }
-    // Tickets as they were before this transaction: a surviving `settled`
-    // event would otherwise drop the ticket its payout is matched against.
-    const known = truncated ? await knownTickets() : [];
+async function ingest(sigs, act, checkpoint = () => {}, floor = null, budgetMs = Infinity) {
+  return ingestBudgeted(sigs, {
+    concurrency: cfg.ingestConcurrency ?? 8,
+    budgetMs,
+    checkpoint,
+    fetchOne: (s) => (s.err ? null : requireTransaction(rpc, s.signature)),
+    processOne: (s, tx) => ingestOne(s, tx, act, floor),
+  });
+}
+
+async function ingestOne(s, tx, act, floor) {
+  if (s.err) return;
+  const now = s.blockTime ?? tx?.blockTime ?? wallNow();
+  const { events: decoded, truncated, unnamed } = watchedEvents(tx?.meta?.logMessages, floor
+    ? { floorProgram: cfg.floorProgram, floorPrograms: [floor] }
+    : { vaultProgram: cfg.vaultProgram, protocol: protocolKey });
+  if (unnamed && !unnamedLogged) {
+    unnamedLogged = true;
+    log({ level: "error", msg: "Vault events that name no protocol were dropped: this Vault build predates finding 64, so this guardian cannot tell this protocol's events from another's. Upgrade the Vault program.", signature: s.signature });
+  }
+  for (const e of decoded) await noteExecution(e, act);
+  if (floor) {
     for (const e of decoded) await consider(e, s.signature, now, act);
-    if (!truncated) return;
-    // Events past the log cap are gone; the instructions and balances are not.
-    // What left the vaults beyond the events that survived is an unbacked
-    // outflow of unknown owner.
-    if (act) log({ level: "warn", msg: "log truncated: outflow taken from the vault's transfers and balances", signature: s.signature });
-    const seen = truncatedOutflows(tx, { vaultProgram: cfg.vaultProgram, tokenMints, vaultOf, known, allowlist: policy.allowlistedOwners });
-    const released = decoded.filter((e) => e.kind === "released");
-    for (const [mint, amount] of unexplainedOutflow(seen.outflows, released, policy.allowlistedOwners)) {
-      if (amount === 0n) continue;
-      const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
-      await consider(e, s.signature, now, act);
-    }
-    // Their `vault:settled` events may be among the lost lines.
-    for (const ticketId of seen.closed) assess(state, { kind: "ticket_closed", ticketId }, { now }, policy, act);
-  }, checkpoint);
+    return;
+  }
+  // Tickets as they were before this transaction: a surviving `settled`
+  // event would otherwise drop the ticket its payout is matched against.
+  const known = truncated ? await knownTickets() : [];
+  for (const e of decoded) await consider(e, s.signature, now, act);
+  if (!truncated) return;
+  // Events past the log cap are gone; the instructions and balances are not.
+  // What left the vaults beyond the events that survived is an unbacked
+  // outflow of unknown owner.
+  if (act) {
+    log({ level: "warn", msg: "log truncated: outflow taken from the vault's transfers and balances", signature: s.signature });
+    truncatedSeen = true;
+  }
+  const seen = truncatedOutflows(tx, { vaultProgram: cfg.vaultProgram, tokenMints, vaultOf, known, allowlist: policy.allowlistedOwners });
+  const released = decoded.filter((e) => e.kind === "released");
+  for (const [mint, amount] of unexplainedOutflow(seen.outflows, released, policy.allowlistedOwners)) {
+    if (amount === 0n) continue;
+    const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
+    await consider(e, s.signature, now, act);
+  }
+  // Their `vault:settled` events may be among the lost lines.
+  for (const ticketId of seen.closed) assess(state, { kind: "ticket_closed", ticketId }, { now }, policy, act);
 }
 
 /** Rebuild active cancellation state from the Vault program's ticket accounts. */
 async function refreshPendingTickets({ recoverOutflows = false, act = false } = {}) {
   const tickets = await activeTickets(rpc, cfg.vaultProgram, vc.protocol);
   if (recoverOutflows) {
-    const cutoff = wallNow() - DAY_S;
+    // As far back as the longest freeze rule reads (72 hours, finding 76).
+    const cutoff = wallNow() - OUTFLOW_KEEP_S;
     for (const ticket of tickets) {
       if (ticket.createdS < cutoff) continue;
       if (state.tickets.has(ticket.id)) continue;
@@ -774,6 +890,23 @@ async function readProtocolAccount() {
   return r.value ? { bytes: Uint8Array.from(atob(r.value.data[0]), (c) => c.charCodeAt(0)) } : null;
 }
 
+/**
+ * The active-ticket scan, on its own cadence (every 60 s, 5 s after a
+ * failure) or at once after a truncated transaction: a queued release in a
+ * truncated log moves no tokens, so only the scan finds it. Its recovered
+ * releases are judged (`consider`), and while the protocol is frozen its
+ * tickets are cancelled. It used to run inside the chain sync, behind an
+ * ingest step that could take minutes under spam (docs/09, finding 76).
+ */
+async function scanTickets() {
+  truncatedSeen = false;
+  if ((await tryRefreshPendingTickets({ recoverOutflows: true, act: true })) === null) return;
+  const now = wallNow();
+  if (state.frozenUntil > now) {
+    await applyActions(observeProtocolFreeze(state, state.frozenUntil, now, policy, true), { reason: "protocol already frozen" }, now);
+  }
+}
+
 async function syncFromChain(act, { startup = false } = {}) {
   const acc = await readProtocolAccount();
   if (!acc) return;
@@ -790,8 +923,9 @@ async function syncFromChain(act, { startup = false } = {}) {
     const actions = observeProtocolFreeze(state, p.frozenUntil, now, policy, act);
     if (act) await applyActions(actions, { reason: "protocol already frozen" }, now);
   }
-  const periodicScan = Date.now() >= nextTicketScanAt;
-  if (startup || newFreeze || periodicScan) {
+  // The periodic scan is a loop step of its own (`scanTickets`), so neither a
+  // failed read here nor an ingest backlog holds it up (finding 76).
+  if (startup || newFreeze) {
     await tryRefreshPendingTickets({ recoverOutflows: true, act });
   }
   if (frozen) {
@@ -1021,10 +1155,32 @@ async function followFloor() {
     else floorCursors.delete(address);
     // No signature at all yet: ask again next poll, never from genesis.
     if (r.status === "empty") continue;
-    await ingest(r.sigs, !resuming, (signature, s) => floorCursors.set(address, { signature, slot: s.slot ?? 0 }), program);
+    // Live, bounded like the protocol's ingest (finding 76): what is left is
+    // listed again from the saved cursor next pass.
+    await ingest(r.sigs, !resuming, (signature, s) => floorCursors.set(address, { signature, slot: s.slot ?? 0 }), program, resuming ? Infinity : ingestBudgetMs);
     floorFollowed.add(address);
     saveIncident();
   }
+}
+
+/**
+ * With no state file read, the incident hold is rebuilt from chain: if the
+ * protocol is frozen now and the replayed window breaks a freeze rule, the
+ * hold opens at the first replayed breach. With every state file lost, the
+ * hold used not to resume, and the freeze simply ran out (docs/09, finding 76).
+ */
+function rebuildIncident() {
+  if (restoredState || state.incidentSince != null || !(lastChainFrozenUntil > wallNow())) return;
+  let since = null;
+  for (const mint of new Set(state.outflows.map((o) => o.mint))) {
+    if (!worst1h.has(mint)) continue;
+    const t = replayedBreachTime(state, mint, worstFor(mint), wallNow(), policy);
+    if (t !== null && (since === null || t < since)) since = t;
+  }
+  if (since === null) return;
+  state.incidentSince = since;
+  saveIncident();
+  log({ level: "warn", msg: "incident hold rebuilt from chain: no state file, the protocol is frozen, and the replayed window broke a freeze rule", incidentSince: since });
 }
 
 async function main() {
@@ -1037,7 +1193,9 @@ async function main() {
   if (!state.changeBaseline) log({ msg: "no record of executed changes yet: the first change scan records them and spends no approval", stateFile });
   await refreshWorstCase();
   let heartbeatAt = await beat();
-  const oldest = wallNow() - DAY_S;
+  // As far back as the longest freeze rule reads: 72 hours with the 72-hour
+  // rule on (finding 76), else the day.
+  const oldest = wallNow() - (policy.freezeFractionOfWorst72h > 0 ? OUTFLOW_KEEP_S : DAY_S);
   const history = await signatures(undefined, oldest);
   const until = history[0]?.signature;
   const inWindow = history.filter((s) => s.blockTime == null || s.blockTime >= oldest);
@@ -1046,7 +1204,8 @@ async function main() {
   // release is outside the rolling outflow window. Current chain state is live,
   // so an already-active freeze must sweep tickets at startup too.
   await syncFromChain(true, { startup: true });
-  unjudged = new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
+  rebuildIncident();
+  unjudged =new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
   await judgeStartupWindow(decisionTime(wallNow(), state.outflows));
   // Floor cursors before the scan, so nothing lands between the two unseen.
   if (floorWatch.length) await step("floor events", followFloor);
@@ -1062,7 +1221,13 @@ async function main() {
   let cursorSeen = new Set(history.filter((s) => s.slot === cursorSlot).map((s) => s.signature));
   let goneLogged = null;
   let lastAttest = Date.now();
-  let lastFloorCheck = Date.now();
+  lastFloorCheck = Date.now();
+  // Signatures listed but not yet ingested (newest-first): a pass ingests for
+  // at most `ingestBudgetMs` and the rest waits here for the next one.
+  let backlog = [];
+  let lagCheckedAt = 0;
+  let lagAlertedAt = 0;
+  let freshnessAt = Date.now() + freshnessEveryMs;
   for (;;) {
     // Chain state first, then the freeze retry, which has to see it: a freeze
     // that already landed (a backup endpoint may have carried it) must not be
@@ -1080,26 +1245,56 @@ async function main() {
       }
     });
     await step("ingest", async () => {
-      let sigs;
-      try {
-        sigs = await signatures(cursor, null);
-      } catch (e) {
-        if (!cursorGone(e, cursor)) throw e;
-        if (goneLogged !== cursor) {
-          goneLogged = cursor;
-          log({ level: "warn", msg: "the node no longer has the cursor signature; reading on from its slot", cursor, slot: cursorSlot });
+      if (!backlog.length) {
+        try {
+          backlog = await signatures(cursor, null);
+        } catch (e) {
+          if (!cursorGone(e, cursor)) throw e;
+          if (goneLogged !== cursor) {
+            goneLogged = cursor;
+            log({ level: "warn", msg: "the node no longer has the cursor signature; reading on from its slot", cursor, slot: cursorSlot });
+          }
+          backlog = await signatureWalkSinceSlot((q) => rpc.call("getSignaturesForAddress", [b58encode(vc.protocol), q]), { slot: cursorSlot, seen: cursorSeen });
         }
-        sigs = await signatureWalkSinceSlot((q) => rpc.call("getSignaturesForAddress", [b58encode(vc.protocol), q]), { slot: cursorSlot, seen: cursorSeen });
       }
-      await ingest(sigs, true, (signature, s) => {
-        cursor = signature;
-        if (s.slot !== cursorSlot) {
-          cursorSlot = s.slot;
-          cursorSeen = new Set();
-        }
-        cursorSeen.add(signature);
-      });
+      // A failure keeps what is not done yet; the rest is retried from there.
+      const done = new Set();
+      try {
+        backlog = await ingest(backlog, true, (signature, s) => {
+          done.add(signature);
+          cursor = signature;
+          if (s.slot !== cursorSlot) {
+            cursorSlot = s.slot;
+            cursorSeen = new Set();
+          }
+          cursorSeen.add(signature);
+        }, null, ingestBudgetMs);
+      } catch (e) {
+        backlog = backlog.filter((s) => !done.has(s.signature));
+        throw e;
+      }
+      // More than `lagAlertS` behind the chain: say so, urgently, at most every
+      // 10 minutes. The chain's time is read only while a backlog is left, at
+      // most every 10 s (docs/09, finding 76).
+      if (!backlog.length || Date.now() - lagCheckedAt < 10_000) return;
+      lagCheckedAt = Date.now();
+      const chainTimeS = await rpc.call("getSlot", [{ commitment: "confirmed" }]).then((slot) => rpc.call("getBlockTime", [slot])).catch(() => null);
+      const lagS = ingestLagS(backlog, chainTimeS);
+      if (lagS > lagAlertS && Date.now() - lagAlertedAt > 600_000) {
+        lagAlertedAt = Date.now();
+        log({ level: "warn", msg: `ingest lagging: the oldest unread transaction on the protocol account is ${lagS}s behind the chain, ${backlog.length} waiting; a freeze comes that much later. Spam on the protocol account, or a slow RPC (docs/07 §6)`, lagS, backlog: backlog.length });
+      }
     });
+    // On its own cadence, or at once after a truncated transaction, whatever
+    // the ingest backlog (finding 76).
+    if (ticketScanDue(Date.now(), nextTicketScanAt, truncatedSeen)) await scanTickets();
+    if (freshnessEveryMs > 0 && rpc instanceof FailoverRpc && Date.now() >= freshnessAt) {
+      freshnessAt = Date.now() + freshnessEveryMs;
+      await step("rpc freshness", async () => {
+        const r = await rpc.crossCheck(b58encode(vc.protocol));
+        if (r.switched) log({ level: "warn", msg: `${r.reason}; switched endpoints (docs/07 §6)`, slots: r.slots });
+      });
+    }
     if (floorWatch.length) await step("floor events", followFloor);
     // A step with nothing to do this pass is idle: an earlier failure of it is
     // over, not a stall that went on while it did not run (docs/09, finding 71).
