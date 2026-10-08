@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assess, newState, DEFAULT_POLICY } from "../guardian/policy.mjs";
-import { availableNow, touchReference, maxUnbackedOver, paramsFromConfig } from "../lib/limits.mjs";
+import { availableNow, emaUpdate, maxUnbackedOver, paramsFromConfig } from "../lib/limits.mjs";
 
 const USDC = 1_000_000n;
 const VAULT = 10_000_000n * USDC;
@@ -32,9 +32,11 @@ function run({ hours, policy, want }) {
   const paid = [];
   let taken = 0n;
   for (let now = 0; now < hours * 3_600; now += TICK_S) {
-    ref = touchReference(ref, refAt, balance, now, true); // the program's touch_reference
+    ref = emaUpdate(ref, refAt, balance, now, true); // the program's touch_reference
     refAt = now;
-    const p = paramsFromConfig(LIMITS, ref);
+    // The program's base: min(reference, balance, low-water). Only outflows
+    // here, so the balance is never above the low-water balance.
+    const p = paramsFromConfig(LIMITS, ref < balance ? ref : balance);
     const nowMs = BigInt(now) * 1000n;
     const hourPaid = paid.filter((x) => now - x.t <= 3_600).reduce((a, x) => a + x.u, 0n);
     const dayPaid = paid.filter((x) => now - x.t <= 86_400).reduce((a, x) => a + x.u, 0n);

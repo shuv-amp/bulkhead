@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { emaUpdate, touchReference, attestLocal, capacityFromRef, maxUnbackedOver, availableNow } from "../lib/limits.mjs";
+import { emaUpdate, windowLowTouch, attestLocal, capacityFromRef, maxUnbackedOver, availableNow } from "../lib/limits.mjs";
 
 const reference = fileURLToPath(new URL("../../reference", import.meta.url));
 const script = `
@@ -17,7 +17,7 @@ s = P.Session()
 out = []
 while len(out) < 30000:
     line = D.gen_pure(r)
-    if line[0] in "KEM" and line[1] == " ":
+    if (line[0] in "KEM" and line[1] == " ") or line.startswith("EL "):
         out.append([line, s.run_line(line)])
 # available_now: random bucket states
 for _ in range(10000):
@@ -44,6 +44,11 @@ test("JS limiter views match the Python reference on 40,000 edge cases", () => {
       case "E":
         got = `E ${emaUpdate(BigInt(t[1]), BigInt(t[2]), BigInt(t[3]), BigInt(t[4]), t[5] === "1")}`;
         break;
+      case "EL": {
+        const l = windowLowTouch({ prev: BigInt(t[1]), cur: BigInt(t[2]), window: BigInt(t[3]) }, BigInt(t[4]), BigInt(t[5]), t[6] === "1");
+        got = `EL ${l.prev} ${l.cur} ${l.window}`;
+        break;
+      }
       case "M": {
         const p = { short: { capacity: BigInt(t[1]), windowMs: BigInt(t[2]) }, long: { capacity: BigInt(t[3]), windowMs: BigInt(t[4]) } };
         got = `M ${maxUnbackedOver(p, BigInt(t[5]))}`;
@@ -58,22 +63,20 @@ test("JS limiter views match the Python reference on 40,000 edge cases", () => {
     assert.equal(got, want, line);
     counts[t[0]] = (counts[t[0]] ?? 0) + 1;
   }
-  for (const k of ["K", "E", "M", "A*"]) assert.ok(counts[k] > 2000, `coverage ${k}: ${counts[k]}`);
+  for (const k of ["K", "E", "EL", "M", "A*"]) assert.ok(counts[k] > 2000, `coverage ${k}: ${counts[k]}`);
 });
 
-test("the touched reference drops at once to the balance and rises slowly (finding 65)", () => {
-  // Rising: the EMA step, as before.
-  assert.equal(touchReference(1_000n, 0, 2_000n, 43_200, true), emaUpdate(1_000n, 0, 2_000n, 43_200, true));
-  assert.equal(touchReference(1_000n, 0, 2_000n, 43_200, true), 1_500n);
-  // Falling: straight to the balance, not halfway.
-  assert.equal(emaUpdate(1_000n, 0, 200n, 43_200, true), 600n);
-  assert.equal(touchReference(1_000n, 0, 200n, 43_200, true), 200n);
-  assert.equal(touchReference(1_000n, 0, 200n, 0, true), 200n, "even with no time passed");
-  assert.equal(touchReference(0n, 0, 5_000n, 0, false), 5_000n, "first touch: the balance");
-  // attestLocal's figures use it: a vault whose stored reference sits above
-  // the live balance is limited by the balance.
+test("the base is the least of the reference, the balance and the low-water balance (finding 65)", () => {
   const limits = { shortBps: 200, shortWindowS: 3_600, longBps: 500, longWindowS: 86_400, minQueueDelayS: 21_600, shortFloor: 0n, longFloor: 0n, shortCap: 0n, longCap: 0n };
-  const vault = { refBalance: 10_000_000n, refUpdatedS: 0, refInitialized: true, limits, tatShortMs: 0n, tatLongMs: 0n, frozenUntil: 0, queuedAmount: 0n, pendingTickets: 0 };
-  const a = attestLocal(vault, { frozenUntil: 0 }, 1_000_000n, 1);
-  assert.equal(a.worst1h, attestLocal({ ...vault, refBalance: 1_000_000n }, { frozenUntil: 0 }, 1_000_000n, 1).worst1h);
+  const at = (refBalance, low, balance, nowS) =>
+    attestLocal({ refBalance, refUpdatedS: nowS, refInitialized: true, low, limits, tatShortMs: 0n, tatLongMs: 0n, frozenUntil: 0, queuedAmount: 0n, pendingTickets: 0 }, { frozenUntil: 0 }, balance, nowS);
+  const T = 1_800 * 1_000;
+  // A deposit taken back in the window: the 1M low counts, not the 10M balance.
+  const flash = at(10_000_000n, { prev: 10_000_000n, cur: 1_000_000n, window: 1_000n }, 10_000_000n, T + 5);
+  assert.equal(flash.availableNow, 20_000n);
+  // Two windows later the low has rolled off: the 10M reference and balance.
+  const later = at(10_000_000n, { prev: 10_000_000n, cur: 1_000_000n, window: 1_000n }, 10_000_000n, T + 2 * 1_800 + 5);
+  assert.equal(later.availableNow, 200_000n);
+  // The live balance still caps it at once (A1).
+  assert.equal(at(10_000_000n, { prev: 10_000_000n, cur: 10_000_000n, window: 1_000n }, 1_000_000n, T + 5).availableNow, 20_000n);
 });
