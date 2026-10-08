@@ -75,8 +75,11 @@ test("one mint's outflow does not fill another mint's window", () => {
 test("replaying history records the window and does not veto or freeze by itself", () => {
   const s = newState();
   const ev = decode({ name: "vault:change_proposed", fields: [u64le(3), Uint8Array.of(0), key(mint), i64le(0), PROTOCOL] });
-  assert.deepEqual(assess(s, ev, { worst1h, now: 0 }, DEFAULT_POLICY, false), []);
+  // No veto is sent from a replay; the proposal is read by id once acting
+  // starts (finding 71: the account scan alone may be refused for good).
+  assert.deepEqual(assess(s, ev, { worst1h, now: 0 }, DEFAULT_POLICY, false), [{ type: "check_change", changeId: 3n }]);
   assert.equal(s.vetoed.size, 0);
+  assert.deepEqual(assess(s, ev, { worst1h, now: 0 }, { ...DEFAULT_POLICY, vetoLoosenings: false }, false), []);
   assess(s, released({ instant: 250_000n * USDC }), { worst1h, worst24h: 2_000_000n * USDC, now: 10 }, DEFAULT_POLICY, false);
   assert.equal(s.freezing, false);
   assert.match(breach(s, mint, { worst1h, worst24h: 2_000_000n * USDC, now: 10 }).reason, /last hour/);
@@ -637,8 +640,8 @@ test("an approval is spent once its change has executed; a thief's copy is then 
   const ran = { id: 4n, kind: 3, target: fresh, payload: new Uint8Array(0), vetoed: false, executed: true, executableS: 1_000, expiresS: 2_000 };
   const again = { ...ran, id: 11n, executed: false, executableS: 5_000, expiresS: 6_000 };
   const s = newState();
-  assert.equal(consumeApproval(s.consumed, policy.approvedChanges, changeApproval(ran), "c4"), content);
-  assert.equal(consumeApproval(s.consumed, policy.approvedChanges, changeApproval(ran), "c4"), null, "the same execution spends nothing more");
+  assert.equal(consumeApproval(s.consumed, policy.approvedChanges, changeApproval(ran), "c4", 2_000), content);
+  assert.equal(consumeApproval(s.consumed, policy.approvedChanges, changeApproval(ran), "c4", 2_000), null, "the same execution spends nothing more");
   assert.equal(pendingChangeVeto(again, policy, 4_000, s.vetoed, s.consumed).changeId, 11n);
   assert.equal(dueApprovedChange(again, policy, 5_500, new Set(), s.consumed), null);
   const live = decode({ name: "vault:change_proposed", fields: [u64le(11), Uint8Array.of(3), key(fresh), i64le(5_000), PROTOCOL] });
@@ -650,7 +653,7 @@ test("an approval is spent once its change has executed; a thief's copy is then 
   assert.equal(pendingChangeVeto(again, twice, 4_000, new Set(), s.consumed), null);
   assert.equal(dueApprovedChange(again, twice, 5_500, new Set(), s.consumed).approval, content);
   // The keeper spends exactly one of them per execution.
-  consumeApproval(s.consumed, twice.approvedChanges, content, "c11");
+  consumeApproval(s.consumed, twice.approvedChanges, content, "c11", 5_500);
   assert.equal(pendingChangeVeto({ ...again, id: 12n }, twice, 4_000, new Set(), s.consumed).changeId, 12n);
 });
 
@@ -664,8 +667,9 @@ test("an approval with an expiry approves nothing from then on; the old format s
   assert.equal(dueApprovedChange(change, policy, 3_500, new Set()), null, "expired: not executed");
   const live = decode({ name: "vault:change_proposed", fields: [u64le(5), Uint8Array.of(0), key(mint), i64le(2_000), PROTOCOL] });
   assert.equal(assess(newState(), live, { worst1h, now: 3_000 }, policy)[0].type, "veto_change");
-  assert.deepEqual(parseApproval(`${content}@3000`), { content, expiresS: 3_000 });
-  assert.deepEqual(parseApproval(content), { content, expiresS: null });
+  assert.deepEqual(parseApproval(`${content}@3000`), { content, version: null, expiresS: 3_000 });
+  assert.deepEqual(parseApproval(content), { content, version: null, expiresS: null });
+  assert.deepEqual(parseApproval(`${content}#7@3000`), { content, version: 7, expiresS: 3_000 });
   assert.throws(() => checkPolicy({ ...DEFAULT_POLICY, approvedChanges: [`${content}@soon`] }), /approvedChanges/);
   // Floor approvals too, by content, spent once.
   const floor = { program: owner, pendingKind: 5, pendingId: 2n, pendingVetoed: false, pendingTarget: mint, pendingPayload: new Uint8Array(0), pendingEta: 1_000, pendingExpires: 9_000 };
@@ -700,7 +704,10 @@ test("a failed cancel backs off; a refusal no retry changes stops it", () => {
   for (let i = 0; i < 20; i++) r = afterCancelFailure(r, new Error("x"), 0);
   assert.equal(r.at, 600_000, "capped at 10 minutes");
   assert.equal(afterCancelFailure(undefined, refused(8010), 0).final, "WrongVault");
-  assert.equal(afterCancelFailure(undefined, refused(8006), 0).final, "NotGuardian");
+  // NotGuardian is not for good: the key can be a live guardian again. The
+  // cancel waits the longest backoff instead of never (finding 71).
+  const notGuardian = afterCancelFailure(undefined, refused(8006), 0);
+  assert.deepEqual([notGuardian.final, notGuardian.at], [null, 600_000]);
   assert.equal(afterCancelFailure(undefined, refused(8052), 0).final, "WrongTicket");
   // A confirmed failure carries the error in its message.
   assert.equal(afterCancelFailure(undefined, new Error('transaction x failed: {"InstructionError":[2,{"Custom":8052}]}'), 0).final, "WrongTicket");

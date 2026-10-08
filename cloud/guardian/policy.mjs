@@ -10,10 +10,25 @@ import { b58encode, Reader, decodeChange, parseLogs } from "../lib/solana.mjs";
 const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
 
 /** How a Vault change is approved in `approvedChanges`: the kind, target and
- * payload of its `propose_change`, exactly as proposed. An approval may end
- * in "@<unix seconds>": from then on it approves nothing. */
+ * payload of its `propose_change`, exactly as proposed. An approval may add
+ * "#<base version>" (`pinnedChangeApproval`), and may end in "@<unix
+ * seconds>": from then on it approves nothing. */
 export function changeApproval({ kind, target, payload }) {
   return `${kind}:${target}:${hex(payload)}`;
+}
+
+/**
+ * The approval of one proposal of a Vault change, pinned to the version of
+ * its target it was proposed against ("kind:target:payloadHex#<base
+ * version>"). The program records that version in the change account and
+ * executes the change only while the target is still at it, and every
+ * execution moves the version on: a proposal of the same content made after
+ * this one ran carries a newer version, so a pinned approval can never
+ * approve a replay, whatever this guardian remembers (docs/09, finding 71).
+ * Spending on execution (`spendExecution`) is only for unpinned ones.
+ */
+export function pinnedChangeApproval(change) {
+  return `${changeApproval(change)}#${change.baseVersion}`;
 }
 
 /** How a Floor proposal other than code is approved in `approvedFloorProposals`. */
@@ -22,24 +37,31 @@ export function floorApproval({ program, kind, target, payload }) {
 }
 
 const B58 = "[1-9A-HJ-NP-Za-km-z]{32,44}";
-const CHANGE_APPROVAL = new RegExp(`^\\d+:${B58}:([0-9a-f]{2})*(@\\d+)?$`);
+const CHANGE_APPROVAL = new RegExp(`^\\d+:${B58}:([0-9a-f]{2})*(#\\d+)?(@\\d+)?$`);
 const FLOOR_APPROVAL = new RegExp(`^${B58}:\\d+:${B58}:([0-9a-f]{2})*(@\\d+)?$`);
 
-/** An approval's content ("kind:target:payloadHex", or Floor's) and its expiry (null: none). */
+/** An approval's content ("kind:target:payloadHex", or Floor's), the base
+ * version it is pinned to (null: none) and its expiry (null: none). */
 export function parseApproval(a) {
   const at = a.lastIndexOf("@");
-  return at < 0 ? { content: a, expiresS: null } : { content: a.slice(0, at), expiresS: Number(a.slice(at + 1)) };
+  const expiresS = at < 0 ? null : Number(a.slice(at + 1));
+  let content = at < 0 ? a : a.slice(0, at);
+  const hash = content.lastIndexOf("#");
+  const version = hash < 0 ? null : Number(content.slice(hash + 1));
+  if (hash >= 0) content = content.slice(0, hash);
+  return { content, version, expiresS };
 }
 
 /**
- * The configured approvals that still approve at `now`. An approval is spent
- * once a change matching it has executed (`consumed`: approval -> the
- * execution that spent it, kept across restarts). Before, an approval matched
- * every later proposal of the same content: a thief holding the admin key
- * re-proposed an approved change that had already run, after the operators
- * had moved on (an old admin, guardian set or recovery key), and the guardian
- * let it through and its keeper executed it. To approve the same content
- * again, add it again with an expiry: that is another approval.
+ * The configured approvals that still approve at `now`. An unpinned approval
+ * is spent once a change matching it has executed (`consumed`: approval ->
+ * the execution that spent it, kept across restarts). Before, an approval
+ * matched every later proposal of the same content: a thief holding the
+ * admin key re-proposed an approved change that had already run, after the
+ * operators had moved on (an old admin, guardian set or recovery key), and
+ * the guardian let it through and its keeper executed it. To approve the
+ * same content again, add it again with an expiry: that is another approval.
+ * A pinned approval is never spent: the chain retires it (`pinnedChangeApproval`).
  */
 function liveApprovals(list, now, consumed) {
   return (list ?? []).filter((a) => {
@@ -48,20 +70,86 @@ function liveApprovals(list, now, consumed) {
   });
 }
 
-const approves = (list, content, now, consumed) => liveApprovals(list, now, consumed).some((a) => parseApproval(a).content === content);
+/** Whether an approval in `list` approves `content` at `now`. `baseVersion`
+ * is the proposal's (a Vault change account's): a pinned approval approves
+ * only that version, and nothing while it is not known. */
+function approves(list, content, now, consumed, baseVersion) {
+  return liveApprovals(list, now, consumed).some((a) => {
+    const p = parseApproval(a);
+    return p.content === content && (p.version === null || (baseVersion != null && p.version === Number(baseVersion)));
+  });
+}
 const approvesPrefix = (list, prefix, now, consumed) => liveApprovals(list, now, consumed).some((a) => parseApproval(a).content.startsWith(prefix));
 
 /**
  * Spend one approval of `content` on the execution `by` ("c<id>" for a Vault
- * change, "e<program>:<id>" for Floor). Seeing the same execution again (the
- * next scan, its event) spends nothing more. Returns the approval spent, or null.
+ * change, "e<program>:<id>" for Floor) at `now`. Seeing the same execution
+ * again (the next scan, its event) spends nothing more. Returns the approval
+ * spent, or null.
+ *
+ * Only an approval still live at `now` is spent, the one that expires first
+ * (one without an expiry last), and never a pinned one. The first unspent
+ * match used to be spent even when it had already expired: a live approval
+ * of the same content stayed unspent and approved a replay of the change
+ * that had just run (docs/09, finding 71).
  */
-export function consumeApproval(consumed, list, content, by) {
+export function consumeApproval(consumed, list, content, by, now) {
   for (const used of consumed.values()) if (used === by) return null;
-  const a = (list ?? []).find((x) => parseApproval(x).content === content && !consumed.has(x));
-  if (!a) return null;
+  const candidates = liveApprovals(list, now, consumed).filter((x) => {
+    const p = parseApproval(x);
+    return p.content === content && p.version === null;
+  });
+  if (!candidates.length) return null;
+  const order = (x) => parseApproval(x).expiresS ?? Infinity;
+  const a = candidates.reduce((best, x) => (order(x) < order(best) ? x : best));
   consumed.set(a, by);
   return a;
+}
+
+/**
+ * Spend the approval an execution ran on, once per execution ever seen
+ * (`state.executedSeen`, kept across restarts). A Vault change spends only
+ * once there is a baseline (`state.changeBaseline`): change accounts are
+ * never closed, so a guardian with a fresh or lost state file read a change
+ * that ran long ago as a new execution, spent today's approval of the same
+ * content on it, and vetoed the operators' pending change (one guardian's
+ * veto is final). Without a baseline, the first scan (`observeExecutions`)
+ * records every change already executed and spends nothing (docs/09,
+ * finding 71). An execution seen as it happens (`live`: its event read live,
+ * or the keeper's own) is new whatever the baseline, and spends.
+ * Returns the approval spent, or null.
+ */
+export function spendExecution(state, list, content, by, now, { live = false } = {}) {
+  if (by.startsWith("c") && !state.changeBaseline && !live) return null;
+  if (state.executedSeen.has(by)) return null;
+  state.executedSeen.add(by);
+  return content ? consumeApproval(state.consumed, list, content, by, now) : null;
+}
+
+/**
+ * One program-account scan of change accounts: each executed change not seen
+ * before spends its approval (`spendExecution`). The first scan without a
+ * baseline only records them all. Returns what was spent, by which change.
+ */
+export function observeExecutions(state, changes, list, now) {
+  const executed = changes.filter((c) => c?.executed);
+  if (!state.changeBaseline) {
+    for (const c of executed) state.executedSeen.add(`c${BigInt(c.id)}`);
+    state.changeBaseline = true;
+    return [];
+  }
+  const spent = [];
+  for (const c of executed) {
+    const a = spendExecution(state, list, changeApproval(c), `c${BigInt(c.id)}`, now);
+    if (a) spent.push({ approval: a, change: c });
+  }
+  return spent;
+}
+
+/** The Vault approvals not pinned to a base version: they lean on this
+ * guardian's own record of what has executed. Reported at startup. */
+export function unpinnedChangeApprovals(policy) {
+  return (policy.approvedChanges ?? []).filter((a) => parseApproval(a).version === null);
 }
 
 /**
@@ -75,7 +163,7 @@ export function checkPolicy(policy) {
     throw new Error('policy.approvedChangeIds is no longer read: approve a change by what it does, in approvedChanges as "kind:target:payloadHex" (docs/07)');
   }
   for (const a of policy.approvedChanges ?? []) {
-    if (typeof a !== "string" || !CHANGE_APPROVAL.test(a)) throw new Error(`policy.approvedChanges: ${JSON.stringify(a)} is not "kind:target:payloadHex[@expiry]"`);
+    if (typeof a !== "string" || !CHANGE_APPROVAL.test(a)) throw new Error(`policy.approvedChanges: ${JSON.stringify(a)} is not "kind:target:payloadHex[#baseVersion][@expiry]"`);
   }
   for (const a of policy.approvedFloorProposals ?? []) {
     if (typeof a !== "string" || !FLOOR_APPROVAL.test(a)) throw new Error(`policy.approvedFloorProposals: ${JSON.stringify(a)} is not "program:kind:target:payloadHex[@expiry]" (approvals by id were replaced)`);
@@ -83,14 +171,16 @@ export function checkPolicy(policy) {
   return policy;
 }
 
-/** A change account (decoded, with its payload) the operators approved, by
- * an approval neither expired at `now` nor spent. */
+/** A change account (decoded, with its payload and base version) the
+ * operators approved, by an approval neither expired at `now` nor spent, and
+ * pinned to its base version if pinned at all. */
 function changeApproved(change, policy, now, consumed) {
-  return change.payload !== undefined && approves(policy.approvedChanges, changeApproval(change), now, consumed);
+  return change.payload !== undefined && approves(policy.approvedChanges, changeApproval(change), now, consumed, change.baseVersion);
 }
 
-/** A live proposal event names the kind and target but not the payload: it
- * could be an approved change. The change account is then read by its id. */
+/** A live proposal event names the kind and target but neither the payload
+ * nor the base version: it could be an approved change. The change account is
+ * then read by its id, and decides with both (`checkProposedChange`). */
 function changeMayBeApproved(kind, target, policy, now, consumed) {
   return approvesPrefix(policy.approvedChanges, `${kind}:${target}:`, now, consumed);
 }
@@ -125,9 +215,11 @@ export const DEFAULT_POLICY = {
    * what it does, "kind:target:payloadHex" (`changeApproval`), never by its
    * id: an id is only the protocol's next counter, so whoever proposes first
    * gets it, and a stolen admin key proposing just before the operators would
-   * take their approval (and the keeper would execute its change). An
-   * approval is spent once a matching change executes, and may carry an
-   * expiry, "kind:target:payloadHex@<unix seconds>" (`liveApprovals`). */
+   * take their approval (and the keeper would execute its change). Pin an
+   * approval to the base version its proposal records,
+   * "kind:target:payloadHex#<version>" (`pinnedChangeApproval`): it can then
+   * never approve a replay. An unpinned one is spent once a matching change
+   * executes. Either may carry an expiry, "...@<unix seconds>" (`liveApprovals`). */
   vetoLoosenings: true,
   approvedChanges: [],
   /** A live proposal that may be approved is checked by reading its change
@@ -187,7 +279,7 @@ export function floorAlerts(fl) {
 }
 
 export function newState() {
-  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false, incidentSince: null, consumed: new Map() };
+  return { outflows: [], frozenUntil: 0, cancelled: new Set(), vetoed: new Set(), tickets: new Set(), pendingTickets: new Map(), freezing: false, incidentSince: null, consumed: new Map(), executedSeen: new Set(), changeBaseline: false };
 }
 
 /** Keep ticket cancellation state outside the rolling outflow windows. */
@@ -463,23 +555,30 @@ export function programErrorCode(e) {
 
 /**
  * Vault refusals of `cancel_ticket` that no retry gets past
- * (programs/vault/src/error.rs, counted from 8000): this key is not a live
- * guardian, the ticket is not this vault's, or the address now holds another
- * ticket (addresses are reused once a ticket closes, so the one decided on is gone).
+ * (programs/vault/src/error.rs, counted from 8000): the ticket is not this
+ * vault's, or the address now holds another ticket (addresses are reused once
+ * a ticket closes, so the one decided on is gone).
  */
-const CANCEL_FINAL = new Map([[8006, "NotGuardian"], [8010, "WrongVault"], [8052, "WrongTicket"]]);
+const CANCEL_FINAL = new Map([[8010, "WrongVault"], [8052, "WrongTicket"]]);
+/** NotGuardian: this key is not a live guardian now. It can be again (a
+ * heartbeat while in range, or a quorum adding it back), so the cancel waits
+ * the longest backoff instead of being dropped until a restart (docs/09,
+ * finding 71). */
+const NOT_GUARDIAN = 8006;
 export const CANCEL_RETRY_MS = 15_000;
 export const CANCEL_RETRY_MAX_MS = 600_000;
 
 /**
- * After a cancel failed: retry later, doubling from 15 s to 10 minutes, or
- * never (`final`: the refusal's name). Failed cancels used to go out again
- * every poll, each one landing on chain through the backups for a fee.
+ * After a cancel failed: retry later, doubling from 15 s to 10 minutes (at
+ * once 10 minutes for NotGuardian), or never (`final`: the refusal's name).
+ * Failed cancels used to go out again every poll, each one landing on chain
+ * through the backups for a fee.
  */
 export function afterCancelFailure(prev, error, nowMs) {
   const code = programErrorCode(error);
   const failures = (prev?.failures ?? 0) + 1;
   if (CANCEL_FINAL.has(code)) return { final: CANCEL_FINAL.get(code), failures, at: Infinity };
+  if (code === NOT_GUARDIAN) return { final: null, failures, at: nowMs + CANCEL_RETRY_MAX_MS, refused: "NotGuardian" };
   return { final: null, failures, at: nowMs + Math.min(CANCEL_RETRY_MAX_MS, CANCEL_RETRY_MS * 2 ** (failures - 1)) };
 }
 
@@ -596,8 +695,8 @@ export function heartbeatEverySeconds(everyS, chainIntervalS) {
 export function readPendingChange(bytes) {
   if (!bytes) return null;
   try {
-    const { protocol, id, kind, vetoed, executed, target, executableS, expiresS, payload } = decodeChange(bytes);
-    return { protocol, id, kind, vetoed, executed, target, executableS, expiresS, payload };
+    const { protocol, id, kind, vetoed, executed, target, executableS, expiresS, payload, baseVersion } = decodeChange(bytes);
+    return { protocol, id, kind, vetoed, executed, target, executableS, expiresS, payload, baseVersion };
   } catch {
     return null;
   }
@@ -820,8 +919,16 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
       state.cancelled.delete(e.ticketId);
       break;
     case "change_proposed":
-      if (!act) break;
       if (!policy.vetoLoosenings || state.vetoed.has(`c${e.id}`)) break;
+      // Replayed at startup: nothing is sent, but the proposal is still read
+      // by its id once acting starts (`checkProposedChange` vetoes it unless
+      // it is closed or approved). It used to be left to the program-account
+      // scan alone, which a node may refuse for as long as it likes (docs/09,
+      // finding 71).
+      if (!act) {
+        actions.push({ type: "check_change", changeId: e.id });
+        break;
+      }
       // The event has no payload: a change that may be approved is read by
       // its id (`checkProposedChange`), and vetoed unless its payload matches too.
       if (changeMayBeApproved(e.changeKind, e.target, policy, ctx.now, state.consumed)) {

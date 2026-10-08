@@ -3,18 +3,25 @@
 // Floor's pending proposal: what to put in `policy.approvedChanges` or
 // `approvedFloorProposals` to let a proposal of exactly that content through.
 // An approval names what a change does (kind, target, payload), never its id,
-// so a thief's different change does not match it (docs/07 §6). It is not
-// tied to one proposal: anyone holding the proposing key can propose the same
-// content again. The guardian spends an approval once a matching change has
-// executed, and an approval may end in "@<unix seconds>" to stop approving
-// anything from then on; add one with the expiry you need. Read-only; approve
-// only what the operators agreed to.
+// so a thief's different change does not match it (docs/07 §6).
+//
+// A Vault approval is printed pinned to the change's base version
+// ("kind:target:payloadHex#<baseVersion>"): the version of its target the
+// change recorded when proposed. Content alone is not tied to one proposal:
+// anyone holding the proposing key can propose the same content again, and
+// an unpinned approval then leans on the guardian remembering that it was
+// spent (a lost state file, an expired approval spent in the wrong order:
+// docs/09, finding 71). Executing any change of a target moves its version
+// on, so a pinned approval can never match a replay. Any approval may end in
+// "@<unix seconds>" to stop approving anything from then on. Floor approvals
+// have no version and are spent once their proposal executes. Read-only;
+// approve only what the operators agreed to.
 //
 //   node cloud/deploy/approvals.mjs <rpc> <vault-program> <protocol> [floor-program protected-program]
 import { Rpc, decodeFloor } from "../lib/solana.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 import { activeChanges } from "../guardian/chain.mjs";
-import { changeApproval, floorApproval } from "../guardian/policy.mjs";
+import { pinnedChangeApproval, floorApproval } from "../guardian/policy.mjs";
 
 const [url, vaultProgram, protocol, floorProgram, protectedProgram] = process.argv.slice(2);
 if (!url || !vaultProgram || !protocol) {
@@ -25,11 +32,15 @@ const rpc = new Rpc(url);
 const KINDS = ["limits", "asset", "guardians", "admin", "lifeboat destination", "loosen delay", "recovery key"];
 const iso = (t) => new Date(t * 1000).toISOString();
 
-const changes = (await activeChanges(rpc, vaultProgram, protocol)).sort((a, b) => (a.id < b.id ? -1 : 1));
+// Change accounts are never closed: only those still open need an approval.
+const now = Date.now() / 1000;
+const changes = (await activeChanges(rpc, vaultProgram, protocol))
+  .filter((c) => !c.vetoed && !c.executed && now < c.expiresS)
+  .sort((a, b) => (a.id < b.id ? -1 : 1));
 if (!changes.length) console.log("vault: no open change");
 for (const c of changes) {
-  console.log(`vault change ${c.id} (${KINDS[c.kind] ?? `kind ${c.kind}`}, target ${c.target}, executable ${iso(c.executableS)} until ${iso(c.expiresS)})`);
-  console.log(`  approvedChanges: ${JSON.stringify(changeApproval(c))}`);
+  console.log(`vault change ${c.id} (${KINDS[c.kind] ?? `kind ${c.kind}`}, target ${c.target}, base version ${c.baseVersion}, executable ${iso(c.executableS)} until ${iso(c.expiresS)})`);
+  console.log(`  approvedChanges: ${JSON.stringify(pinnedChangeApproval(c))}`);
 }
 if (floorProgram && protectedProgram) {
   const fc = await new FloorClient(floorProgram, protectedProgram).init();
