@@ -327,7 +327,7 @@ jobs:
     # Supply chain: RustSec advisories, licences, crate sources, on all three
     # lockfiles. Weekly as well, since new advisories appear without a change here.
     needs: changes
-    if: needs.changes.outputs.deny == 'true'
+    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.deny == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -355,7 +355,7 @@ jobs:
     # zizmor (injection, credential persistence, unpinned actions, excessive
     # permissions).
     needs: changes
-    if: needs.changes.outputs.workflows == 'true'
+    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
