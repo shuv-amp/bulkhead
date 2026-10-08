@@ -2949,3 +2949,16 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     ix.data.extend_from_slice(Keypair::new().pubkey().as_ref());
     w.env.ok(&[ix], &[]);
 }
+
+/// A recovery key cut short at registration is an error, not "no recovery key".
+#[test]
+fn registration_refuses_a_cut_off_recovery_key() {
+    let mut w = World::new();
+    let harbor = Address::new_unique();
+    w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
+    let mut ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
+    ix.data.extend_from_slice(&Keypair::new().pubkey().as_ref()[..31]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::INVALID_INSTRUCTION);
+    let ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
+    w.env.ok(&[ix], &[]);
+}

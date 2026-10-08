@@ -26,6 +26,11 @@ case "$URL" in
   *) if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ] && [ "${ALLOW_NONCANONICAL:-0}" != 1 ]; then
        echo "refusing: $(uname -s)-$(uname -m) is not the canonical build host; deploy from Linux x86_64 or CI's binaries" >&2
        exit 1
+     fi
+     # Only reviewed code: the bytes must be rebuildable from a commit.
+     if [ -n "$(git status --porcelain -- programs crates Cargo.toml Cargo.lock)" ] && [ "${ALLOW_DIRTY:-0}" != 1 ]; then
+       echo "refusing: uncommitted changes under programs/, crates/ or Cargo.*; commit them (or ALLOW_DIRTY=1)" >&2
+       exit 1
      fi ;;
 esac
 

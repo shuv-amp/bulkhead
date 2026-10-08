@@ -1160,3 +1160,21 @@ fn a_guardian_is_never_the_recovery_key() {
     env.ok(&[ix], &[&team]);
     assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref());
 }
+
+/// A recovery key cut short at registration is an error, not "no recovery key".
+#[test]
+fn registration_refuses_a_cut_off_recovery_key() {
+    let mut env = Env::new();
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 1024);
+    let f = Floor::new(env.floor, program);
+    let owner = Keypair::new().pubkey();
+    let (a, b) = (Keypair::new().pubkey(), Keypair::new().pubkey());
+    let pay = env.payer.pubkey();
+    let mut ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    ix.data.extend_from_slice(&Keypair::new().pubkey().as_ref()[..31]);
+    assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_INSTRUCTION);
+    let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    env.ok(&[ix], &[&team]);
+}

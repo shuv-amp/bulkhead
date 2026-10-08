@@ -395,7 +395,12 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
         parse_guardian_set(args.get(32..).unwrap_or(&[]), &owner, &[0; 32])?;
     let delay = i64_arg(args, 32 + used)?;
     // Optional recovery key after the delay (absent or all zero: none).
-    let recovery = k32_arg(args, 32 + used + 8).unwrap_or([0; 32]);
+    // Absent: none. Present, all 32 bytes: a cut-off key is an error, not none.
+    let recovery = if args.len() <= 32 + used + 8 {
+        [0; 32]
+    } else {
+        k32_arg(args, 32 + used + 8)?
+    };
     // No key holds two roles: a guardian that is also the recovery key would
     // never veto its own new owner (docs/09, finding 62).
     if recovery == owner || (recovery != [0; 32] && guardians[..count as usize].contains(&recovery))

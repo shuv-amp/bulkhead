@@ -29,6 +29,10 @@ impl<'a> R<'a> {
     pub fn args(d: &'a [u8]) -> R<'a> {
         R { d, o: 0 }
     }
+    /// Whether every byte has been read.
+    pub fn is_empty(&self) -> bool {
+        self.o >= self.d.len()
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8], ProgramError> {
         let s = self
             .d

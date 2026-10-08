@@ -58,7 +58,8 @@ pub fn register_protocol(
     let (guardians, count, threshold, interval) = parse_guardian_set(&mut r, &admin, &[0; 32])?;
     let loosen_delay = r.i64()?;
     let destination = r.key()?;
-    let recovery = r.key().unwrap_or([0; 32]);
+    // Absent: none. Present, all 32 bytes: a cut-off key is an error, not none.
+    let recovery = if r.is_empty() { [0; 32] } else { r.key()? };
     // No key holds two roles: a guardian that is also the recovery key would
     // never veto its own new admin (docs/09, finding 62).
     if recovery == admin || (recovery != [0; 32] && guardians[..count as usize].contains(&recovery))
