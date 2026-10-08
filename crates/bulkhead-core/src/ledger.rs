@@ -24,8 +24,8 @@
 //! liability with no price makes health unknown (fail closed).
 //!
 //! Soundness is monotone in `b`, so the largest valid `b` is found by binary
-//! search. The on-chain fast path (closed form) is differentially tested
-//! against this function.
+//! search. The Vault program calls this same function (`custody.rs`); the
+//! program-vs-model differential compares its on-chain outcomes with it.
 
 use crate::consts::MAX_SLOTS;
 use crate::value::value_v;

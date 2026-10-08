@@ -76,6 +76,10 @@ def gen_pure(r: random.Random) -> str:
     k = r.randrange(11)
     if k == 0:
         return f"K {edge_u64(r)} {r.choice([0, 1, 200, 500, 10000, r.randrange(0, 65536)])} {edge_u64(r)} {edge_u64(r)}"
+    if k == 1 and r.randrange(2):
+        now = r.randrange(-10_000, 2_000_000_000)
+        window = now // 1_800 + r.choice([-3, -1, 0, 0, 1, 2, r.randrange(-(1 << 40), 1 << 40)])
+        return f"EL {edge_u64(r)} {edge_u64(r)} {window} {edge_u64(r)} {now} {r.randrange(2)}"
     if k == 1:
         last = r.randrange(0, 2_000_000_000)
         now = last + r.choice([-5, 0, 1, 3600, 86_400, 200_000, r.randrange(0, 10**7)])

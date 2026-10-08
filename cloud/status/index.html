@@ -81,10 +81,6 @@ const fmt = (raw, decimals) => {
   const n = Number(raw) / 10 ** decimals;
   return n.toLocaleString(undefined, { maximumFractionDigits: n < 100 ? 2 : 0 });
 };
-const ago = (s) => {
-  const d = Math.round(Date.now() / 1000 - s);
-  return d < 90 ? `${d}s ago` : d < 5400 ? `${Math.round(d / 60)}m ago` : d < 172800 ? `${Math.round(d / 3600)}h ago` : `${Math.round(d / 86400)}d ago`;
-};
 // `now` is the chain's clock, the one the row's colour is judged by.
 const until = (s, now) => {
   const d = Math.round(s - now);
@@ -123,10 +119,21 @@ function exitRow(exit, decimals) {
   return `<div class="row"><span>Lifeboat exit of ${fmt(exit.amount, decimals)}</span><span>${when}; any live guardian can veto</span></div>`;
 }
 
+// The seal turns releases on: a loosening, so it gets a countdown too.
+function sealRow(p, now, live) {
+  if (p.sealed || !p.sealExecutableS) return "";
+  if (p.sealVetoed) return `<div class="row"><span>Seal proposal</span><span class="ok">vetoed</span></div>`;
+  if (now >= p.sealExpiresS) return `<div class="row"><span>Seal proposal</span><span class="ok">expired</span></div>`;
+  const left = p.sealExecutableS - now;
+  const veto = live === 0 ? "no guardian is live to veto it" : "any live guardian can veto";
+  return `<div class="row"><span>Seal proposal (turns releases on)</span><span>${left > 0 ? `<span class="warn">executable in ${duration(left)}</span>` : `<span class="bad">executable now by anyone</span>`}; ${veto}</span></div>`;
+}
+
 function floorPending(fl, now) {
   if (!fl.pendingKind) return "none";
   const name = esc(FLOOR_PROPOSAL_KINDS[fl.pendingKind] ?? `kind ${fl.pendingKind}`);
   if (fl.pendingVetoed) return `${name}, vetoed`;
+  if (now >= fl.pendingExpires) return `${name}, expired (can never execute)`;
   const left = fl.pendingEta - now;
   return left > 0
     ? `${name}, <span class="warn">executable in ${duration(left)}</span> (${new Date(fl.pendingEta * 1000).toLocaleString()}); any live guardian can veto`
@@ -139,7 +146,8 @@ async function render() {
   const rpc = new Rpc(f.rpc);
   const vc = await new VaultClient(f.vault, f.protocol).init();
   const protocol = decodeProtocol((await rpc.account(vc.protocol)).bytes);
-  const now = await rpc.call("getBlockTime", [await rpc.call("getSlot", [{ commitment: "confirmed" }])]);
+  const slot = await rpc.call("getSlot", [{ commitment: "confirmed" }]);
+  const now = await rpc.call("getBlockTime", [slot]);
   const live = protocol.guardians.filter((_, i) => now - protocol.lastHeartbeat[i] <= protocol.heartbeatIntervalS).length;
   let html = "";
   let headline = [];
@@ -169,6 +177,7 @@ async function render() {
       <h2>Protocol</h2>
       ${await changesRows(rpc, vc, protocol, now, live)}
       <div class="row"><span>Sealed</span><span class="${protocol.sealed ? "ok" : "warn"}">${protocol.sealed ? "yes" : "no (releases disabled)"}</span></div>
+      ${sealRow(protocol, now, live)}
       <div class="row"><span>Frozen</span><span class="${protocol.frozenUntil > now ? "warn" : "ok"}">${until(protocol.frozenUntil, now)}</span></div>
       <div class="row"><span>Live guardians</span><span class="${live >= protocol.threshold ? "ok" : "bad"}">${live} of ${protocol.guardians.length} (quorum ${protocol.threshold})</span></div>
       <div class="row"><span>Any loosening waits</span><span>${Math.round(protocol.loosenDelayS / 3600)} hours (minimum 72, a constant)</span></div>
@@ -188,7 +197,13 @@ async function render() {
         <div class="big ${fl.status === "live" ? "ok" : "bad"}">${fl.status === "live" ? "Live" : "Stopped"}</div>
         <div class="row"><span>New code waits</span><span>${Math.round(fl.upgradeDelayS / 3600)} hours${fl.upgradeDelayS >= 604800 ? ' <span class="pill ok">Stage-1-grade exit window</span>' : ""}</span></div>
         <div class="row"><span>Stop button staged</span><span class="${fl.abortStaged ? "ok" : "bad"}">${fl.abortStaged ? "yes" : "no"}</span></div>
-        <div class="row"><span>Snapshot for instant restore</span><span class="${fl.snapshotPinned ? "ok" : "warn"}">${fl.snapshotPinned ? "pinned" : "not pinned"}</span></div>
+        <div class="row"><span>Snapshot for instant restore</span>${
+          // While live, a pinned snapshot is checked against the code at the
+          // stop; once stopped, only a snapshot found valid then restores.
+          fl.status === "live"
+            ? `<span class="${fl.snapshotPinned ? "ok" : "warn"}">${fl.snapshotPinned ? "pinned" : "not pinned"}</span>`
+            : `<span class="${fl.snapshotValid ? "ok" : "bad"}">${fl.snapshotValid ? "valid: a quorum can restore at once" : "not usable: the restore must wait the delay"}</span>`
+        }</div>
         <div class="row"><span>sBPF v3 (SIMD-0500 ready)</span><span class="${fl.elfIsV3 ? "ok" : "warn"}">${fl.elfIsV3 ? "yes" : "no: build and test a v3 binary"}</span></div>
         <div class="row"><span>Live guardians</span><span>${fl.guardians.filter((_, i) => now - fl.lastHeartbeat[i] <= fl.heartbeatIntervalS).length} of ${fl.guardians.length} (quorum ${fl.threshold})</span></div>
         <div class="row"><span>L2BEAT Security Council bar</span><span class="${councilBar ? "ok" : "warn"}">${councilBar ? "met" : "not met"}: ${n} guardians, quorum ${fl.threshold} (bar: ≥ 8, ≥ 75%; outside members not visible on-chain)</span></div>
@@ -196,7 +211,11 @@ async function render() {
       </div>`;
     }
   }
-  return `<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p><div class="grid">${html}</div>`;
+  // Whose data this is and from when: a link can name any RPC, and a stale
+  // page must not pass for a live one.
+  const host = (() => { try { return new URL(f.rpc).host; } catch { return f.rpc; } })();
+  const source = `<p class="mono">Read from ${esc(host)} at slot ${esc(slot)}, chain time ${new Date(now * 1000).toLocaleString()} (shown ${new Date().toLocaleTimeString()}). Trust it only as far as you trust that RPC.</p>`;
+  return `<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p>${source}<div class="grid">${html}</div>`;
 }
 
 // One refresh at a time on the timer, and only the newest result is shown: a

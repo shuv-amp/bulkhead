@@ -16,3 +16,7 @@ generate_pitch_deck.py
 .claude/
 mutants.out/
 mutants.out.old/
+# Keynote decks and local agent tooling
+*.key
+.humanlayer/
+humanlayer-skills/

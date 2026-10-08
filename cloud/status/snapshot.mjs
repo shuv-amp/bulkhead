@@ -45,7 +45,8 @@ for (const mint of mints.split(",")) {
     const onchain = await vc.attest(rpc, Keypair.load(payerPath).publicKey, mint);
     const at = attestLocal(v, p, balance, onchain.clockS); // the page's figures at the simulation's own clock
     let here = 0; // this vault's own, so one vault's mismatch is not reported on the next
-    for (const k of ["worst1h", "worst24h", "balance", "queued"]) {
+    // Every figure the page shows, the headline's "instantly" first.
+    for (const k of ["availableNow", "worst1h", "worst24h", "balance", "frozenUntil", "queued", "pendingTickets"]) {
       if (onchain[k] !== at[k]) {
         here++;
         console.log(`MISMATCH ${k}: page ${at[k]} vs program ${onchain[k]}`);

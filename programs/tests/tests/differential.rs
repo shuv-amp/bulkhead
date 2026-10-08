@@ -15,7 +15,7 @@
 mod common;
 
 use bulkhead_core::classify::LimitConfig;
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{capacity_base, params_from_config, request, Decision, LimiterState};
 use common::vault::*;
@@ -52,6 +52,8 @@ struct Model {
     reference: u64,
     ref_at: i64,
     ref_init: bool,
+    /// The low-water balance (finding 65), touched as the program does.
+    low: WindowLow,
     limiter: LimiterState,
     frozen_until: i64,
     ledgers: BTreeMap<[u8; 32], Ledger>,
@@ -121,6 +123,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
         reference: 0,
         ref_at: 0,
         ref_init: false,
+        low: WindowLow::default(),
         limiter: LimiterState::default(),
         frozen_until: 0,
         ledgers: BTreeMap::new(),
@@ -156,6 +159,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
         let amount = (1 + rng.below(3_000_000)) * USDC;
         let ix = m.deposit_ix(&env, &usdc, &u.pubkey(), &usdc_acc[i].0, amount);
         env.ok(&[ix], &[u]);
+        md.low = md.low.touch(md.balance, env.time, md.ref_init);
         md.reference = ema_update(md.reference, md.ref_at, md.balance, env.time, md.ref_init);
         md.ref_at = env.time;
         md.ref_init = true;
@@ -204,6 +208,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 let amount = (1 + rng.below(500_000)) * USDC;
                 let ix = m.deposit_ix(&env, &usdc, &users[i].pubkey(), &usdc_acc[i].0, amount);
                 env.ok(&[ix], &[&users[i]]);
+                md.low = md.low.touch(md.balance, now, md.ref_init);
                 md.reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                 md.ref_at = now;
                 md.balance += amount;
@@ -248,7 +253,8 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 let backed = ledger.backed_amount(&um, amount, &lookup);
                 let unbacked = amount - backed;
                 let reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
-                let params = params_from_config(&cfg(), capacity_base(reference, md.balance));
+                let low = md.low.touch(md.balance, now, md.ref_init);
+                let params = params_from_config(&cfg(), capacity_base(reference, md.balance.min(low.low())));
                 let mut lim = md.limiter;
                 let decision = if unbacked > 0 {
                     request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until * 1_000).map(Some)
@@ -279,6 +285,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                             "seed {seed} step {step}: outcome"
                         );
                         md.reference = reference;
+                        md.low = low;
                         md.ref_at = now;
                         md.limiter = lim;
                         let mut l = ledger;
@@ -308,6 +315,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                         assert!(r.is_err(), "frozen, or not enough tokens: no settlement");
                     } else {
                         r.unwrap_or_else(|e| panic!("seed {seed} step {step}: settle {:?}", e.err));
+                        md.low = md.low.touch(md.balance, now, md.ref_init);
                         md.reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                         md.ref_at = now;
                         md.balance -= amount;
@@ -322,7 +330,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 if let Some(&id) = md.tickets.keys().next() {
                     let (ticket, _) = ticket_accounts[&id];
                     let g = m.g[0].pubkey();
-                    let ix = m.cancel_ix(&usdc, &ticket, &g, &env.payer.pubkey());
+                    let ix = m.cancel_ix(&usdc, &ticket, ticket_id(&env, &ticket), &g, &env.payer.pubkey());
                     env.ok(&[ix], &[&m.g[0]]);
                     md.tickets.remove(&id);
                     c[7] += 1;

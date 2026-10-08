@@ -23,7 +23,13 @@ fn guardian_or_admin(p: &Protocol, a: &AccountView, now_s: i64) -> ProgramResult
 //     (docs/15, A4). The admin's brake is `freeze`.
 // ---------------------------------------------------------------------------
 // Accounts: 0 protocol, 1 vault [w], 2 ticket [w], 3 guardian [s], 4 rent receiver [w].
-pub fn cancel_ticket(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+// Data: ticket id u64 (the ticket the guardian decided on; docs/09, finding 67).
+pub fn cancel_ticket(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    args: &[u8],
+) -> ProgramResult {
+    let id = state::R::args(args).u64()?;
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
     live_guardian(&p, acc(accounts, 3)?, now()?)?;
@@ -31,6 +37,9 @@ pub fn cancel_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     let tk = load(program_id, acc(accounts, 2)?, Ticket::load)?;
     if tk.vault != key(acc(accounts, 1)?) || tk.protocol != key(protocol) {
         return Err(VaultError::WrongVault.into());
+    }
+    if tk.id != id {
+        return Err(VaultError::WrongTicket.into());
     }
     if key(acc(accounts, 4)?) != tk.payer {
         return Err(VaultError::RecipientOwnerMismatch.into());
@@ -44,26 +53,33 @@ pub fn cancel_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     save(&mut accounts[1], |d| v.store(d))?;
     close(accounts, 2, 4)?;
     let who = key(&accounts[3]);
-    sys::event(&[b"vault:ticket_cancelled", &tk.id.to_le_bytes(), &who]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:ticket_cancelled", &tk.id.to_le_bytes(), &who],
+    );
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // 11. extend_ticket: live guardian; ≤ 24h per call, ≤ 7 days in total.
 // ---------------------------------------------------------------------------
-// Accounts: 0 protocol, 1 ticket [w], 2 guardian [s]. Data: secs i64.
+// Accounts: 0 protocol, 1 ticket [w], 2 guardian [s]. Data: secs i64, ticket id u64.
 pub fn extend_ticket(
     program_id: &Address,
     accounts: &mut [AccountView],
     args: &[u8],
 ) -> ProgramResult {
-    let secs = state::R::args(args).i64()?;
+    let mut r = state::R::args(args);
+    let (secs, id) = (r.i64()?, r.u64()?);
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
     live_guardian(&p, acc(accounts, 2)?, now()?)?;
     let mut tk = load(program_id, acc(accounts, 1)?, Ticket::load)?;
     if tk.protocol != key(protocol) {
         return Err(VaultError::WrongVault.into());
+    }
+    if tk.id != id {
+        return Err(VaultError::WrongTicket.into());
     }
     if secs <= 0
         || secs > MAX_TICKET_EXTENSION_S
@@ -74,11 +90,14 @@ pub fn extend_ticket(
     tk.eta_s += secs;
     tk.extended_s += secs;
     save(&mut accounts[1], |d| tk.store(d))?;
-    sys::event(&[
-        b"vault:ticket_extended",
-        &tk.id.to_le_bytes(),
-        &tk.eta_s.to_le_bytes(),
-    ]);
+    sys::event(
+        &key(&accounts[0]),
+        &[
+            b"vault:ticket_extended",
+            &tk.id.to_le_bytes(),
+            &tk.eta_s.to_le_bytes(),
+        ],
+    );
     Ok(())
 }
 
@@ -101,14 +120,20 @@ pub fn freeze(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -
             p.frozen_until =
                 freeze_until(p.frozen_until, t, secs).map_err(|_| VaultError::FreezeTooLong)?;
             save(&mut accounts[0], |d| p.store(d))?;
-            sys::event(&[b"vault:frozen", &[0], &who, &p.frozen_until.to_le_bytes()]);
+            sys::event(
+                &key(&accounts[0]),
+                &[b"vault:frozen", &[0], &who, &p.frozen_until.to_le_bytes()],
+            );
         }
         1 => {
             let mut v = load_vault(program_id, protocol, acc(accounts, 2)?)?;
             v.frozen_until =
                 freeze_until(v.frozen_until, t, secs).map_err(|_| VaultError::FreezeTooLong)?;
             save(&mut accounts[2], |d| v.store(d))?;
-            sys::event(&[b"vault:frozen", &[1], &who, &v.frozen_until.to_le_bytes()]);
+            sys::event(
+                &key(&accounts[0]),
+                &[b"vault:frozen", &[1], &who, &v.frozen_until.to_le_bytes()],
+            );
         }
         _ => return Err(VaultError::InvalidInstruction.into()),
     }
@@ -143,7 +168,10 @@ pub fn unfreeze(program_id: &Address, accounts: &mut [AccountView], args: &[u8])
         }
         _ => return Err(VaultError::InvalidInstruction.into()),
     }
-    sys::event(&[b"vault:unfrozen", &[scope], &[signers & alive]]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:unfrozen", &[scope], &[signers & alive]],
+    );
     Ok(())
 }
 
@@ -158,7 +186,10 @@ pub fn heartbeat(program_id: &Address, accounts: &mut [AccountView]) -> ProgramR
     let i = live_guardian(&p, acc(accounts, 1)?, t)?;
     p.last_heartbeat[i] = t;
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:heartbeat", &[i as u8], &t.to_le_bytes()]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:heartbeat", &[i as u8], &t.to_le_bytes()],
+    );
     Ok(())
 }
 
@@ -193,7 +224,7 @@ pub fn eject(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) ->
     // ejected key must not bring it back.
     p.versions[0] = p.versions[0].wrapping_add(1);
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:ejected", &removed]);
+    sys::event(&key(&accounts[0]), &[b"vault:ejected", &removed]);
     Ok(())
 }
 
@@ -221,7 +252,7 @@ pub fn reset_backlog(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     .map_err(|_| VaultError::TicketsPending)?;
     v.set_limiter_state(state);
     save(&mut accounts[1], |d| v.store(d))?;
-    sys::event(&[b"vault:backlog_reset", &v.mint]);
+    sys::event(&key(&accounts[0]), &[b"vault:backlog_reset", &v.mint]);
     Ok(())
 }
 
@@ -248,6 +279,6 @@ pub fn abdicate(program_id: &Address, accounts: &mut [AccountView], args: &[u8])
     }
     p.abdications = Abdications(p.abdications).abdicate(kind).0;
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:abdicated", &[kind]]);
+    sys::event(&key(&accounts[0]), &[b"vault:abdicated", &[kind]]);
     Ok(())
 }

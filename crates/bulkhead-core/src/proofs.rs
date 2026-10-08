@@ -195,6 +195,28 @@ fn conservative_price_brackets() {
     }
 }
 
+/// SMALL-WIDTH (prices and confidence < 2^16, multiplier < 2^12). The
+/// widening is exactly `k = ceil(conf * mult / 10_000)` on both sides (`lo`
+/// saturates at 0), stated without a division: k is the least integer with
+/// `k * 10_000 >= conf * mult`. (At full width the u128 product did not finish
+/// within CI's hour, and at 2^20 it took 10 minutes; the property test checks
+/// it at full width.)
+#[kani::proof]
+#[kani::solver(kissat)]
+fn conservative_price_widening_is_exact() {
+    let (price, ema): (i64, i64) = (kani::any(), kani::any());
+    let conf: u64 = kani::any();
+    let mult: u32 = kani::any();
+    kani::assume(price > 0 && price < 1 << 16 && ema > 0 && ema < 1 << 16);
+    kani::assume(conf < 1 << 16 && mult < 1 << 12);
+    let b = conservative(price, conf, ema, mult).unwrap();
+    let k = b.hi - price.max(ema) as u128;
+    let p = conf as u128 * mult as u128;
+    assert!(k * crate::consts::BPS >= p);
+    assert!(k == 0 || (k - 1) * crate::consts::BPS < p);
+    assert!(b.lo == (price.min(ema) as u128).saturating_sub(k));
+}
+
 /// FULL (every 64-byte header). Exactly the BPF-machine ELFs with e_flags == 3
 /// pass the SIMD-0500 gate (e_flags 4 is sBPF V4, which agave does not enable).
 #[kani::proof]
@@ -361,7 +383,8 @@ fn governance_g5_building_blocks() {
 /// SMALL-WIDTH (reference and balance < 2^20; every time up to 2^40 s). The
 /// reference stays between the old reference and the balance, and equals the
 /// balance once 24h have passed. (Full width timed out at 20 min: the step is a
-/// symbolic u128 product divided by 86,400.)
+/// symbolic u128 product divided by 86,400. The exact step is the property
+/// test's: restating it here did not finish within 15 minutes.)
 #[kani::proof]
 #[kani::solver(kissat)]
 fn ema_is_bounded() {
@@ -379,7 +402,11 @@ fn ema_is_bounded() {
 /// SMALL-WIDTH. Every outcome of `request` obeys the rules: instant only when
 /// unfrozen and conforming to both buckets; tickets respect the minimum delay,
 /// the freeze, the horizon and their own conformance time; TAT never decreases;
-/// errors leave the state untouched.
+/// errors leave the state untouched. (That an admitted request is charged its
+/// full cost, G1's inductive step, is the property test
+/// `an_admitted_request_charges_its_full_cost_to_both_buckets` and the
+/// exhaustive G1 check: stated here, with `request`'s own u128 division, it
+/// did not finish within 20 minutes, even with fixed buckets.)
 #[kani::proof]
 #[kani::solver(kissat)]
 fn request_rules_hold_for_all_inputs() {

@@ -256,3 +256,92 @@ test("a refused preflight is not resent when a backup already landed the transac
   assert.equal(sig, landedSig);
   assert.deepEqual(sent.sort(), ["backup", "budget"], "no second, unbudgeted transaction");
 });
+
+test("a budgeted transaction a backup landed with an error (out of compute) falls back instead of failing", async () => {
+  const sent = [];
+  let failedSig = null;
+  const primary = {
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        const withBudget = Buffer.from(params[0], "base64").includes(Buffer.from(COMPUTE_BUDGET));
+        sent.push(withBudget ? "budget" : "bare");
+        if (withBudget) {
+          const err = new Error("sendTransaction: simulation failed");
+          err.rpcError = { code: PREFLIGHT_REFUSED, message: "Transaction simulation failed: exceeded CUs meter" };
+          throw err;
+        }
+        return "sig-bare";
+      }
+      if (method === "getSignatureStatuses") {
+        if (params[0][0] === failedSig) return { value: [{ confirmationStatus: "confirmed", err: { InstructionError: [1, "ComputationalBudgetExceeded"] } }] };
+        return { value: [{ confirmationStatus: "confirmed", err: null }] };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const backup = { call: async () => "x" };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  const err = await send(primary, payer, [ix], [], { computeUnits: 200_000, rpcs: [backup] }).then(() => null, (e) => e);
+  failedSig = err.signature;
+  sent.length = 0;
+  let told = 0;
+  const sig = await sendWithFallback(primary, payer, [ix], [], { computeUnits: 200_000, rpcs: [backup], landedWaitMs: 50 }, () => told++);
+  assert.equal(sig, "sig-bare");
+  assert.deepEqual(sent, ["budget", "bare"], "the unbudgeted fallback ran");
+  assert.equal(told, 1);
+});
+
+test("an unconfirmed transaction is sent again, the same bytes, until it lands", async () => {
+  const sent = [];
+  let polls = 0;
+  const endpoint = (name) => ({
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        sent.push([name, params[0]]);
+        return "sig";
+      }
+      if (method === "getSignatureStatuses") return { value: [++polls > 8 ? { confirmationStatus: "confirmed" } : null] };
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  assert.equal(await send(endpoint("primary"), payer, [ix], [], { rpcs: [endpoint("backup")], pollMs: 5, rebroadcastMs: 10 }), "sig");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(sent.filter(([n]) => n === "primary").length >= 2, "rebroadcast to the primary");
+  assert.ok(sent.filter(([n]) => n === "backup").length >= 2, "and to the backups");
+  assert.equal(new Set(sent.map(([, tx]) => tx)).size, 1, "the same signed bytes");
+});
+
+test("a transaction whose blockhash expired unconfirmed is reported at once", async () => {
+  const primary = {
+    latestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 100 }),
+    call: async (method) => {
+      if (method === "sendTransaction") return "sig";
+      if (method === "getSignatureStatuses") return { value: [null] };
+      if (method === "getBlockHeight") return 151;
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  await assert.rejects(send(primary, payer, [ix], [], { pollMs: 5, rebroadcastMs: 10 }), /expired unconfirmed/);
+});
+
+test("a key file the group or others can read is refused; an owner-only one loads", async () => {
+  const { mkdtempSync, chmodSync, statSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = `${mkdtempSync(`${tmpdir()}/bh-key-`)}/k.json`;
+  const kp = Keypair.generate();
+  kp.save(path);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.equal(Keypair.load(path).address, kp.address);
+  chmodSync(path, 0o644);
+  assert.throws(() => Keypair.load(path), /open to group or others.*chmod 600/);
+  // Saving again tightens an existing file, not only a new one.
+  kp.save(path);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+});

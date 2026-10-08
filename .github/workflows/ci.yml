@@ -60,6 +60,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The base branch's selector, not the pull request's: a change to
+          # the selector could otherwise skip the jobs that would catch it. A
+          # change to it selects every job (below).
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           sparse-checkout: scripts/ci-changes.sh
           sparse-checkout-cone-mode: false
       - name: Jobs this change can affect
@@ -72,7 +76,9 @@ jobs:
         run: |
           if [ "$EVENT" = pull_request ]; then
             # The files of the pull request, from the API (no history to fetch).
-            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > files.txt
+            # A rename's old path counts too: moving a file out of a job's
+            # paths must still run that job.
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' > files.txt
             echo "changed files: $(wc -l < files.txt)"
             scripts/ci-changes.sh < files.txt | tee -a "$GITHUB_OUTPUT"
             echo "heavy=$([ "$DRAFT" = true ] && echo false || echo true)" | tee -a "$GITHUB_OUTPUT"
@@ -251,7 +257,7 @@ jobs:
           retention-days: 30
 
   kani:
-    # Bounded model checking of the core's 14 harnesses (proofs.rs). Kani is
+    # Bounded model checking of the core's 15 harnesses (proofs.rs). Kani is
     # installed at a pinned version from crates.io, not through an action.
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.kani == 'true'
@@ -446,6 +452,9 @@ jobs:
       - name: Every job passed or was not needed
         env:
           RESULTS: ${{ toJSON(needs) }}
+          HEAVY: ${{ needs.changes.outputs.heavy }}
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
+          # A draft skips the heavy jobs; its green must not stand for them.
+          if [ "$HEAVY" != true ]; then echo "draft: the heavy jobs did not run; mark it ready for review"; exit 1; fi

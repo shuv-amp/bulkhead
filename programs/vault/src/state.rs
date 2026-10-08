@@ -29,6 +29,10 @@ impl<'a> R<'a> {
     pub fn args(d: &'a [u8]) -> R<'a> {
         R { d, o: 0 }
     }
+    /// Whether every byte has been read.
+    pub fn is_empty(&self) -> bool {
+        self.o >= self.d.len()
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8], ProgramError> {
         let s = self
             .d
@@ -363,6 +367,10 @@ pub struct Vault {
     pub exit_vetoed: bool,
     /// Bumped whenever `limits` change; see `Protocol::versions`.
     pub limits_version: u32,
+    /// Low-water balance over the last one to two windows (finding 65). In
+    /// the reserved tail: an account written before reads zeros, which the
+    /// first touch replaces (its window is long past).
+    pub low: bulkhead_core::ema::WindowLow,
 }
 
 impl Vault {
@@ -402,6 +410,11 @@ impl Vault {
             exit_expires_s: r.i64()?,
             exit_vetoed: r.bool()?,
             limits_version: r.u32()?,
+            low: bulkhead_core::ema::WindowLow {
+                prev: r.u64()?,
+                cur: r.u64()?,
+                window: r.i64()?,
+            },
         })
     }
 
@@ -436,6 +449,9 @@ impl Vault {
         w.i64(self.exit_expires_s);
         w.bool(self.exit_vetoed);
         w.u32(self.limits_version);
+        w.u64(self.low.prev);
+        w.u64(self.low.cur);
+        w.i64(self.low.window);
         Ok(())
     }
 
@@ -787,6 +803,11 @@ mod tests {
             tat_short_ms: -1,
             tat_long_ms: 2,
             ref_balance: 3,
+            low: bulkhead_core::ema::WindowLow {
+                prev: 4,
+                cur: 5,
+                window: 6,
+            },
             ref_updated_s: 4,
             ref_initialized: true,
             decimals: 6,

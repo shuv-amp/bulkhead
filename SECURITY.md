@@ -6,10 +6,10 @@
 
 | Component | State | Checked by |
 |---|---|---|
-| `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 13 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
+| `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 15 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, a JavaScript-vs-Python differential, the end-to-end run |
-| Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep and 6 Oct (below) | All three programs run this tree's canonical build (Linux x86_64; CI publishes it): `scripts/verify-devnet.sh` matches each byte for byte, and CI checks it weekly |
+| Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep, 6 Oct, 7 Oct and 8 Oct (below) | All three programs run the canonical build (Linux x86_64; CI publishes it) of the PR #34 commit of 8 Oct, matched byte for byte. The on-chain parts of findings 63–73 are not deployed yet, so `scripts/verify-devnet.sh` fails on this tree until devnet is upgraded |
 
 None of this is an audit. The mainnet path:
 1. two independent audits (a Solana specialist, and a formal-methods review of the core);
@@ -30,7 +30,7 @@ Devnet only; test tokens only. The upgrade authority of all three programs is a 
 | Vault | `HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b` | `067434af00cc949e17e3d8a6dae397fae9be6a7594dd7d47ee5d614e94877382` (upgraded in place 8 Oct: `replace_recovery`, which obeys the seal review and abdication, and no key both guardian and recovery key, `09` finding 62; 7 Oct to 8 Oct `3173b14ab6856e76c499f2104c781a6d058a00e1ee803be8da0260f3e5ed659b`, the first version of that change; until then `aba7e697fa1fb6bb171c657bd913e6c8062bd1889df477851864e7b15e3d67c3`, after it was upgraded in place 7 Oct: delisted collateral stays locked while its loan is open, `09` finding 56, critical, and finding 57; 6 Oct to 7 Oct `c73b058de016ff05adf8b7a36d97beac47d3f970f429af1be0dff34bc3b2cdae`, after it was upgraded in place 6 Oct three times: to `e1961181e062cc6641da9940354cab7cea8f22809d89fe76b97708d26ff2592c`; to `b8a2fbf89cac8012e141e9262fc4fe539e501c260aac000630b37411658921c5`, whose token-account and mint readers are split into pure functions so the fuzzers test the code the program runs; then to this, the same source built on Linux x86_64, the canonical build host (`09`, finding 43); 29 Sep to 6 Oct `79b0a47ff3086fe2389e5ac089560f530a7d4089fcd5d12814a30132a62d9c93`; until 29 Sep `466cc17beb71ebb1f342cec5bc6ac10c333b58e7d537d675fd57bc3a6eca22eb`) |
 | Harbor (demo) | `6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh` | `543be60b25b557ea0a58f0c4d2133f67954172006d2a21490217cb4010adeb40` (upgraded in place 6 Oct; until then `d91a8ac28a3d2bffe07de80f20028a09a1f15c8e7639e5551250c9b54cb712f2`) |
 
-`scripts/verify-deployed.sh` matched all three byte for byte on 8 Oct, against CI's binaries. Release binaries are Linux x86_64 builds: CI's (each pull request's `programs` artifact, with `SHA256SUMS`), or `scripts/build-programs-docker.sh` on any machine with Docker. A build on macOS has the same instructions in another order, so its Vault hash differs.
+`scripts/verify-deployed.sh` matched all three byte for byte on 8 Oct, against CI's binaries of the PR #34 commit. Later commits (findings 63–73) change Floor and the Vault, and are not deployed. Release binaries are Linux x86_64 builds: CI's (each pull request's `programs` artifact, with `SHA256SUMS`), or `scripts/build-programs-docker.sh` on any machine with Docker. A build on macOS has the same instructions in another order, so its Vault hash differs.
 
 The demo market's admin and guardian keys are also team-held. On devnet that is the point: S1 plays the attacker with the admin key.
 
@@ -49,8 +49,8 @@ We reported it privately, and it has been acknowledged. We will publish the deta
 
 ## Known limitations (by design; `docs/04-THREAT-MODEL.md`)
 
-- A compromised admin can tighten limits instantly, including closing the unbacked lane. That is denial of service. Owners taking back their own deposits are unaffected.
-- **Open (`docs/15-ADVERSARIAL-REVIEW.md` A4):** a compromised Vault admin or Floor owner key can block its own replacement, because only that key can propose a rotation and it can cancel any the team proposes. The denial of service above then lasts until A4 is fixed, not until the key is rotated. It is still never theft.
+- A compromised admin can tighten limits instantly, including closing the unbacked lane. That is denial of service. Owners taking back their own deposits are unaffected, unless the admin parks the vault in the lifeboat: a guardian quorum returns it, and a freeze stops the admin parking it again (`docs/04-THREAT-MODEL.md` T1).
+- **A compromised Vault admin or Floor owner key** (`docs/15-ADVERSARIAL-REVIEW.md` A4): the optional recovery key proposes its replacement, which the compromised key cannot cancel; after the seal it executes after the loosen delay unless a guardian vetoes it. A compromised recovery key is replaced at once by the admin (or owner) with a live guardian quorum (`replace_recovery`). Residual: the denial of service above lasts until that replacement executes (at least 72h), and a protocol registered without a recovery key has no such path. It is still never theft.
 - The guardian bot bounds a greedy attacker within seconds, not a patient one: an attacker who keeps every window under its thresholds is bounded only by the on-chain limits (A2).
 - In a fast crash, the default limits can queue honest liquidations for 6 hours (`docs/08-SCENARIOS.md` S11). Lending markets must size their limits for a cascade, which also raises what a thief can take.
 - A malicious guardian can freeze, cancel, extend, veto or stop the program. That is denial of service, never theft. It lasts until a live quorum of the other guardians ejects that guardian, which takes effect instantly.

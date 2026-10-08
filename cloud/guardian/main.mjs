@@ -15,7 +15,11 @@
 // (a lifeboat move, a key no longer live, ...) are also posted to that webhook
 // (alert.mjs). Keep the URL secret: it is never logged.
 //
-// With `floorProtected`, the bot also checks each program's Floor config every
+// `stallAlertS` (default 120): a loop step failing that long without a break
+// raises an urgent alert (a guardian that cannot read is blind).
+//
+// With `floorProtected`, the bot also follows each program's Floor config
+// transactions (its proposals, executions and recovery-key changes), and checks it every
 // minute and logs a warning whenever what is missing changes: no abort buffer
 // staged (nobody can stop it) or no snapshot pinned (docs/15, A5).
 //
@@ -28,8 +32,10 @@
 // is already over a threshold and the protocol is not frozen, freezes once.
 // A failed freeze is retried; it does not stick in `state.freezing`.
 //
-// What it believes: an event counts only if the Vault (or Floor) program wrote
-// it (any program can write a "Program data:" line); freeze state is read from
+// What it believes: an event counts only if the Vault program wrote it (any
+// program can write a "Program data:" line) and it names this protocol (one
+// Vault serves every protocol: finding 64); a Floor event only if Floor wrote
+// it, read from that watched config's own transactions; freeze state is read from
 // chain every cycle; active tickets are scanned at startup, on a freeze, and
 // periodically; truncated logs use the vault's own transfers and balances.
 //
@@ -42,24 +48,62 @@
 // ("mint:amount"), and every Floor proposal not approved (code by buffer in
 // `approvedUpgradeBuffers`, anything else as "program:kind:target:payloadHex"
 // in `approvedFloorProposals`), live and, after a restart, from the accounts.
+// A Vault approval pinned to its proposal's base version
+// ("kind:target:payloadHex#<version>") can never match a replay; an unpinned
+// one is spent once a matching change executes (kept in the state file). Any
+// approval may end in "@<unix seconds>" to expire.
 //
 // Heartbeats keep this key live on the Vault and on every watched Floor it
 // guards, each inside its chain interval. A failed one is retried on a
 // backoff; a key that is already stale or absent is reported, not resent.
 
-import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { basename } from "node:path";
-import { Rpc, FailoverRpc, b58encode, decodeTicket, key, parseLogs, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { readFileSync, statSync } from "node:fs";
+import { basename, dirname } from "node:path";
+import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, decode, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, checkPolicy, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
-import { ingestSignatures, signatureWalk, signatureWalkSinceSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
+import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S } from "./policy.mjs";
+import { ingestSignatures, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
-import { alerter } from "./alert.mjs";
+import { alerter, stallWatch, scanAll } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
+import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
-const policy = checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) });
+// Alerts (alert.mjs) and the fatal path come first, before anything that can
+// refuse to start: a key file open to others (Keypair.load), a malformed
+// policy. Those used to throw before either existed, so a guardian crash-
+// looping on a refused key never reached the webhook (docs/09, finding 71).
+// Alerts are never on the guardian's critical path.
+let protocolLabel = "";
+const sendAlert = alerter({ ...(cfg.alert ?? {}), protocol: () => protocolLabel }, {
+  onError: (e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
+});
+const log = (o) => {
+  const line = { t: new Date().toISOString(), ...o };
+  console.log(JSON.stringify(line, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+  sendAlert(line);
+};
+// A guardian that stops must say so and exit, so its supervisor starts a fresh
+// one (cloud/guardian/bulkhead-guardian@.service). Retrying the startup in place
+// would replay the 24h window into a half-built state and count outflows twice.
+async function fatal(e) {
+  log({ level: "error", msg: `guardian stopped: ${e?.message ?? e}; its supervisor must restart it` });
+  await sendAlert.flush();
+  process.exit(1);
+}
+process.on("unhandledRejection", fatal);
+process.on("uncaughtException", fatal);
+/** A startup step: its failure goes through `fatal`, like the loop's. */
+async function must(run) {
+  try {
+    return await run();
+  } catch (e) {
+    return fatal(e);
+  }
+}
+
+const policy = await must(() => checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) }));
 // With backup endpoints, reads and sends move to the next endpoint when one
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
 // only in the log: RPC URLs often carry an API key.
@@ -71,21 +115,23 @@ const rpc = cfg.rpcs?.length
   : new Rpc(cfg.rpc);
 // Extra endpoints every guardian transaction is also sent to (optional).
 const extraRpcs = (cfg.rpcs ?? []).map((url) => new Rpc(url));
-const guardian = Keypair.load(cfg.guardianKey);
-const vc = await new VaultClient(cfg.vaultProgram, cfg.protocolProgram).init();
+const guardian = await must(() => Keypair.load(cfg.guardianKey));
+const vc = await must(() => new VaultClient(cfg.vaultProgram, cfg.protocolProgram).init());
+protocolLabel = b58encode(vc.protocol);
 // The watched vaults, by vault address and by token account address.
-const watched = await Promise.all(cfg.mints.map(async (mint) => ({ mint, ...(await vc.vault(mint)) })));
+const watched = await must(() => Promise.all(cfg.mints.map(async (mint) => ({ mint, ...(await vc.vault(mint)) }))));
 const vaultMints = new Map(watched.map((v) => [b58encode(v.vault), v.mint]));
 const tokenMints = new Map(watched.map((v) => [b58encode(v.vaultTokens), v.mint]));
 // Each mint's vault PDA. A transfer into a token account it owns is a lifeboat move.
 const vaultOf = new Map(watched.map((v) => [v.mint, b58encode(v.vault)]));
-// Only these programs' events count: any program can write "Program data:".
-const trusted = [cfg.vaultProgram, cfg.floorProgram].filter(Boolean);
+// Only the Vault program's events count (any program can write "Program
+// data:"), and only those naming this protocol (watchedEvents, finding 64).
+const protocolKey = b58encode(vc.protocol);
 const state = newState();
-// The incident hold must survive a restart (a deploy, a crash): its start,
-// and the protocol's freeze end as last seen, are kept beside the config, per
-// protocol. Without the freeze end, a guardian restarted after a quorum's
-// unfreeze could not tell it from a freeze that ran out, and would freeze again.
+// What must survive a restart (statefile.mjs) is kept beside the config, per
+// protocol: the incident hold and the freeze end last seen, spent approvals,
+// the executions already seen, each watched Floor config's cursor and
+// pending proposal, and the live proposals waiting to be read by id.
 // Under systemd (cloud/guardian/bulkhead-guardian@.service) the config's
 // directory is read-only: the default is then the unit's state directory.
 const stateFile = cfg.stateFile
@@ -96,23 +142,50 @@ let saveError = null;
 // The protocol's freeze end at the last sync: an end that moves earlier is a
 // guardian quorum's unfreeze (observeFreezeEnd).
 let lastChainFrozenUntil = 0;
-let saved = { incidentSince: null, frozenUntil: 0 };
-try {
-  const s = JSON.parse(readFileSync(stateFile, "utf8"));
-  if (s.protocol === b58encode(vc.protocol)) {
-    if (Number.isFinite(s.incidentSince)) state.incidentSince = s.incidentSince;
-    if (Number.isFinite(s.frozenUntil)) lastChainFrozenUntil = s.frozenUntil;
-    saved = { incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil };
-  }
-} catch {
-  // no saved state: no incident open
-}
-function saveIncident() {
-  if (state.incidentSince === saved.incidentSince && lastChainFrozenUntil === saved.frozenUntil) return;
+// Proposals waiting for their account to be read (checkProposedChange):
+// change id -> when first seen. Kept in the state file: a restart's replay
+// covers only the last day.
+let changeChecks = new Map();
+// Per watched Floor program: the proposal last seen pending and the approval
+// it matched, so its `floor:executed` event can spend that approval. Kept in
+// the state file, with each config's cursor (`floorCursors`, followFloor):
+// an execution while this guardian was down is read on restart and spends.
+let floorPendingSeen = new Map();
+let floorCursors = new Map();
+const persisted = () => stateJson({ protocol: protocolKey, incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil, state, floorCursors, floorPendingSeen, changeChecks });
+let saved = persisted();
+{
+  let text = null;
   try {
-    const now = { incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil };
-    writeFileSync(`${stateFile}.tmp`, JSON.stringify({ protocol: b58encode(vc.protocol), ...now }), { mode: 0o600 });
-    renameSync(`${stateFile}.tmp`, stateFile);
+    text = readFileSync(stateFile, "utf8");
+  } catch {
+    // no saved state: no incident open, and no baseline of executed changes
+  }
+  if (text !== null) {
+    const r = restoreState(text, protocolKey, state);
+    if (r.incidentSince !== null) state.incidentSince = r.incidentSince;
+    if (r.frozenUntil !== null) lastChainFrozenUntil = r.frozenUntil;
+    ({ floorCursors, floorPendingSeen, changeChecks } = r);
+    saved = persisted();
+  }
+}
+let dirChecked = false;
+function saveIncident() {
+  const now = persisted();
+  if (now === saved) return;
+  try {
+    // A directory others can write lets them swap the file in. That is said,
+    // never changed: the directory is not the guardian's (statefile.mjs).
+    if (!dirChecked) {
+      dirChecked = true;
+      const dir = dirname(stateFile);
+      try {
+        if (statSync(dir).mode & 0o022) log({ level: "warn", msg: `the state directory ${dir} is writable by others, who could replace the state file; give the guardian a directory of its own (stateFile)` });
+      } catch {
+        // the write below says what is wrong
+      }
+    }
+    writeStateFile(stateFile, now);
     saved = now;
     saveError = null;
   } catch (e) {
@@ -123,19 +196,10 @@ function saveIncident() {
     }
   }
 }
-// Alerts to a webhook (alert.mjs); never on the guardian's critical path.
-const sendAlert = alerter({ ...(cfg.alert ?? {}), protocol: b58encode(vc.protocol) }, {
-  onError: (e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
-});
-const log = (o) => {
-  const line = { t: new Date().toISOString(), ...o };
-  console.log(JSON.stringify(line, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
-  sendAlert(line);
-};
 
 // Programs under Floor whose readiness the bot reports (A5).
 const floorWatch = cfg.floorProgram
-  ? await Promise.all((cfg.floorProtected ?? []).map((p) => new FloorClient(cfg.floorProgram, p).init()))
+  ? await must(() => Promise.all((cfg.floorProtected ?? []).map((p) => new FloorClient(cfg.floorProgram, p).init())))
   : [];
 const floorReported = new Map();
 
@@ -145,8 +209,9 @@ const warned = new Set();
 let pendingFreeze = null;
 let pendingVetoes = [];
 let vetoNotBefore = 0;
-const cancelRetryAt = new Map();
-const CANCEL_RETRY_MS = 15_000;
+// Per ticket: failures, when to try again, and a refusal no retry gets past
+// (afterCancelFailure).
+const cancelRetry = new Map();
 const VETO_RETRY_MS = 15_000;
 let nextTicketScanAt = 0;
 let nextChangeScanAt = 0;
@@ -274,7 +339,8 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         break;
       case "cancel": {
         // The caller returns a failed cancel to the sweep; this one waits.
-        if ((cancelRetryAt.get(action.ticketId) ?? 0) > Date.now()) return false;
+        const retry = cancelRetry.get(action.ticketId);
+        if (retry && retry.at > Date.now()) return false;
         const vault = action.vault ?? (await vc.vault(action.mint ?? event.mint)).vault;
         // The address comes from the release event or the account scan; a
         // ticket only known by id waits for the next scan to name it.
@@ -285,12 +351,18 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
           // A lagging read is not proof the ticket settled. Retry; leaving it
           // marked cancelled would let it pay out when the freeze ends.
           log({ action: "cancel", skipped: "ticket account missing; will retry", ticketId: action.ticketId });
-          cancelRetryAt.set(action.ticketId, Date.now() + CANCEL_RETRY_MS);
+          cancelRetry.set(action.ticketId, { failures: retry?.failures ?? 0, at: Date.now() + CANCEL_RETRY_MS, final: null });
           return false;
         }
-        cancelRetryAt.delete(action.ticketId);
-        const payer = decodeTicket(acc.bytes).payer;
-        ixs = [vc.cancelTicket(vault, ticket, guardian.publicKey, payer)];
+        const held = decodeTicket(acc.bytes);
+        if (held.id !== BigInt(action.ticketId)) {
+          // Addresses are reused once a ticket closes: this is another ticket
+          // (the scan tracks it by its own id), and the one decided on is gone.
+          log({ action: "cancel", skipped: `the address now holds ticket ${held.id}; ticket ${action.ticketId} is gone`, ticketId: action.ticketId });
+          cancelRetry.set(action.ticketId, { failures: 0, at: Infinity, final: "WrongTicket" });
+          return false;
+        }
+        ixs = [vc.cancelTicket(vault, ticket, guardian.publicKey, held.payer, action.ticketId)];
         break;
       }
       case "veto_change":
@@ -364,28 +436,59 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
     });
     return true;
   } catch (e) {
-    log({ level: "error", action: action.type, error: e.message });
+    log({ level: "error", action: action.type, error: e.message, ticketId: action.ticketId });
+    if (action.type === "cancel") {
+      const next = afterCancelFailure(cancelRetry.get(action.ticketId), e, Date.now());
+      cancelRetry.set(action.ticketId, next);
+      if (next.final) log({ level: "error", msg: `the Vault refused to cancel ticket ${action.ticketId} with ${next.final}, which no retry changes: not sending it again`, ticketId: action.ticketId });
+    }
     return false;
+  }
+}
+
+/**
+ * A cancel's outcome in the books. A failed one goes back to the sweep (on its
+ * backoff); one refused for good stays marked cancelled so it is never sent
+ * again, and a ticket that is gone (WrongTicket) is forgotten.
+ */
+function afterCancel(action, ok) {
+  const id = action.ticketId;
+  const final = cancelRetry.get(id)?.final;
+  if (ok || final === "WrongTicket") {
+    state.pendingTickets.delete(id);
+    if (!ok) state.cancelled.delete(id);
+    cancelRetry.delete(id);
+  } else if (!final) {
+    state.cancelled.delete(id);
   }
 }
 
 /** After a freeze lands: cancel every queued ticket still outstanding. */
 async function sweepCancels(event, eventTime, { refresh = true } = {}) {
-  for (const id of cancelRetryAt.keys()) if (!state.pendingTickets.has(id)) cancelRetryAt.delete(id);
+  for (const id of cancelRetry.keys()) if (!state.pendingTickets.has(id)) cancelRetry.delete(id);
   if (refresh) {
     await tryRefreshPendingTickets();
   }
   for (const action of pendingCancels(state, policy)) {
-    const ok = await execute(action, event, eventTime);
-    if (ok) state.pendingTickets.delete(action.ticketId);
-    else state.cancelled.delete(action.ticketId);
+    afterCancel(action, await execute(action, event, eventTime));
   }
+}
+
+/** A proposal to read by id (checkProposedChange), once; kept in the state file. */
+function queueCheck(changeId) {
+  if (changeChecks.has(changeId)) return;
+  changeChecks.set(changeId, { sinceS: wallNow(), warned: false });
+  saveIncident();
 }
 
 async function applyActions(actions, event, eventTime) {
   let freezeOk = true;
   let froze = false;
   for (const action of actions) {
+    if (action.type === "check_change") {
+      queueCheck(action.changeId);
+      continue;
+    }
     // Cancels in this batch are "while frozen". If the freeze transaction
     // failed and the protocol is not already frozen, don't cancel yet.
     if (action.type === "cancel" && !freezeOk) {
@@ -393,10 +496,7 @@ async function applyActions(actions, event, eventTime) {
       continue;
     }
     const ok = await execute(action, event, eventTime);
-    if (action.type === "cancel") {
-      if (ok) state.pendingTickets.delete(action.ticketId);
-      else state.cancelled.delete(action.ticketId);
-    }
+    if (action.type === "cancel") afterCancel(action, ok);
     if (action.type === "veto_change" || action.type === "floor_veto" || action.type === "veto_exit") {
       if (!ok) pendingVetoes = queueFailedVeto(pendingVetoes, action);
       continue;
@@ -412,6 +512,52 @@ async function applyActions(actions, event, eventTime) {
     }
   }
   if (froze) await sweepCancels(event, eventTime);
+  if (changeChecks.size) await runChangeChecks();
+}
+
+/**
+ * Read each live proposal that may be approved by its own address and veto it
+ * unless its payload is approved too. This used to be left to the
+ * program-account scan alone: while getProgramAccounts failed (a node that
+ * refuses or times it out), such a change was never vetoed.
+ */
+let checking = false;
+async function runChangeChecks() {
+  if (checking) return;
+  checking = true;
+  try {
+    await checkChanges();
+  } finally {
+    checking = false;
+  }
+}
+
+async function checkChanges() {
+  const now = wallNow();
+  const vetoes = [];
+  for (const [id, check] of changeChecks) {
+    let change;
+    try {
+      const acc = await rpc.account(await vc.changeAddress(id));
+      change = acc ? readPendingChange(acc.bytes) ?? undefined : undefined;
+    } catch {
+      change = undefined;
+    }
+    const what = checkProposedChange(id, change, policy, now, check.sinceS, state.vetoed, state.consumed);
+    if (what === "wait") {
+      if (!check.warned) {
+        check.warned = true;
+        log({ level: "error", msg: `change ${id} may be approved, but its account could not be read to compare the payload; retrying, and vetoing it if still unreadable after ${policy.approvalCheckGiveUpS}s`, changeId: id });
+      }
+      continue;
+    }
+    changeChecks.delete(id);
+    saveIncident();
+    if (what === "ok") continue;
+    state.vetoed.add(`c${what.changeId}`);
+    vetoes.push(what);
+  }
+  if (vetoes.length) await applyActions(vetoes, { reason: "approval check" }, now);
 }
 
 /** Newest-first. `oldestWanted` null walks until `until` (live); a number walks the startup window. */
@@ -437,15 +583,82 @@ async function consider(e, signature, now, act) {
   // Only a release needs the worst case; other events carry no mint.
   const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
   const actions = assess(state, e, ctx, policy, act);
-  if (!act) return;
+  if (!act) {
+    // Replay sends nothing, but a replayed proposal is read by id once
+    // acting starts (docs/09, finding 71).
+    for (const a of actions) if (a.type === "check_change") queueCheck(a.changeId);
+    return;
+  }
   log({ event: e.kind, signature, ...e });
   if (e.kind === "lifeboat_in") {
     log({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short until a guardian quorum or the admin returns them", mint: e.mint, amount: e.amount });
   }
   if (e.kind === "recovery_replaced") {
-    log({ level: "warn", msg: `the recovery key was replaced${e.program ? ` on Floor for ${e.program}` : ""} by the ${e.program ? "owner" : "admin"} with a guardian quorum`, recovery: e.recovery });
+    const where = e.program ? ` on Floor for ${e.program}` : "";
+    const by = `by the ${e.program ? "owner" : "admin"} with a guardian quorum`;
+    // All zero is no recovery key at all, not the key 1111….
+    log(e.recovery
+      ? { level: "warn", msg: `the recovery key was replaced${where} ${by}`, recovery: e.recovery }
+      : { level: "warn", msg: `the recovery key was removed${where} ${by}: there is no recovery key now` });
   }
   await applyActions(actions, e, now);
+}
+
+const spentLine = (what, approval) => ({ msg: `approval spent: ${what} executed; a new proposal of the same content will be vetoed`, approval });
+
+/** Spend the approval an execution ran on, once per execution
+ * (`spendExecution`), and keep it. `live`: seen as it happened. */
+function spend(list, content, by, what, live) {
+  const a = spendExecution(state, list, content, by, wallNow(), { live });
+  if (a) log(spentLine(what, a));
+  saveIncident();
+}
+
+/** A program-account scan of change accounts: an execution not seen before
+ * spends its approval, whoever executed it; the first scan without a saved
+ * baseline only records them (observeExecutions). */
+function noteChangeScan(changes) {
+  for (const { approval, change } of observeExecutions(state, changes, policy.approvedChanges, wallNow())) log(spentLine(`change ${change.id}`, approval));
+  saveIncident();
+}
+
+/** Remember a watched Floor's pending proposal and the approval it would spend. */
+function notePendingFloor(fl) {
+  const kind = fl?.pendingKind;
+  if (!kind || kind === 1 || kind === 2 || kind === 3 || fl.pendingVetoed) return;
+  floorPendingSeen.set(fl.program, { id: BigInt(fl.pendingId), approval: floorApproval({ program: fl.program, kind, target: fl.pendingTarget, payload: fl.pendingPayload }) });
+}
+
+/** Events that spend an approval: the execution itself. `live`: read as it
+ * happened, not replayed. */
+async function noteExecution(e, live) {
+  if (e.kind === "change_executed") {
+    try {
+      const acc = await rpc.account(await vc.changeAddress(e.id));
+      const change = acc ? readPendingChange(acc.bytes) : null;
+      if (change?.executed) spend(policy.approvedChanges, changeApproval(change), `c${BigInt(change.id)}`, `change ${change.id}`, live);
+    } catch (err) {
+      // The next account scan sees the executed change and spends it then.
+      log({ level: "warn", msg: `could not read executed change ${e.id}: ${err.message}` });
+    }
+  } else if (e.kind === "floor_executed") {
+    const by = `e${e.program}:${e.id}`;
+    const seen = floorPendingSeen.get(e.program);
+    if (seen && seen.id === e.id) {
+      spend(policy.approvedFloorProposals, seen.approval, by, `floor ${e.program} proposal ${e.id}`, live);
+      return;
+    }
+    // Proposed and executed with no read of its account in between (this
+    // guardian was down for the whole delay): which approval it ran on is not
+    // known here, and an unpinned one of that kind may still approve a replay.
+    const prefix = `${e.program}:${e.proposalKind}:`;
+    const unspent = (policy.approvedFloorProposals ?? []).filter((a) => parseApproval(a).content.startsWith(prefix) && !state.consumed.has(a));
+    if (unspent.length && !state.executedSeen.has(by)) {
+      state.executedSeen.add(by);
+      saveIncident();
+      log({ level: "error", msg: `floor ${e.program} proposal ${e.id} executed unseen: an approval it ran on may still be unspent; remove it from approvedFloorProposals`, program: e.program, proposalId: e.id, approvals: unspent });
+    }
+  }
 }
 
 /** Queued tickets already counted, with their addresses, for matching a truncated settlement. */
@@ -460,17 +673,29 @@ async function knownTickets() {
   return known;
 }
 
-async function ingest(sigs, act, checkpoint = () => {}) {
+let unnamedLogged = false;
+
+/**
+ * Transactions on the Vault protocol account: its events and, for a truncated
+ * log, its balances. `floor` instead reads one watched Floor config's
+ * transactions for that program's events alone (followFloor).
+ */
+async function ingest(sigs, act, checkpoint = () => {}, floor = null) {
   await ingestSignatures(sigs, async (s) => {
     if (s.err) return;
     const tx = await requireTransaction(rpc, s.signature);
     const now = s.blockTime ?? tx?.blockTime ?? wallNow();
-    const { events, truncated } = parseLogs(tx?.meta?.logMessages);
-    const decoded = [];
-    for (const raw of events) {
-      if (!trusted.includes(raw.program)) continue; // written by another program: not an event
-      const e = decode(raw);
-      if (e.kind !== "other") decoded.push(e);
+    const { events: decoded, truncated, unnamed } = watchedEvents(tx?.meta?.logMessages, floor
+      ? { floorProgram: cfg.floorProgram, floorPrograms: [floor] }
+      : { vaultProgram: cfg.vaultProgram, protocol: protocolKey });
+    if (unnamed && !unnamedLogged) {
+      unnamedLogged = true;
+      log({ level: "error", msg: "Vault events that name no protocol were dropped: this Vault build predates finding 64, so this guardian cannot tell this protocol's events from another's. Upgrade the Vault program.", signature: s.signature });
+    }
+    for (const e of decoded) await noteExecution(e, act);
+    if (floor) {
+      for (const e of decoded) await consider(e, s.signature, now, act);
+      return;
     }
     // Tickets as they were before this transaction: a surviving `settled`
     // event would otherwise drop the ticket its payout is matched against.
@@ -523,15 +748,18 @@ async function refreshPendingTickets({ recoverOutflows = false, act = false } = 
   return tickets.length;
 }
 
-/** A stale or unavailable ticket scan must not block known-ticket cancellation. */
+/** A stale or unavailable ticket scan must not block known-ticket
+ * cancellation. Its outcome is reported as a step of its own ("ticket scan"),
+ * so a node that keeps refusing it raises the stall alert (docs/09, finding 71). */
 async function tryRefreshPendingTickets(options = {}) {
   try {
     const count = await refreshPendingTickets(options);
     nextTicketScanAt = Date.now() + 60_000;
+    stepOutcome("ticket scan", null);
     return count;
   } catch (e) {
-    log({ level: "warn", msg: `active ticket scan failed; retrying: ${e.message}` });
     nextTicketScanAt = Date.now() + 5_000;
+    stepOutcome("ticket scan", new Error(`active ticket scan failed; retrying: ${e.message}`));
     return null;
   }
 }
@@ -604,45 +832,51 @@ async function checkFloor() {
  */
 async function vetoStillPending(now) {
   const actions = [];
+  const scans = [];
   if (policy.vetoLoosenings) {
-    try {
-      for (const change of await activeChanges(rpc, cfg.vaultProgram, vc.protocol)) {
-        const action = pendingChangeVeto(change, policy, now, state.vetoed);
+    scans.push(["change scan", async () => {
+      const changes = await activeChanges(rpc, cfg.vaultProgram, vc.protocol);
+      // Executed changes first: a thief's copy of an approved change that
+      // already ran is vetoed in the same scan.
+      noteChangeScan(changes);
+      for (const change of changes) {
+        const action = pendingChangeVeto(change, policy, now, state.vetoed, state.consumed);
         if (!action) continue;
         state.vetoed.add(`c${action.changeId}`);
         actions.push(action);
       }
-    } catch (e) {
-      log({ level: "warn", msg: `change scan failed; retrying: ${e.message}` });
-    }
+    }]);
   }
   for (const v of watched) {
-    try {
+    scans.push([`lifeboat exit scan (${v.mint})`, async () => {
       const acc = await rpc.account(v.vault);
-      if (!acc) continue;
+      if (!acc) return;
       const action = pendingExitVeto({ ...decodeVault(acc.bytes), mint: v.mint }, policy, now, state.vetoed);
-      if (!action) continue;
+      if (!action) return;
       state.vetoed.add(`x${action.mint}:${action.executableS}`);
       actions.push(action);
-    } catch (e) {
-      log({ level: "warn", msg: `lifeboat exit scan failed; retrying: ${e.message}` });
-    }
+    }]);
   }
   for (const fc of floorWatch) {
-    try {
+    scans.push([`floor proposal scan (${b58encode(fc.protected)})`, async () => {
       const acc = await rpc.account(fc.config);
-      if (!acc) continue;
+      if (!acc) return;
       const fl = decodeFloor(acc.bytes);
-      const action = pendingUpgradeVeto(fl, policy, state.vetoed);
-      if (!action) continue;
+      notePendingFloor(fl);
+      const action = pendingUpgradeVeto(fl, policy, state.vetoed, { now, consumed: state.consumed });
+      if (!action) return;
       state.vetoed.add(`f${action.program}:${action.proposalId}`);
       actions.push(action);
-    } catch (e) {
-      log({ level: "warn", msg: `floor proposal scan failed; retrying: ${e.message}` });
-    }
+    }]);
   }
-  if (actions.length) await applyActions(actions, { reason: "still pending" }, now);
   nextChangeScanAt = Date.now() + 60_000;
+  // A failed scan fails the step (logged there, and counted by stallWatch),
+  // after the vetoes the other scans found are sent.
+  try {
+    await scanAll(scans);
+  } finally {
+    if (actions.length) await applyActions(actions, { reason: "still pending" }, now);
+  }
 }
 
 // Keeper: executions already sent ("c<id>" for a change, "e<program>:<id>" for Floor).
@@ -666,39 +900,50 @@ async function executeChangeIx(action) {
 async function keepApproved(now) {
   // `ix` may be a function: building the instruction can read the chain, and
   // one failed read must not skip the other approved changes.
-  const attempt = async (doneKey, what, ix) => {
+  const attempt = async (doneKey, what, ix, spent = () => {}) => {
     try {
       const signature = await guardianSend([typeof ix === "function" ? await ix() : ix]);
       executedByKeeper.add(doneKey);
       log({ action: "execute", what, signature });
+      // Spent before the next one is looked at: a duplicate of the same
+      // content in the same scan is not executed too.
+      spent();
     } catch (e) {
       const reason = e.message.slice(0, 160);
       if (keeperErrors.get(doneKey) !== reason) log({ level: "warn", msg: `keeper could not execute ${what}: ${reason}` });
       keeperErrors.set(doneKey, reason);
     }
   };
-  try {
-    for (const change of await activeChanges(rpc, cfg.vaultProgram, vc.protocol)) {
-      const action = dueApprovedChange(change, policy, now, executedByKeeper);
-      if (action) await attempt(`c${action.changeId}`, `change ${action.changeId}`, () => executeChangeIx(action));
+  const scans = [["keeper change scan", async () => {
+    const changes = await activeChanges(rpc, cfg.vaultProgram, vc.protocol);
+    // Also takes the baseline of executed changes, before this executes any.
+    noteChangeScan(changes);
+    for (const change of changes) {
+      const action = dueApprovedChange(change, policy, now, executedByKeeper, state.consumed);
+      if (action) {
+        await attempt(`c${action.changeId}`, `change ${action.changeId}`, () => executeChangeIx(action),
+          () => spend(policy.approvedChanges, action.approval, `c${action.changeId}`, `change ${action.changeId}`, true));
+      }
     }
-  } catch (e) {
-    log({ level: "warn", msg: `keeper change scan failed; retrying: ${e.message}` });
-  }
+  }]];
   for (const fc of floorWatch) {
-    try {
+    scans.push([`keeper floor scan (${b58encode(fc.protected)})`, async () => {
       const acc = await rpc.account(fc.config);
-      if (!acc) continue;
+      if (!acc) return;
       const fl = decodeFloor(acc.bytes);
-      const action = dueApprovedFloor(fl, policy, now, executedByKeeper);
-      if (!action) continue;
+      notePendingFloor(fl);
+      const action = dueApprovedFloor(fl, policy, now, executedByKeeper, state.consumed);
+      if (!action) return;
       // The buffer's rent returns to the owner (Floor requires it as spill).
       const ix = action.kind === 1 || action.kind === 2 ? fc.executeUpgrade(key(action.target), key(fl.owner)) : fc.executeConfig();
-      await attempt(`e${action.program}:${action.proposalId}`, `floor ${action.program} proposal ${action.proposalId}`, ix);
-    } catch (e) {
-      log({ level: "warn", msg: `keeper floor scan failed; retrying: ${e.message}` });
-    }
+      const doneKey = `e${action.program}:${action.proposalId}`;
+      await attempt(doneKey, `floor ${action.program} proposal ${action.proposalId}`, ix,
+        () => spend(policy.approvedFloorProposals, action.approval, doneKey, `floor ${action.program} proposal ${action.proposalId}`, true));
+    }]);
   }
+  // A failed scan fails the step, so a node refusing it for good raises the
+  // stall alert (docs/09, finding 71).
+  await scanAll(scans);
 }
 
 // Mints whose replayed startup window has not been judged yet (no attest).
@@ -715,18 +960,81 @@ async function judgeStartupWindow(now) {
   await applyActions([judged.action], { mint: judged.mint }, now);
 }
 
+// A step failing without a break for `stallAlertS` (default 120) is a guardian
+// gone quiet, and says so urgently, at most every 10 minutes per step.
+const stalls = stallWatch({ afterMs: (cfg.stallAlertS ?? 120) * 1000 });
+
+/** A step's outcome: `e` null for a success. */
+function stepOutcome(name, e) {
+  if (!e) {
+    stalls.ok(name);
+    return;
+  }
+  log({ level: "warn", msg: `${name}: ${e.message}` });
+  const failingMs = stalls.failed(name, Date.now());
+  if (failingMs !== null) {
+    log({ level: "error", msg: `guardian stalled: "${name}" keeps failing; it may be blind to new events until this is fixed`, reason: `failing for ${Math.round(failingMs / 1000)}s: ${e.message.slice(0, 200)}` });
+  }
+}
+
 /** One step of the loop. A failing step must not hold up the others. */
 async function step(name, run) {
   try {
     await run();
+    stepOutcome(name, null);
   } catch (e) {
-    log({ level: "warn", msg: `${name}: ${e.message}` });
+    stepOutcome(name, e);
+  }
+}
+
+// Watched Floor configs read at least once by this process (followFloor).
+const floorFollowed = new Set();
+
+/**
+ * Floor's events (a proposal, an execution, a replaced recovery key) are
+ * written in transactions on the Floor config, which need not touch the Vault
+ * protocol: reading only the protocol's signatures, the guardian saw them only
+ * when the two shared a transaction. Each watched config is followed on its
+ * own, and only that program's Floor events are read from it.
+ *
+ * Its cursor is kept in the state file. A restart reads on from it, back to
+ * at most the Vault startup's day, as a replay (nothing is sent: the account
+ * scans veto what is still pending), so an execution while this guardian was
+ * down still spends its approval. Each restart used to start at the newest
+ * signature, and those executions were never seen (docs/09, finding 71).
+ * Without a cursor (a first start), it anchors at the newest signature; the
+ * account scans cover what came before.
+ */
+async function followFloor() {
+  for (const fc of floorWatch) {
+    const address = b58encode(fc.config);
+    const program = b58encode(fc.protected);
+    const page = (q) => rpc.call("getSignaturesForAddress", [address, q]);
+    const resuming = !floorFollowed.has(address);
+    const r = await followAccount(page, { cursor: floorCursors.get(address) ?? null, oldestWanted: resuming ? wallNow() - DAY_S : null });
+    if (r.status === "gone") {
+      log({ level: "error", msg: "the node no longer has the Floor config's cursor signature; reading on from its newest. Floor history in the gap was not reviewed: check this program's proposals, executions and recovery key by hand", program });
+    } else if (r.status === "gap") {
+      log({ level: "error", msg: "Floor history older than a day, back to the saved cursor, was not reviewed: check this program's proposals, executions and recovery key by hand", program });
+    }
+    if (r.cursor) floorCursors.set(address, r.cursor);
+    else floorCursors.delete(address);
+    // No signature at all yet: ask again next poll, never from genesis.
+    if (r.status === "empty") continue;
+    await ingest(r.sigs, !resuming, (signature, s) => floorCursors.set(address, { signature, slot: s.slot ?? 0 }), program);
+    floorFollowed.add(address);
+    saveIncident();
   }
 }
 
 async function main() {
   log({ msg: "guardian started", guardian: guardian.address, protocol: b58encode(vc.protocol), policy });
   if (state.incidentSince != null) log({ msg: "incident hold resumed from saved state", incidentSince: state.incidentSince, stateFile });
+  const unpinned = unpinnedChangeApprovals(policy);
+  if (unpinned.length) {
+    log({ level: "warn", msg: "approvedChanges not pinned to a base version: each is spent once a matching change executes, as recorded in the state file. Pin them (\"kind:target:payloadHex#<baseVersion>\", printed by cloud/deploy/approvals.mjs) so no replay can match, whatever this guardian remembers (docs/07)", approvals: unpinned });
+  }
+  if (!state.changeBaseline) log({ msg: "no record of executed changes yet: the first change scan records them and spends no approval", stateFile });
   await refreshWorstCase();
   let heartbeatAt = await beat();
   const oldest = wallNow() - DAY_S;
@@ -740,7 +1048,11 @@ async function main() {
   await syncFromChain(true, { startup: true });
   unjudged = new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
   await judgeStartupWindow(decisionTime(wallNow(), state.outflows));
-  await vetoStillPending(wallNow());
+  // Floor cursors before the scan, so nothing lands between the two unseen.
+  if (floorWatch.length) await step("floor events", followFloor);
+  // A step: a refused scan here is retried by the loop and counted toward a
+  // stall, not fatal.
+  await step("pending proposals", () => vetoStillPending(wallNow()));
   log({ msg: "caught up", signatures: inWindow.length });
   await checkFloor().catch((e) => log({ level: "warn", msg: `floor check failed: ${e.message}` }));
   let cursor = until;
@@ -788,6 +1100,12 @@ async function main() {
         cursorSeen.add(signature);
       });
     });
+    if (floorWatch.length) await step("floor events", followFloor);
+    // A step with nothing to do this pass is idle: an earlier failure of it is
+    // over, not a stall that went on while it did not run (docs/09, finding 71).
+    if (changeChecks.size) await step("approval checks", runChangeChecks);
+    else stalls.idle("approval checks");
+    if (!pendingVetoes.length) stalls.idle("veto retry");
     if (pendingVetoes.length && Date.now() >= vetoNotBefore) {
       await step("veto retry", async () => {
         const still = [];
@@ -820,14 +1138,4 @@ async function main() {
   }
 }
 
-// A guardian that stops must say so and exit, so its supervisor starts a fresh
-// one (cloud/guardian/bulkhead-guardian@.service). Retrying the startup in place
-// would replay the 24h window into a half-built state and count outflows twice.
-async function fatal(e) {
-  log({ level: "error", msg: `guardian stopped: ${e?.message ?? e}; its supervisor must restart it` });
-  await sendAlert.flush();
-  process.exit(1);
-}
-process.on("unhandledRejection", fatal);
-process.on("uncaughtException", fatal);
 main().catch(fatal);

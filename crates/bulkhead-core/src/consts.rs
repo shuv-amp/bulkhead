@@ -7,6 +7,12 @@ pub const BPS: u128 = 10_000;
 /// Time constant of the reference-balance EMA (24 hours).
 pub const TAU_S: i64 = 86_400;
 
+/// Window of the low-water balance (`ema::WindowLow`). Capital counts toward
+/// the unbacked lane's base only once it has stayed in the vault at least this
+/// long, and a deposit taken straight back lowers the base for at most twice
+/// this long (docs/09, finding 65).
+pub const LOW_WINDOW_S: i64 = 1_800;
+
 /// Saturation for the time cost of a single request, so TAT arithmetic never overflows.
 pub const COST_MAX_MS: i64 = 1 << 61;
 

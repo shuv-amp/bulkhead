@@ -40,6 +40,7 @@ pub mod verr {
     pub const INSUFFICIENT_BALANCE: u32 = 8049;
     pub const SEAL_UNDER_REVIEW: u32 = 8050;
     pub const CHANGE_STALE: u32 = 8051;
+    pub const WRONG_TICKET: u32 = 8052;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;
@@ -533,10 +534,10 @@ impl Market {
         )
     }
 
-    pub fn cancel_ix(&self, v: &VaultRef, ticket: &Address, signer: &Address, payer: &Address) -> Instruction {
+    pub fn cancel_ix(&self, v: &VaultRef, ticket: &Address, id: u64, signer: &Address, payer: &Address) -> Instruction {
         self.vault_ix(
             10,
-            &[],
+            &id.to_le_bytes(),
             vec![
                 AccountMeta::new_readonly(self.protocol, false),
                 AccountMeta::new(v.vault, false),
@@ -652,4 +653,11 @@ pub fn outcome(m: &litesvm::types::TransactionMetadata) -> Outcome {
     let d = &m.return_data.data;
     let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
     Outcome { backed: u(0), instant: u(8), queued: u(16), ticket_id: u(24), eta_s: u(32) as i64 }
+}
+
+/// The id of the ticket at `ticket` (`Ticket::id`, after the discriminator and
+/// five keys): cancel and extend name the ticket they decided on.
+pub fn ticket_id(env: &Env, ticket: &Address) -> u64 {
+    let d = env.account(ticket).data;
+    u64::from_le_bytes(d[168..176].try_into().unwrap())
 }

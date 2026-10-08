@@ -62,6 +62,9 @@ pub enum VaultError {
     SealUnderReview,
     /// The change's target changed after it was proposed.
     ChangeStale,
+    /// The ticket at this address is not the one the instruction names: a
+    /// closed ticket's address is reused by its payer's next one.
+    WrongTicket,
 }
 
 impl From<VaultError> for ProgramError {

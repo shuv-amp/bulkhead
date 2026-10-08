@@ -59,6 +59,9 @@ fn parse(
             // guardian set changed in between cannot slip one in.
             if *target == [0; 32]
                 || (kind == change::SET_LIFEBOAT_DESTINATION && *target == p.admin)
+                // The admin parks the vault; the destination receives its
+                // exit. One key must never be both (docs/09, finding 72).
+                || (kind == change::SET_ADMIN && *target == p.lifeboat_destination)
                 || (kind == change::SET_ADMIN
                     && (*target == p.recovery
                         || p.guardians[..p.guardian_count as usize].contains(target)))
@@ -120,6 +123,7 @@ fn target_version(
     accounts: &[AccountView],
     p: &Protocol,
     kind: u8,
+    target: &[u8; 32],
     (protocol_i, target_i): (usize, usize),
 ) -> Result<u32, ProgramError> {
     Ok(match kind {
@@ -128,6 +132,13 @@ fn target_version(
         }
         change::UPSERT_ASSET => {
             let a = acc(accounts, target_i)?;
+            // Only the target mint's own record: another record's version
+            // would let a loosening outlive a later tightening (`ChangeStale`).
+            expect_pda(
+                &[seeds::ASSET, &key(&accounts[protocol_i]), target],
+                program_id,
+                a,
+            )?;
             if a.is_data_empty() {
                 0
             } else {
@@ -251,6 +262,7 @@ pub fn propose_change(
         }
         Parsed::Asset(a) => {
             let asset = acc(accounts, 5)?;
+            expect_pda(&[seeds::ASSET, &key(protocol), &target], program_id, asset)?;
             let old = if asset.is_data_empty() {
                 None
             } else {
@@ -291,7 +303,10 @@ pub fn propose_change(
             (2, 5, 0, 6, 7),
         )?;
         save(&mut accounts[2], |d| p.store(d))?;
-        sys::event(&[b"vault:change_applied", &[kind], &target]);
+        sys::event(
+            &key(&accounts[2]),
+            &[b"vault:change_applied", &[kind], &target],
+        );
         return Ok(());
     }
 
@@ -305,7 +320,7 @@ pub fn propose_change(
     if kind == change::SET_ADMIN && p.recovery != [0; 32] && key(acc(accounts, 1)?) == p.recovery {
         p.versions[1] = p.versions[1].wrapping_add(1);
     }
-    let base_version = target_version(program_id, accounts, &p, kind, (2, 5))?;
+    let base_version = target_version(program_id, accounts, &p, kind, &target, (2, 5))?;
     let id = p.next_change_id;
     let idb = id.to_le_bytes();
     let pk = key(protocol);
@@ -346,13 +361,16 @@ pub fn propose_change(
     save(&mut accounts[3], |d| c.store(d))?;
     p.next_change_id += 1;
     save(&mut accounts[2], |d| p.store(d))?;
-    sys::event(&[
-        b"vault:change_proposed",
-        &idb,
-        &[kind],
-        &target,
-        &s.executable_s.to_le_bytes(),
-    ]);
+    sys::event(
+        &key(&accounts[2]),
+        &[
+            b"vault:change_proposed",
+            &idb,
+            &[kind],
+            &target,
+            &s.executable_s.to_le_bytes(),
+        ],
+    );
     Ok(())
 }
 
@@ -382,7 +400,10 @@ pub fn veto_change(program_id: &Address, accounts: &mut [AccountView]) -> Progra
     c.vetoed = true;
     save(&mut accounts[1], |d| c.store(d))?;
     let who = key(&accounts[2]);
-    sys::event(&[b"vault:change_vetoed", &c.id.to_le_bytes(), &who]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:change_vetoed", &c.id.to_le_bytes(), &who],
+    );
     Ok(())
 }
 
@@ -413,7 +434,7 @@ pub fn execute_change(program_id: &Address, accounts: &mut [AccountView]) -> Pro
     // The target must be what the review saw: a tightening, another change or
     // an ejection since the proposal makes this change stale. It must be
     // proposed again, and waits again.
-    if target_version(program_id, accounts, &p, c.kind, (0, 2))? != c.base_version {
+    if target_version(program_id, accounts, &p, c.kind, &c.target, (0, 2))? != c.base_version {
         return Err(VaultError::ChangeStale.into());
     }
     let payload = &c.payload[..c.payload_len as usize];
@@ -431,7 +452,10 @@ pub fn execute_change(program_id: &Address, accounts: &mut [AccountView]) -> Pro
     c.executed = true;
     save(&mut accounts[1], |d| c.store(d))?;
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:change_executed", &c.id.to_le_bytes(), &[c.kind]]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:change_executed", &c.id.to_le_bytes(), &[c.kind]],
+    );
     Ok(())
 }
 
@@ -457,7 +481,10 @@ pub fn cancel_change(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     }
     c.vetoed = true; // a withdrawn change can never execute
     save(&mut accounts[1], |d| c.store(d))?;
-    sys::event(&[b"vault:change_cancelled", &c.id.to_le_bytes()]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:change_cancelled", &c.id.to_le_bytes()],
+    );
     Ok(())
 }
 
@@ -485,7 +512,9 @@ pub fn replace_recovery(
     }
     // An abdicated recovery key is fixed for good, and nothing changes while
     // the seal is under review: the same rules as `propose_change`.
-    if Abdications(p.abdications).is_abdicated(change::SET_RECOVERY) {
+    // Removing the key only takes power away: allowed even then, or a stolen
+    // key could stale every admin rotation for good (finding 62).
+    if recovery != [0; 32] && Abdications(p.abdications).is_abdicated(change::SET_RECOVERY) {
         return Err(VaultError::Abdicated.into());
     }
     let t = now()?;
@@ -501,6 +530,9 @@ pub fn replace_recovery(
     p.versions[1] = p.versions[1].wrapping_add(1);
     p.versions[4] = p.versions[4].wrapping_add(1);
     save(&mut accounts[0], |d| p.store(d))?;
-    sys::event(&[b"vault:recovery_replaced", &recovery, &[signers & alive]]);
+    sys::event(
+        &key(&accounts[0]),
+        &[b"vault:recovery_replaced", &recovery, &[signers & alive]],
+    );
     Ok(())
 }

@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -90,4 +90,23 @@ test("review fixes: distinct vetoes alert, skipped lines do not, failing freezes
   assert.ok(alertFor(failed, seen, 60_000));
   assert.ok(alertFor({ action: "freeze", signature: "e" }, seen, 60_001));
   assert.ok(alertFor({ action: "freeze", signature: "f" }, seen, 60_002));
+});
+
+test("a step that keeps failing raises an urgent alert after the threshold, rate-limited", () => {
+  const w = stallWatch({ afterMs: 120_000, everyMs: 600_000 });
+  assert.equal(w.failed("ingest", 0), null);
+  assert.equal(w.failed("ingest", 119_999), null, "not yet");
+  assert.equal(w.failed("ingest", 120_000), 120_000);
+  assert.equal(w.failed("ingest", 130_000), null, "said once per window");
+  assert.equal(w.failed("ingest", 720_000), 720_000, "and again after it");
+  w.ok("ingest");
+  assert.equal(w.failed("ingest", 800_000), null, "a success starts the count over");
+  assert.equal(w.failed("ingest", 920_000), 120_000);
+  // The line the guardian logs for it is urgent; the plain step warning is not.
+  assert.equal(alertFor({ level: "warn", msg: "ingest: getTransaction returned no transaction metadata" }, new Map(), 0), null);
+  assert.equal(alertFor({ level: "error", msg: 'guardian stalled: "ingest" keeps failing', reason: "failing for 120s" }, new Map(), 0).severity, "critical");
+});
+
+test("a removed recovery key alerts like a replaced one", () => {
+  assert.ok(alertFor({ level: "warn", msg: "the recovery key was removed by the admin with a guardian quorum: there is no recovery key now" }, new Map(), 0));
 });

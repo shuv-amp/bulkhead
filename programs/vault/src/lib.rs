@@ -43,6 +43,7 @@ use bulkhead_core::ema::ema_update;
 use bulkhead_core::governance::{
     MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
 };
+use bulkhead_core::limiter::capacity_base;
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
 use pinocchio::error::ProgramError;
 use pinocchio::instruction::{InstructionAccount, InstructionView};
@@ -120,7 +121,7 @@ pub fn process_instruction(
         ix::DEPOSIT => custody::deposit(program_id, accounts, args),
         ix::RELEASE => custody::release(program_id, accounts, args, false),
         ix::SETTLE_TICKET => custody::settle_ticket(program_id, accounts),
-        ix::CANCEL_TICKET => brakes::cancel_ticket(program_id, accounts),
+        ix::CANCEL_TICKET => brakes::cancel_ticket(program_id, accounts, args),
         ix::EXTEND_TICKET => brakes::extend_ticket(program_id, accounts, args),
         ix::FREEZE => brakes::freeze(program_id, accounts, args),
         ix::UNFREEZE => brakes::unfreeze(program_id, accounts, args),
@@ -352,8 +353,10 @@ impl VaultSigner {
     }
 }
 
-/// Updates the reference balance (EMA) with the balance *before* an operation.
+/// Updates the reference balance (EMA) and the low-water balance with the
+/// balance *before* an operation.
 pub(crate) fn touch_reference(v: &mut Vault, balance: u64, now_s: i64) {
+    v.low = v.low.touch(balance, now_s, v.ref_initialized);
     v.ref_balance = ema_update(
         v.ref_balance,
         v.ref_updated_s,
@@ -363,6 +366,14 @@ pub(crate) fn touch_reference(v: &mut Vault, balance: u64, now_s: i64) {
     );
     v.ref_updated_s = now_s;
     v.ref_initialized = true;
+}
+
+/// The base capacities are computed from, after a touch: the reference, the
+/// live balance and the low-water balance, whichever is least. Capital that
+/// arrived within the window does not count (finding 65), and money that has
+/// left stops counting at once (A1).
+pub(crate) fn unbacked_base(v: &Vault, balance: u64) -> u64 {
+    capacity_base(v.ref_balance, balance.min(v.low.low()))
 }
 
 /// Guardian bitmap of `signers`: each must sign and be a current guardian.

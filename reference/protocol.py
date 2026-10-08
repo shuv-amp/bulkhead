@@ -74,6 +74,10 @@ class Session:
         if cmd == "E":
             r, last, bal, now, init = map(int, a)
             return f"E {ref.ema_update(r, last, bal, now, bool(init))}"
+        if cmd == "EL":
+            prev, cur, window, bal, now, init = map(int, a)
+            p, c, w = ref.window_low_touch(prev, cur, window, bal, now, bool(init))
+            return f"EL {p} {c} {w}"
         if cmd == "V":
             amt, man, expo, dec, w, up = map(int, a)
             v = ref.value_v(amt, man, expo, dec, w, bool(up))

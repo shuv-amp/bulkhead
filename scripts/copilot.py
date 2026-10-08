@@ -15,6 +15,8 @@ Usage:
 import sys
 import os
 import json
+import urllib.error
+import urllib.parse
 import urllib.request
 import argparse
 from pathlib import Path
@@ -38,6 +40,25 @@ if not PAT:
     print("Generate your PAT at: https://colosseum.com/arena/copilot")
     sys.exit(1)
 
+# The token is a bearer secret: never send it in clear text.
+if urllib.parse.urlsplit(API_BASE).scheme != "https":
+    print(f"❌ Error: COLOSSEUM_COPILOT_API_BASE must be an https:// URL, not {API_BASE!r}.")
+    sys.exit(1)
+
+
+class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to https on the same host: urllib would
+    otherwise forward the Authorization header wherever it points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new.scheme != "https" or new.netloc != old.netloc:
+            raise urllib.error.HTTPError(newurl, code, f"refused redirect to {newurl}", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(HttpsOnlyRedirects)
+
 
 def api_request(endpoint: str, method: str = "GET", data: dict = None):
     url = f"{API_BASE}{endpoint}"
@@ -49,10 +70,10 @@ def api_request(endpoint: str, method: str = "GET", data: dict = None):
     body = json.dumps(data).encode("utf-8") if data else None
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with OPENER.open(req) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8")
+        err = e.read().decode("utf-8") if e.fp else e.msg
         print(f"❌ HTTP Error {e.code}: {err}")
         sys.exit(1)
     except Exception as e:
@@ -102,7 +123,7 @@ def search_archives(query: str, limit: int = 5):
 
 
 def get_project(slug: str):
-    res = api_request(f"/projects/by-slug/{slug}")
+    res = api_request(f"/projects/by-slug/{urllib.parse.quote(slug, safe='')}")
     print(f"\n📋 Project Details: {slug}\n" + "─" * 60)
     print(json.dumps(res, indent=2))
 

@@ -1028,6 +1028,60 @@ fn a_stolen_floor_recovery_key_is_replaced_by_the_owner_with_a_live_quorum() {
     assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref(), "the new recovery key");
 }
 
+/// Finding 66: anyone may re-pin, so a stop naming an earlier pin must still
+/// land. Before the fix each re-pin made a prepared stop fail (SnapshotMismatch).
+#[test]
+fn a_re_pin_cannot_make_a_prepared_stop_fail() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let attacker = Keypair::new();
+    env.fund(&attacker);
+    let s2 = env.write_buffer(&honest_v1(), &attacker);
+    env.set_buffer_authority(&s2, &attacker, &f.authority);
+    env.ok(&[f.pin_snapshot(&s2)], &[]);
+    // The guardian's stop names the snapshot it read before the re-pin.
+    env.ok(
+        &[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))],
+        &[&p.g[0]],
+    );
+    let c = read_config(&env, f);
+    assert_eq!(
+        (c.snapshot_valid, c.snapshot_buffer),
+        (1, p.snapshot.to_bytes()),
+        "the named snapshot restores and is the pin"
+    );
+}
+
+/// Finding 66, the other side: a stop still cannot leave the quorum without
+/// its restore by naming something that is neither the pin nor a snapshot.
+#[test]
+fn a_stop_cannot_name_a_buffer_that_does_not_restore_the_live_code() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let attacker = Keypair::new();
+    env.fund(&attacker);
+    let other = env.write_buffer(&honest_fix(), &attacker);
+    env.set_buffer_authority(&other, &attacker, &f.authority);
+    let code = env.fails(
+        &[f.abort(&gs[0], &p.abort_buffer, Some(&other))],
+        &[&p.g[0]],
+    );
+    assert_eq!(code, err::SNAPSHOT_MISMATCH);
+    let code = env.fails(
+        &[f.abort(&gs[0], &p.abort_buffer, Some(&p.abort_buffer))],
+        &[&p.g[0]],
+    );
+    assert_eq!(
+        code,
+        err::SNAPSHOT_MISMATCH,
+        "the abort buffer is used up by the stop: never a snapshot"
+    );
+}
+
 #[test]
 fn a_recovery_key_proposal_does_not_block_a_delay_raise() {
     // Raising the delay is a tightening the owner may always make at once. A
@@ -1105,4 +1159,22 @@ fn a_guardian_is_never_the_recovery_key() {
     ix.data.extend_from_slice(fresh.as_ref());
     env.ok(&[ix], &[&team]);
     assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref());
+}
+
+/// A recovery key cut short at registration is an error, not "no recovery key".
+#[test]
+fn registration_refuses_a_cut_off_recovery_key() {
+    let mut env = Env::new();
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 1024);
+    let f = Floor::new(env.floor, program);
+    let owner = Keypair::new().pubkey();
+    let (a, b) = (Keypair::new().pubkey(), Keypair::new().pubkey());
+    let pay = env.payer.pubkey();
+    let mut ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    ix.data.extend_from_slice(&Keypair::new().pubkey().as_ref()[..31]);
+    assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_INSTRUCTION);
+    let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    env.ok(&[ix], &[&team]);
 }

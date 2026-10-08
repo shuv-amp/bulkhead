@@ -5,10 +5,11 @@ Exact account lists and data layouts are documented above each handler in `progr
 ## 1. Floor (Tier 0): one instruction, zero code changes
 
 ```
-bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
+bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay, recovery?)
   signed by your program's CURRENT upgrade authority
 ```
 
+- `recovery` is optional: absent or all zero means none; a cut-off key is refused. It may later propose only a new owner or a new recovery key (`06 §6`), and is never a guardian or the owner.
 - The instruction creates Floor's config and **moves the upgrade authority to Floor's PDA itself** (a CPI `SetAuthority`), in one step. There is never a moment when Floor holds your key but someone else chose your guardians.
 - If your upgrade authority is a Squads vault, execute `register` as a vault transaction.
 - Then:
@@ -28,7 +29,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
    - a heartbeat interval (7 days default);
    - loosen delay from 72h through 30 days (a raise applies at once, so a longer one is refused);
    - `lifeboat_destination` = a *different* cold multisig.
-3. **Create one vault per custody mint** (`create_vault` with your limits). The mint must pass the Token-2022 policy (`05 §7`).
+3. **Create one vault per custody mint** (`create_vault` with your limits). The mint must pass the Token-2022 policy (`05 §7`). A mint with InterestBearing (10) or ScaledUiAmount (25) may be held, but is never priced: an asset record that allowlists it is refused (`ExtensionNotAllowed`).
 4. **Allowlist valued assets** during genesis (`upsert_asset`: Pyth feed id, haircut ≥ your max LTV + 5 points, liability weight, confidence multiple, max age, max confidence). Use feeds for deep assets only.
 5. **Migrate:**
    1. `import_backing` for every existing depositor, from a published snapshot;
@@ -41,6 +42,13 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay)
 8. **A cancelled ticket** is a governance matter. The tokens stay in the vault. Never re-release automatically: cancellation usually means an incident.
 9. **Calibrate** (§4) before the seal. Tightening later is instant; loosening takes 72h.
 10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page. It vetoes every loosening, lifeboat exit and Floor proposal you have not pre-approved, and it is also your **keeper**: a change you did approve (`approvedChanges`, `approvedFloorProposals`, `approvedUpgradeBuffers`, each by what it does) is executed by it as soon as its delay ends. Solana programs never run on their own, so after a delay someone must send `execute`; anyone may, and the keeper makes sure someone does, before the 7-day expiry. It never executes the release of Floor's upgrade authority, which closes Floor's config.
+
+**Hard rules.** Each one is a way to lose the guarantee without a bug in Bulkhead:
+
+- **Pin the Vault program id** in every CPI that carries the caller PDA's signature (step 1; `15`, A11). Compare it with a constant, never with an account the transaction supplies.
+- **Deposit credits the signing source authority**, not the token account's owner. Have the user sign as the authority of their own token account. Never pull tokens through a delegate PDA that you also release to: every deposit would credit that PDA, and a release to an account it owns would be backed by everyone's deposits.
+- **A recipient can stall its own ticket.** `settle_ticket` pays the token account stored in the ticket. If its owner closes it, freezes it or enables `MemoTransfer` (the Vault's transfer carries no memo), settling fails and the ticket stays pending, with its reservation, until a guardian cancels it (`cancel_ticket`). While it is pending, `reset_backlog` is refused. Watch for tickets past their ETA that do not settle.
+- **You trust the mint's issuer.** For a `TransferFeeConfig` mint, the fee authority can raise the fee up to its configured maximum: deposits credit what arrived, but every release then delivers less. A mint's freeze authority can freeze the vault token account and stop custody entirely. Bulkhead discloses both (`05 §7`); it cannot prevent either. Prefer mints with no freeze authority and no fee authority.
 
 ## 3. The pattern, from Harbor (`programs/harbor`)
 
@@ -63,7 +71,7 @@ invoke_signed_with_bounds::<MAX, &AccountView>(&release_ix, &accounts, &[Signer:
 Inputs: the last 90 days of the protocol's outflows per vault (from its events or an indexer), vault balances, and historical Pyth prices.
 
 1. Replay each historical outflow through `bulkhead-core` (the backed amount at the prices of that moment); the rest is the unbacked part.
-2. For each vault, compute the maximum unbacked sum over any 1-hour window and any 24-hour window, as a fraction of the capacity base at that time (the lower of the reference and the live balance, `03 §3`).
+2. For each vault, compute the maximum unbacked sum over any 1-hour window and any 24-hour window, as a fraction of the capacity base at that time (the least of the reference, the live balance and the low-water balance, `03 §3`).
 3. Set `short_bps ≥ 1.5 × max hourly` and `long_bps ≥ 1.5 × max daily`, never below the defaults (2%, 5%) unless the history is flat.
 4. Set absolute caps (`short_cap`, `long_cap`, in tokens) at the same percentages of the vault's honest size, for example its 30-day median balance. Without caps, an attacker who parks their own capital in the vault raises the base while it is there (`15`, A1b). Lowering a cap is instant; raising one waits 72h, so review caps as the vault grows. The demo setup creates its vault with calibrated caps; `cloud/deploy/market.mjs caps` applies them to an existing demo market.
 5. **Lending markets: size for a crash, not only for history.** A quiet 90 days says nothing about a cascade. Run `crates/bulkhead-core/tests/cascade.rs` with the market's own weights, bonus and collateral share. With the defaults, a 10-minute −20% crash that liquidates 17% of a vault already queues some liquidations for 6 hours; 4%/h and 10%/day absorb a 30% cascade (`08` S11). Looser limits also double what a thief can take, so this is a trade-off to publish, not hide.
@@ -105,6 +113,8 @@ The guardian (`cloud/guardian/main.mjs`, Node 20+, no dependencies) is what turn
 - **Supervision.** The guardian exits on anything it cannot recover from, after logging and alerting it. Run it under `cloud/guardian/bulkhead-guardian@.service` (systemd: restarts it, never gives up, read-only filesystem except its state directory). The incident hold is kept across restarts in `stateFile` (under the unit, its state directory by default; `09`, findings 48 and 54).
 - **Liveness.** It heartbeats every 24h; a key that misses its on-chain interval stops counting toward the quorum. The status page shows each guardian's standing.
 - **Approvals are explicit, and name what is approved.** It vetoes every loosening, lifeboat exit and Floor proposal not listed in its policy, as soon as it is proposed. Approve a change by what it does, never by its id: `approvedChanges` takes `"kind:target:payloadHex"`, `approvedFloorProposals` takes `"program:kind:target:payloadHex"` (code by buffer, in `approvedUpgradeBuffers`), and `approvedExits` takes `"mint:amount"`. An id is only the next counter, so a stolen key that proposes first would take an id approved in advance; the guardian refuses to start with `approvedChangeIds`. Add the approval and restart the guardian *before* proposing, so it never vetoes the change; `node cloud/deploy/approvals.mjs <rpc> <vault-program> <protocol> [floor-program protected-program]` prints the approval of each change already pending (`09`, finding 61).
+- **Pin Vault approvals to the base version.** Content alone can be proposed again by anyone holding the proposing key. Prefer `"kind:target:payloadHex#<baseVersion>"`: `baseVersion` is the version of the target that the change account records when proposed (the vault's limits version for limits, the asset record's version for an asset (0 if none yet), otherwise the protocol's version for that kind). The change executes only while the target is still at that version, and every execution moves it on, so a pinned approval can never match a replay, whatever the guardian remembers. Proposing does not move the version, so you can read it beforehand; `approvals.mjs` prints the pinned form of every open change. A live proposal event names no version, so the guardian reads the change account by id before it decides. Floor approvals have no version.
+- **Unpinned approvals are spent.** An approval without `#<baseVersion>` still works, but the guardian logs a warning at startup. Once a matching change executes, one approval of that content is spent: the live one that expires first (one with no expiry last; an expired one is never spent). The state file records this (`stateFile`), and so does the list of executions already seen: a guardian with no such record treats every change that has already executed as old and spends nothing on it. To approve the same content again, add it again with an expiry, `"...@<unix seconds>"`, so it is a different entry (`09`, finding 71).
 
 ## 7. Not in this build
 

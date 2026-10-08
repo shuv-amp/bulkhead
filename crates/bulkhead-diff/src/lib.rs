@@ -6,7 +6,7 @@
 //! See `reference/protocol.py` for the command table.
 
 use bulkhead_core::classify::{self, AssetConfig, Class, LimitConfig};
-use bulkhead_core::ema::ema_update;
+use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::floor;
 use bulkhead_core::governance;
 use bulkhead_core::ledger::{Ledger, Mint, PricedAsset, Pricing};
@@ -133,6 +133,12 @@ impl Session {
                 let (r, last, bal, now, init): (u64, i64, u64, i64, bool) =
                     (t.p()?, t.p()?, t.p()?, t.p()?, t.b()?);
                 Ok(format!("E {}", ema_update(r, last, bal, now, init)))
+            }
+            "EL" => {
+                let (prev, cur, window, bal, now, init): (u64, u64, i64, u64, i64, bool) =
+                    (t.p()?, t.p()?, t.p()?, t.p()?, t.p()?, t.b()?);
+                let l = WindowLow { prev, cur, window }.touch(bal, now, init);
+                Ok(format!("EL {} {} {}", l.prev, l.cur, l.window))
             }
             "V" => {
                 let (a, m, e, d, w, up): (u128, u128, i32, u8, u32, bool) =

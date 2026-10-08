@@ -26,6 +26,11 @@ case "$URL" in
   *) if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ] && [ "${ALLOW_NONCANONICAL:-0}" != 1 ]; then
        echo "refusing: $(uname -s)-$(uname -m) is not the canonical build host; deploy from Linux x86_64 or CI's binaries" >&2
        exit 1
+     fi
+     # Only reviewed code: the bytes must be rebuildable from a commit.
+     if [ -n "$(git status --porcelain -- programs crates Cargo.toml Cargo.lock)" ] && [ "${ALLOW_DIRTY:-0}" != 1 ]; then
+       echo "refusing: uncommitted changes under programs/, crates/ or Cargo.*; commit them (or ALLOW_DIRTY=1)" >&2
+       exit 1
      fi ;;
 esac
 
@@ -48,9 +53,21 @@ fi
 # LOADER=js deploys and checks through cloud/deploy/loader.mjs, which needs no
 # account reads (for an endpoint whose getAccountInfo is down; see that file).
 AUTH=$(solana-keygen pubkey "$PAYER")
+# Whether a program account exists: 0 yes, 1 no. Anything else (an RPC error,
+# a rate limit) stops the script: read as "absent", it made a re-run deploy
+# over the live program, which for a program this payer still owns is an
+# upgrade to whatever is checked out.
 deployed() {
-  if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deployed "$URL" "$AUTH" "$(id "$1")"
-  else solana program show --url "$URL" --keypair "$PAYER" "$(id "$1")" > /dev/null 2>&1; fi
+  if [ "${LOADER:-cli}" = js ]; then node cloud/deploy/loader.mjs deployed "$URL" "$AUTH" "$(id "$1")"; return; fi
+  local st
+  st=$(python3 - "$URL" "$(id "$1")" <<'PY'
+import json, sys, urllib.request
+req = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [sys.argv[2], {"encoding": "base64", "commitment": "confirmed"}]}
+r = urllib.request.Request(sys.argv[1], json.dumps(req).encode(), {"Content-Type": "application/json"})
+print("absent" if json.load(urllib.request.urlopen(r, timeout=30))["result"]["value"] is None else "present")
+PY
+) || { echo "cannot tell whether $1 is deployed (RPC error): refusing to deploy over it; re-run" >&2; exit 1; }
+  [ "$st" = present ]
 }
 so() { if [ "$1" = bulkhead_harbor ]; then echo "$HARBOR_SO"; else echo "target/deploy/$1.so"; fi; }
 verify_one() {

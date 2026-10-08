@@ -395,7 +395,12 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
         parse_guardian_set(args.get(32..).unwrap_or(&[]), &owner, &[0; 32])?;
     let delay = i64_arg(args, 32 + used)?;
     // Optional recovery key after the delay (absent or all zero: none).
-    let recovery = k32_arg(args, 32 + used + 8).unwrap_or([0; 32]);
+    // Absent: none. Present, all 32 bytes: a cut-off key is an error, not none.
+    let recovery = if args.len() <= 32 + used + 8 {
+        [0; 32]
+    } else {
+        k32_arg(args, 32 + used + 8)?
+    };
     // No key holds two roles: a guardian that is also the recovery key would
     // never veto its own new owner (docs/09, finding 62).
     if recovery == owner || (recovery != [0; 32] && guardians[..count as usize].contains(&recovery))
@@ -647,9 +652,14 @@ fn pin_snapshot(program_id: &Address, accounts: &mut [AccountView]) -> ProgramRe
 // decide, by leaving it out, that the quorum may not restore it (docs/09,
 // finding 53). It always exists while pinned (Floor holds its authority; a
 // restore that consumes it clears the pin), and comparing it costs about one
-// unit per 250 bytes, so naming it cannot keep an honest stop from landing. Its
-// contents never stop the abort: if they ever differed from the live code,
-// only the quorum's fast restore would be unavailable.
+// unit per 250 bytes. An honest stop that names the pin it read cannot fail
+// because of the snapshot, even after someone re-pins: any frozen buffer
+// byte-identical to the live code is accepted and becomes the pin (docs/09,
+// finding 66). A stop that omits account 10, or names the abort buffer or a
+// buffer not byte-identical to the live code (other than the current pin),
+// is refused (`SnapshotMismatch`). If the current pin's contents ever
+// differed from the live code, the stop still lands; only the quorum's fast
+// restore would be unavailable.
 fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
     let t = now()?;
@@ -681,12 +691,18 @@ fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     c.snapshot_valid = 0;
     if c.snapshot_buffer != [0; 32] {
         let snap = accounts.get(10).ok_or(FloorError::SnapshotMismatch)?;
-        if key(snap) != c.snapshot_buffer {
+        // The abort buffer is used up by this stop: never a snapshot.
+        let restores = key(snap) != c.abort_buffer
+            && check_frozen_buffer(program_id, &c, snap).is_ok()
+            && snapshot_identical(snap, programdata)?;
+        // Anyone may re-pin, so a stop naming an earlier pin must not fail: a
+        // buffer that restores the live code is as good as the pin, and
+        // becomes it (docs/09, finding 66). Anything else must be the pin.
+        if key(snap) != c.snapshot_buffer && !restores {
             return Err(FloorError::SnapshotMismatch.into());
         }
-        if check_frozen_buffer(program_id, &c, snap).is_ok()
-            && snapshot_identical(snap, programdata)?
-        {
+        if restores {
+            c.snapshot_buffer = key(snap);
             c.snapshot_valid = 1;
         }
     }

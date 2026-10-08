@@ -284,7 +284,12 @@ export class Rpc {
     return { ...v, bytes: Uint8Array.from(atob(v.data[0]), (c) => c.charCodeAt(0)) };
   }
   async blockhash() {
-    return (await this.call("getLatestBlockhash", [{ commitment: "confirmed" }])).value.blockhash;
+    return (await this.latestBlockhash()).blockhash;
+  }
+  /** The blockhash, and the last block height a transaction using it can land at. */
+  async latestBlockhash() {
+    const { blockhash, lastValidBlockHeight } = (await this.call("getLatestBlockhash", [{ commitment: "confirmed" }])).value;
+    return { blockhash, lastValidBlockHeight: lastValidBlockHeight ?? null };
   }
   /**
    * Runs a transaction without signatures (sigVerify off) and returns its
@@ -426,6 +431,9 @@ export function decodeVault(d) {
     });
     // The limits' change-version counter (older builds: padding, so 0).
     if (d.length >= r.o + 4) v.limitsVersion = r.u32();
+    // The low-water balance (finding 65; older builds: zero padding, which
+    // the program's first touch replaces since its window is long past).
+    if (d.length >= r.o + 24) v.low = { prev: r.u64(), cur: r.u64(), window: r.i64() };
   }
   return v;
 }
@@ -520,10 +528,14 @@ export function decodeAttestation(bytes) {
  * be read as complete.
  */
 export function parseLogs(logs) {
+  // No log at all (a node that stores none, `logMessages: null`) is not an
+  // empty log: whatever ran is unknown, so it reads as truncated and the
+  // caller falls back to the balances.
+  if (!Array.isArray(logs)) return { events: [], truncated: true };
   const events = [];
   const stack = [];
   let truncated = false;
-  for (const line of logs ?? []) {
+  for (const line of logs) {
     if (line === "Log truncated") {
       truncated = true;
       continue;

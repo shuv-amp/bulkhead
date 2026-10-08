@@ -109,7 +109,7 @@ if (p.sealed) {
 console.log("\n2. the status page's worst case equals the program's own attest");
 const onchain = await vc.attest(rpc, admin.publicKey, wld.mint);
 const local = attestLocal(v, p, balance, onchain.clockS); // at the simulation's own clock
-const same = ["worst1h", "worst24h", "balance", "queued"].every((k) => onchain[k] === local[k]);
+const same = ["availableNow", "worst1h", "worst24h", "balance", "frozenUntil", "queued", "pendingTickets"].every((k) => onchain[k] === local[k]);
 check("attest (simulated on chain) == cloud/lib/limits.mjs", same, `1h ${Number(onchain.worst1h) / 1e6}, 24h ${Number(onchain.worst24h) / 1e6}, sealed ${onchain.sealed}`);
 
 console.log("\n3. forbidden actions (simulated; nothing is sent)");

@@ -6,14 +6,14 @@ This is the contract between the program, its integrators, the tests and auditor
 - moves tokens;
 - emits events.
 
-Status: built (Pinocchio 0.11, one dependency: `bulkhead-core`), sBPF v3. Tested with scenario and negative tests plus a program-vs-model differential on the real runtime (`09 §7`), and exercised end-to-end on `solana-test-validator` (`cloud/e2e`). Deployed on devnet on 28 Sep 2026 (`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`); the bytes on devnet are the 29 Sep upgrade, not this tree (`08`, `SECURITY.md`). Unaudited.
+Status: built (Pinocchio 0.11, one dependency: `bulkhead-core`), sBPF v3. Tested with scenario and negative tests plus a program-vs-model differential on the real runtime (`09 §7`), and exercised end-to-end on `solana-test-validator` (`cloud/e2e`). Deployed on devnet on 28 Sep 2026 (`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`); devnet runs the PR #34 build of 8 Oct, not this tree: the on-chain parts of findings 63–73 are not deployed (`08`, `SECURITY.md`). Unaudited.
 
 Conventions:
 - `now` = `Clock::unix_timestamp` (seconds); limiter math uses `now_ms = now × 1000`.
 - **Admin** = `protocol.admin`. **Guardian** = a key in `protocol.guardians`. **Live** = heart-beat within `heartbeat_interval_s`. **Quorum** = `threshold` (≥ 2) distinct live guardians signing the same instruction.
 - **Caller** = the protocol's PDA `["bulkhead-caller"]` under its own program id. Only the protocol program can sign as it, so only the protocol can `deposit` and `release`.
 - Instruction data = one tag byte, then little-endian arguments. Account lists are documented above each handler in `programs/vault/src/*.rs`.
-- Every state change emits a structured event with `sol_log_data` (`Program data: …`, the channel Anchor events use): `vault:released`, `vault:frozen`, `vault:change_proposed`, and so on. The Cloud guardian and the status page parse them.
+- Every state change emits a structured event with `sol_log_data` (`Program data: …`, the channel Anchor events use): `vault:released`, `vault:frozen`, `vault:change_proposed`, and so on. Every `vault:*` event ends with the 32-byte key of the `Protocol` account it concerns. A reader takes it as the field after the kind's own fields (a fixed count per kind), so an event from an older build that appended nothing is never misattributed (`09`, finding 64). The Cloud guardian and the status page parse them.
 
 ## 1. Constants (compile-time; changing one means a different program)
 
@@ -34,7 +34,7 @@ Conventions:
 | Account | Seeds | Size | Key fields |
 |---|---|---|---|
 | `Protocol` | `["protocol", protocol_program]` | 597 B | admin, caller, guardians + heartbeats, threshold, sealed, freeze, abdications, vault count, ticket and change counters, lifeboat destination (+ when set), seal schedule |
-| `Vault` | `["vault", protocol, mint]` | 433 B | mint, token program, token account, `LimitConfig`, two TATs, EMA reference, pending tickets, queued amount, freeze, imported backing, counters (in, backed out, unbacked out, settled, cancelled), lifeboat and pending exit |
+| `Vault` | `["vault", protocol, mint]` | 433 B | mint, token program, token account, `LimitConfig`, two TATs, EMA reference, low-water balance (`prev`, `cur`, window; in the tail after the limits version), pending tickets, queued amount, freeze, imported backing, counters (in, backed out, unbacked out, settled, cancelled), lifeboat and pending exit |
 | Vault token account | `["vault-tokens", protocol, mint]` | 165 B + extensions | A token account whose authority is the `Vault` PDA. The protocol can't transfer, close or delegate it. |
 | `Asset` | `["asset", protocol, mint]` | 159 B | `AssetConfig` (allowlisted, haircut, liability weight, confidence multiple, max age, max confidence, Pyth feed id) + decimals |
 | `Backing` | `["backing", protocol, owner]` | 464 B | Up to 8 `(mint, net: i128)` positions: the owner's shadow ledger |
@@ -42,7 +42,7 @@ Conventions:
 | `Change` | `["change", protocol, id]` | 448 B | kind, target, payload, proposer, executable, expiry, vetoed, executed |
 | Lifeboat token account | `["lifeboat-tokens", protocol, mint]` | 165 B + ext. | Authority = the `Vault` PDA |
 
-Every account has an 8-byte discriminator and a fixed layout, read field by field (`state.rs`). Loading checks the owner program, the discriminator, the length and the re-derived PDA address. Tickets and changes use monotonic ids, so a closed id is never reused.
+Every account has an 8-byte discriminator and a fixed layout, read field by field (`state.rs`). Loading checks the owner program, the discriminator, the length and the re-derived PDA address. Tickets and changes carry monotonic ids, so a closed id is never reused. A ticket's **address** can be: it is `["ticket", protocol, payer, nonce]`, and the payer may reuse a nonce once the ticket is closed. That is why `cancel_ticket` and `extend_ticket` name the id they expect.
 
 ## 3. Lifecycle
 
@@ -59,31 +59,31 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 
 | Tag | Instruction | Signer | Checks | Effect |
 |---|---|---|---|---|
-| 0 | `register_protocol` | the protocol's upgrade authority, **or** its caller PDA via CPI | delay ≥ 72h; 2 ≤ threshold ≤ count ≤ 8; guardians unique, ≠ admin; interval 1–30 days; destination ≠ admin | Creates `Protocol` (survives a pre-funded address) |
+| 0 | `register_protocol` | the protocol's upgrade authority, **or** its caller PDA via CPI | delay ≥ 72h; 2 ≤ threshold ≤ count ≤ 8; guardians unique, ≠ admin, ≠ the recovery key; interval 1–30 days; destination ≠ admin; the optional recovery key is absent or a full 32 bytes (a cut-off key is refused, `InvalidInstruction`) | Creates `Protocol` (survives a pre-funded address) |
 | 1 | `create_vault(limits)` | admin | limits valid (bps ≤ 10 000, windows > 0); mint passes the Token-2022 policy (§7); not while the seal is under review; after the seal, the limits must keep the unbacked lane closed (one bucket with no bps and no floor), and opening it is a 72h change | Creates `Vault` and its token account (size from `GetAccountDataSize`) |
 | 2 | `upsert_asset(config)` | admin | genesis only (afterwards: `propose_change`) | Creates or updates `Asset` |
 | 3 | `import_backing(amount)` | admin | genesis only | Credits `Backing[owner]`; `vault.imported += amount` |
-| 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault, vault token account, and lifeboat token PDA passed exactly once; `imported + total_in ≤ vault balance + actual spendable lifeboat balance` | `sealed = true` |
-| 7 | `deposit(amount)` | caller + source authority | accounts match the vault; source ≠ vault account | EMA update; `transfer_checked`; credits the amount actually **received** (transfer fees) to `Backing[source authority]`; returns `received` |
+| 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault, vault token account, and lifeboat token PDA passed exactly once; `imported + total_in ≤ vault balance + actual spendable lifeboat balance`, where the lifeboat balance excludes what a live (unvetoed) exit will take | `sealed = true` |
+| 7 | `deposit(amount)` | caller + source authority | accounts match the vault; source ≠ vault account | Reference and low-water update (`03 §3`); `transfer_checked`; credits the amount actually **received** (transfer fees) to `Backing[source authority]`; returns `received` |
 | 8 | `release(amount, nonce)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
 | 23 | `quote_release(amount)` | none | as `release` | The same outcome as return data, no writes (for `simulateTransaction`) |
 | 9 | `settle_ticket` | anyone | `now ≥ ETA`; not frozen (protocol or vault); the stored recipient and payer | Pays the ticket; closes it (rent to its payer) |
-| 10 | `cancel_ticket` | live guardian (not the admin: a stolen admin key could cancel every queued withdrawal, A4) | ticket of this vault | Closes it; **no refund** of the reservation (G1 depends on it) |
-| 11 | `extend_ticket(secs)` | live guardian | ≤ 24h per call, ≤ 7 days in total | ETA later |
+| 10 | `cancel_ticket(id)` | live guardian (not the admin: a stolen admin key could cancel every queued withdrawal, A4) | ticket of this vault; its id equals the expected id (u64 LE in the data), else `WrongTicket` | Closes it; **no refund** of the reservation (G1 depends on it) |
+| 11 | `extend_ticket(secs, id)` | live guardian | data: `secs` i64, then the expected ticket id u64 (both LE); a different id → `WrongTicket`; ≤ 24h per call, ≤ 7 days in total | ETA later |
 | 12 | `freeze(scope, secs)` | live guardian or admin | ≤ 24h; never shortens | Protocol or vault `frozen_until` |
 | 13 | `unfreeze(scope)` | live quorum | — | Freeze ends now (the admin can't unfreeze) |
 | 14 | `heartbeat` | live guardian | a dead guardian can't revive itself | — |
 | 15 | `eject(target)` | live quorum of the *other* guardians | stays ≥ threshold | Removes the guardian at once |
 | 16 | `reset_backlog` | admin or live guardian | zero pending tickets | Each bucket clamped to "just emptied" |
 | 17 | `abdicate(kind)` | admin + live guardian quorum | — | Loosening that change kind is gone forever (Morpho V2); tightening it stays instant |
-| 18 | `propose_change(kind, target, payload)` | admin | valid; core classification; a loosening of an abdicated kind is refused | Tighten (or genesis) → applied now. Loosen → `Change` executable after ≥ 72h, expiring 7 days later. |
+| 18 | `propose_change(kind, target, payload)` | admin; the recovery key for `SetAdmin` and `SetRecovery` only | valid; core classification; a loosening of an abdicated kind is refused | Tighten (or genesis) → applied now. Loosen → `Change` executable after ≥ 72h, expiring 7 days later. |
 | 19 / 21 / 20 | `veto_change` / `cancel_change` / `execute_change` | live guardian / admin / anyone | execute: executable, not vetoed, not expired, not abdicated; payload re-validated | Applies the change |
 | 22 | `attest` | none | — | Returns the live worst case (§6) |
-| 24 / 25 | `lifeboat_move` / `lifeboat_return` | admin / admin or live quorum | — | Vault ↔ lifeboat (a Bulkhead-held account) |
+| 24 / 25 | `lifeboat_move` / `lifeboat_return` | admin / admin or live quorum | move: refused while the protocol or the vault is frozen (`Frozen`, finding 72) | Vault ↔ lifeboat (a Bulkhead-held account) |
 | 26 / 28 / 27 | `propose_lifeboat_exit` / `veto_lifeboat_exit` / `execute_lifeboat_exit` | admin / live guardian / anyone | destination set ≥ 72h before the proposal; exit waits ≥ 72h; destination account owned by the committed destination | Lifeboat → the committed destination |
-| 29 | `replace_recovery(key)` | admin + live guardian quorum | the new key is neither the admin nor a guardian (all zero: none); refused while the seal is under review and once `SetRecovery` is abdicated | Replaces the recovery key at once; every pending `SetAdmin` and `SetRecovery` (what the old key proposed among them) goes stale (`09`, finding 62) |
+| 29 | `replace_recovery(key)` | admin + live guardian quorum | the new key is neither the admin nor a guardian (all zero: none); refused while the seal is under review (`SealUnderReview`); while `SetRecovery` is abdicated, any non-zero key is refused (`Abdicated`), but all zero (removing the key) is allowed (finding 72) | Replaces the recovery key at once. **Every** pending `SetAdmin` goes stale, the admin's own included, and so does any pending `SetRecovery` (`09`, finding 62) |
 
-Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin`, `SetLifeboatDestination`, `SetLoosenDelay`, `SetRecovery`. The optional **recovery key** (set at registration, or later by the admin while none exists) may propose only `SetAdmin` and `SetRecovery`; the admin cannot cancel those, but the admin with a live guardian quorum replaces the key at once (`replace_recovery`), each key cancels only what it proposed, no key is both a guardian and the recovery key, and a recovery `SetAdmin` makes every earlier admin rotation stale. A change records the version of what it replaces (the vault's limits, the asset record, or the protocol-level value) and executes only if that version has not moved: any change to the same thing since the proposal, an ejection included, makes it `ChangeStale`, and it must be proposed again. Guardians, admin and destination changes are always loosenings; a delay below 72h is refused even before the seal.
+Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin`, `SetLifeboatDestination`, `SetLoosenDelay`, `SetRecovery`. The optional **recovery key** (set at registration, or later by the admin while none exists) may propose only `SetAdmin` and `SetRecovery`; the admin cannot cancel those, but the admin with a live guardian quorum replaces the key at once (`replace_recovery`), each key cancels only what it proposed, and a recovery `SetAdmin` makes every earlier admin rotation stale. Before the seal a recovery-key `SetAdmin` applies at once, like every genesis change. The recovery key is never a guardian: `register_protocol`, `SetRecovery`, `replace_recovery` and `SetGuardians` each refuse a set where one key holds both roles (Floor applies the same rule, `06 §6`). A change records the version of what it replaces (the vault's limits, the asset record, or the protocol-level value) and executes only if that version has not moved: any change to the same thing since the proposal, an ejection included, makes it `ChangeStale`, and it must be proposed again. Guardians, admin and destination changes are always loosenings; a delay below 72h is refused even before the seal. `SetAdmin` refuses the lifeboat destination (and `SetLifeboatDestination` the admin): the key that parks the vault never receives its exit (`InvalidInstruction`, finding 72).
 
 **Return data of `release`** (40 bytes, little-endian): `backed u64 | instant u64 | queued u64 | ticket_id u64 | eta_s i64`.
 - It is set after the last CPI, because every CPI clears return data.
@@ -122,7 +122,8 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 |---|---|---|
 | TransferFeeConfig (1) | Allowed | Deposits credit what was actually received |
 | MintCloseAuthority (3) | Allowed only when the close authority is unset (32 zero bytes) | A set authority can close the mint at supply 0 and recreate the address with a refused extension |
-| InterestBearing (10), MetadataPointer / TokenMetadata (18, 19), group pointers and members (20–23), ScaledUiAmount (25), PermissionedBurn (28) | Allowed | No custody effect |
+| MetadataPointer / TokenMetadata (18, 19), group pointers and members (20–23), PermissionedBurn (28) | Allowed | No custody effect |
+| InterestBearing (10), ScaledUiAmount (25) | Allowed in custody; **never priced** | They change the ratio between UI units and raw units, at the issuer's word and outside the 72h delay. A Pyth price is per UI unit, so the backed lane would value raw amounts at the wrong price. An asset record that allowlists such a mint is refused (`ExtensionNotAllowed`); one that does not (unpriced) is accepted (finding 68) |
 | DefaultAccountState (6) | Allowed unless Frozen | A frozen default would trap the vault account |
 | PermanentDelegate (12) | **Refused** | The delegate could move vault tokens outside Bulkhead (tested) |
 | TransferHook (14) | **Refused** | Arbitrary code in the custody path |
@@ -134,7 +135,7 @@ An **allowlist** of extension types (`ExtensionType` numbers from `spl-token-202
 
 Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and the abort code:
 
-`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048), `InsufficientBalance` (8049), `SealUnderReview` (8050), `ChangeStale` (8051).
+`InvalidInstruction` 8000, `WrongAccountType`, `WrongAddress`, `AlreadyInitialized`, `NotRegistrar`, `NotAdmin`, `NotGuardian`, `NoQuorum`, `MissingSignature`, `WrongCaller`, `WrongVault`, `WrongMint`, `WrongTokenProgram`, `ExtensionNotAllowed`, `RecipientOwnerMismatch`, `BadPriceAccount`, `NotSealed`, `AlreadySealed`, `SealNotExecutable`, `ImportExceedsBalance`, `VaultCountMismatch`, `InvalidLimits`, `InvalidAsset`, `InvalidGuardians`, `DelayBelowMinimum`, `LaneClosed`, `QueueFull`, `Frozen`, `FreezeTooLong`, `TicketNotDue`, `TicketNotPending`, `ExtensionTooLong`, `TicketsPending`, `ChangeNotExecutable`, `ChangeVetoed`, `ChangeExpired`, `ChangeExecuted`, `Abdicated`, `LedgerUnsound`, `LedgerCorrupt`, `NoSlot`, `DuplicateAccount`, `CannotEject`, `GenesisOnly`, `DestinationNotSettled`, `NothingToExit`, `ZeroAmount`, `Overflow` (8047), `DelayAboveMaximum` (8048), `InsufficientBalance` (8049), `SealUnderReview` (8050), `ChangeStale` (8051), `WrongTicket` (8052).
 
 ## 9. The Solana attack classes (`sealevel-attacks`)
 
@@ -154,14 +155,16 @@ Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and th
 
 ## 10. Compute (measured on the real runtime, through Harbor's CPI)
 
+Measured 8 Oct 2026 by `compute_units_are_within_the_spec_targets` (`programs/tests/tests/vault.rs`), on a macOS (arm64) build of this tree. The canonical Linux build orders functions differently, so its figures can differ slightly.
+
 | Path | Compute units | Target |
 |---|---|---|
-| `deposit` | 9,848 (a first deposit, which creates the ledger: ~14–18k) | ≤ 25k |
-| `release`, own deposit (G2 path) | 12,775 | ≤ 35k |
-| `release`, priced borrow with two price pairs | 17,468 | ≤ 90k |
-| `release` that becomes a ticket | 17,843 | — |
-| `settle_ticket` | 4,882 | ≤ 20k |
-| `attest` | 4,977 | — |
+| `deposit` | 10,635 (a first deposit, which creates the ledger: 14,536) | ≤ 25k |
+| `release`, own deposit (G2 path) | 13,760 | ≤ 35k |
+| `release`, priced borrow with two price pairs | 18,414 | ≤ 90k |
+| `release` that becomes a ticket | 18,844 | — |
+| `settle_ticket` | 5,732 | ≤ 20k |
+| `attest` | 5,554 | — |
 | Ten payouts in one transaction (S8) | < 1.4M (the transaction limit) | — |
 
 Framework decision (D13, revised 27 Sep): **Pinocchio for both programs.** Floor showed the approach works: 56 KB, a 10k-CU stop, zero framework code. Both programs share one dependency (the verified core) and one test harness. The cost is manual account checks, and each has a negative test.

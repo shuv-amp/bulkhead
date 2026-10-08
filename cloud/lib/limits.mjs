@@ -20,6 +20,27 @@ export function emaUpdate(reference, lastS, balance, nowS, initialized) {
   return bal >= ref ? ref + ((bal - ref) * f) / TAU_S : ref - ((ref - bal) * f) / TAU_S;
 }
 
+const LOW_WINDOW_S = 1_800n;
+
+/**
+ * The program's low-water balance (core `WindowLow::touch`): the least balance
+ * any touch saw, before its operation, in the current and the previous
+ * 30-minute window. Capacity uses min(reference, balance, low), so capital
+ * deposited and taken back around a payout, or parked under a window, cannot
+ * lift the base (docs/09, finding 65). `low` is { prev, cur, window }.
+ */
+export function windowLowTouch(low, balance, nowS, initialized) {
+  const bal = BigInt(balance);
+  const now = BigInt(nowS);
+  // div_euclid: floor division, also for a negative time.
+  const w = now >= 0n ? now / LOW_WINDOW_S : -((-now + LOW_WINDOW_S - 1n) / LOW_WINDOW_S);
+  const window = BigInt(low.window);
+  if (!initialized || w > window + 1n) return { prev: bal, cur: bal, window: w };
+  if (w === window + 1n) return { prev: BigInt(low.cur), cur: bal, window: w };
+  const cur = BigInt(low.cur);
+  return { prev: BigInt(low.prev), cur: bal < cur ? bal : cur, window };
+}
+
 export function capacityFromRef(reference, bps, floor, cap) {
   let c = (BigInt(reference) * BigInt(bps)) / BPS;
   if (c > U64_MAX) c = U64_MAX;
@@ -59,10 +80,16 @@ export function maxUnbackedOver(params, tMs) {
 
 /** What `attest` returns, computed from a decoded vault and protocol. */
 export function attestLocal(vault, protocol, balance, nowS) {
+  // Same base as the program (`unbacked_base`): min(EMA, live balance,
+  // low-water balance) after a touch (docs/15, A1; docs/09, finding 65). An
+  // account from an older build has no low-water balance: the touch starts it.
   const reference = emaUpdate(vault.refBalance, vault.refUpdatedS, balance, nowS, vault.refInitialized);
-  // Same base as the program: min(reference, live balance) (docs/15, A1).
   const live = BigInt(balance);
-  const params = paramsFromConfig(vault.limits, reference < live ? reference : live);
+  const l = windowLowTouch(vault.low ?? { prev: 0n, cur: 0n, window: 0n }, balance, nowS, vault.refInitialized && vault.low !== undefined);
+  const low = l.prev < l.cur ? l.prev : l.cur;
+  let base = reference < live ? reference : live;
+  if (low < base) base = low;
+  const params = paramsFromConfig(vault.limits, base);
   const frozenUntil = Math.max(protocol.frozenUntil, vault.frozenUntil);
   const nowMs = BigInt(nowS) * 1000n;
   const cap = (x) => (x > U64_MAX ? U64_MAX : x);

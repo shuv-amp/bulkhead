@@ -78,6 +78,51 @@ export async function signatureWalkSinceSlot(fetchPage, { slot, seen = new Set()
   return out;
 }
 
+/**
+ * One poll of an account followed on its own (a watched Floor config).
+ * `cursor` is the last signature read ({ signature, slot }), or null for none
+ * yet. Returns `{ sigs, cursor, status }`, `sigs` newest-first as pages come:
+ *   "anchored": no cursor; it is now the newest signature, and nothing is read
+ *   "empty":    no cursor, and the node returned no signature: still none, ask
+ *               again next poll. A null cursor used to stay, and the next
+ *               walk had no `until`: the config's whole history, read live
+ *               (old proposals vetoed again, old recovery keys alerted)
+ *   "ok":       every signature after the cursor
+ *   "gap":      a restart resuming a saved cursor walks back only to
+ *               `oldestWanted` (the Vault startup's bound), and stopped there
+ *               before reaching the cursor: what lies between was not read
+ *   "gone":     the node no longer has the cursor; re-anchored at the newest,
+ *               and nothing in between was read
+ * (docs/09, finding 71).
+ */
+export async function followAccount(fetchPage, { cursor = null, oldestWanted = null, limit = SIG_PAGE } = {}) {
+  const anchor = async (status) => {
+    const newest = (await fetchPage({ limit: 1, commitment: "confirmed" }))?.[0];
+    if (!newest) return { sigs: [], cursor: null, status: status === "gone" ? "gone" : "empty" };
+    return { sigs: [], cursor: { signature: newest.signature, slot: newest.slot ?? 0 }, status };
+  };
+  if (!cursor?.signature) return anchor("anchored");
+  const out = [];
+  let before;
+  try {
+    for (;;) {
+      const page = await fetchPage(pageQuery({ before, until: cursor.signature, limit }));
+      if (!page?.length) break;
+      out.push(...page);
+      if (page.length < limit) break;
+      const oldest = page.at(-1).blockTime;
+      if (oldestWanted != null && oldest != null && oldest < oldestWanted) return { sigs: out, cursor, status: "gap" };
+      const next = page.at(-1).signature;
+      if (next === before) throw new Error(`signature walk made no progress before ${next}`);
+      before = next;
+    }
+  } catch (e) {
+    if (!cursorGone(e, cursor.signature)) throw e;
+    return anchor("gone");
+  }
+  return { sigs: out, cursor, status: "ok" };
+}
+
 /** Process one oldest-first signature batch, checkpointing only completed items. */
 export async function ingestSignatures(signatures, ingestOne, checkpoint = () => {}) {
   for (const signature of [...signatures].reverse()) {

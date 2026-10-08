@@ -32,9 +32,11 @@ function run({ hours, policy, want }) {
   const paid = [];
   let taken = 0n;
   for (let now = 0; now < hours * 3_600; now += TICK_S) {
-    ref = emaUpdate(ref, refAt, balance, now, true);
+    ref = emaUpdate(ref, refAt, balance, now, true); // the program's touch_reference
     refAt = now;
-    const p = paramsFromConfig(LIMITS, ref);
+    // The program's base: min(reference, balance, low-water). Only outflows
+    // here, so the balance is never above the low-water balance.
+    const p = paramsFromConfig(LIMITS, ref < balance ? ref : balance);
     const nowMs = BigInt(now) * 1000n;
     const hourPaid = paid.filter((x) => now - x.t <= 3_600).reduce((a, x) => a + x.u, 0n);
     const dayPaid = paid.filter((x) => now - x.t <= 86_400).reduce((a, x) => a + x.u, 0n);
