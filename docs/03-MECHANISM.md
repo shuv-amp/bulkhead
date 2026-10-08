@@ -174,7 +174,7 @@ For an allowlisted mint with a valid Pyth `PriceUpdateV2`, the program checks:
 - the account owner is the Pyth receiver program (`rec5EKMG…`) or its Pyth Pro-compatible deployment (`rec2HHDD…`);
 - verification level is Full;
 - the feed id matches the asset config;
-- `now − publish_time ≤ max_age`;
+- `0 ≤ now − publish_time ≤ max_age` (a publish time ahead of Solana's clock counts as unusable: fail closed. On mainnet a pushed update's publish time equals the cluster clock of the slot it lands in (7 Oct, SOL/USD), so this only delays a client that posts and uses an update within the same second; it retries);
 - `conf · 10 000 ≤ max_conf_bps · price`.
 
 Then:
