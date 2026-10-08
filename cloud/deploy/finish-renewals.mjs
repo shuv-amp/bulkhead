@@ -49,6 +49,10 @@ function refusal(e) {
   return err ? errorName(err) : e.message.slice(0, 160);
 }
 
+// What each renewal is (change kinds: programs/vault/src/state.rs). Anything
+// else under that id is not a renewal and is never executed here, nor
+// reported as one.
+const EXPECTED = new Map([[0n, [2, "SetGuardians"]], [1n, [6, "SetRecovery"]]]);
 for (const id of [0n, 1n]) {
   const [address] = await findPda(["change", key(world.protocol), u64le(id)], vaultProgram);
   const acc = await rpc.account(address);
@@ -58,6 +62,12 @@ for (const id of [0n, 1n]) {
     continue;
   }
   const c = decodeChange(acc.bytes);
+  const [kind, kindName] = EXPECTED.get(id);
+  if (c.kind !== kind) {
+    console.log(`market change ${id}: kind ${c.kind} (target ${c.target}), not the ${kindName} renewal; not executed`);
+    failed++;
+    continue;
+  }
   if (c.executed) {
     console.log(`market change ${id}: already executed`);
     continue;
@@ -94,7 +104,9 @@ if (floorProgram && protectedProgram) {
     failed++;
     // This script executes configuration changes; an upgrade or restore
     // (kinds 1 and 2) needs its buffer and is not one of the renewals.
-    if (f.pendingKind === 1 || f.pendingKind === 2) console.log(`floor: the pending proposal is an upgrade or restore (kind ${f.pendingKind}), not a renewal; not executed here`);
+    // The renewal is a new guardian set (kind 4). Anything else pending (an
+    // upgrade, a new owner or recovery key) is someone else's, not executed here.
+    if (f.pendingKind !== 4) console.log(`floor: the pending proposal is kind ${f.pendingKind}, not the guardian renewal (SetGuardians, 4); not executed here`);
     else if (f.pendingVetoed) console.log(`floor: proposal ${f.pendingId} vetoed; propose it again`);
     else if (now >= f.pendingExpires) console.log(`floor: proposal ${f.pendingId} expired at ${iso(f.pendingExpires)}; propose it again`);
     else if (now < f.pendingEta) console.log(`floor: proposal ${f.pendingId} not due until ${iso(f.pendingEta)}`);

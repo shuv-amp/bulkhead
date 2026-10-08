@@ -30,7 +30,11 @@ for pair in "$@"; do
   name="${pair#*=}"
   local_so="target/deploy/$name.so"
   case "$name" in *.so) local_so="$name" ;; esac
-  solana program dump --url "$URL" "$id" "$T/$id.so" > /dev/null
+  if ! solana program dump --url "$URL" "$id" "$T/$id.so" > /dev/null; then
+    echo "MISMATCH  $id: cannot dump it (not a deployed program, or the RPC failed)"
+    bad=1
+    continue
+  fi
   if python3 - "$local_so" "$T/$id.so" <<'PY'
 import hashlib, sys
 sys.path.insert(0, "reference")
@@ -42,25 +46,39 @@ sys.exit(0 if ok else 1)
 PY
   then :; else bad=1; fi
   auth=$(python3 - "$URL" "$id" <<'PY'
-# The programdata header (loader-v3): tag 3, slot, Option<authority> at 12.
+# The program account (loader-v3, tag 2) names its programdata, whose header
+# holds Option<authority> at 12. Read at "confirmed", as the CLI deploys and
+# dumps: right after a deploy the account is not finalized yet.
 import base64, json, sys, urllib.request
 A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+LOADER = "BPFLoaderUpgradeab1e11111111111111111111111"
 def b58(b):
     n, s = int.from_bytes(b, "big"), ""
     while n:
         n, r = divmod(n, 58)
         s = A[r] + s
     return "1" * (len(b) - len(b.lstrip(b"\0"))) + s
-def data(addr):
-    req = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [addr, {"encoding": "base64"}]}
+def account(addr):
+    req = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [addr, {"encoding": "base64", "commitment": "confirmed"}]}
     r = urllib.request.Request(sys.argv[1], json.dumps(req).encode(), {"Content-Type": "application/json"})
-    return base64.b64decode(json.load(urllib.request.urlopen(r, timeout=30))["result"]["value"]["data"][0])
-pd = data(b58(data(sys.argv[2])[4:36]))
-print(b58(pd[13:45]) if pd[12] == 1 else "none")
+    v = json.load(urllib.request.urlopen(r, timeout=30))["result"]["value"]
+    if v is None or v["owner"] != LOADER:
+        raise SystemExit(f"error: {addr} is not a loader-v3 account")
+    return base64.b64decode(v["data"][0])
+try:
+    prog = account(sys.argv[2])
+    if prog[:4] != b"\2\0\0\0":
+        raise SystemExit("error: not a loader-v3 program account")
+    pd = account(b58(prog[4:36]))
+    print(b58(pd[13:45]) if pd[12] == 1 else "none")
+except SystemExit:
+    raise
+except Exception as e:
+    raise SystemExit(f"error: {e}")
 PY
-)
+) || auth="unreadable"
   echo "        upgrade authority $auth"
-  if [ -n "${EXPECT_AUTHORITY:-}" ] && [ "$auth" != "$EXPECT_AUTHORITY" ]; then
+  if [ "$auth" = unreadable ] || { [ -n "${EXPECT_AUTHORITY:-}" ] && [ "$auth" != "$EXPECT_AUTHORITY" ]; }; then
     echo "MISMATCH  $id: upgrade authority $auth, expected $EXPECT_AUTHORITY"
     bad=1
   fi

@@ -16,7 +16,9 @@ else
   scripts/build-programs-docker.sh > /dev/null
   DIR=target/docker
 fi
-SKIP_BUILD=1 exec scripts/verify-deployed.sh "$RPC" \
+# All three are upgraded by the team key disclosed in SECURITY.md.
+SKIP_BUILD=1 EXPECT_AUTHORITY="${EXPECT_AUTHORITY:-71tqq65ovwE4akm8T5UhfkGE1fJ7qBx5wid11Z5GbHBP}" \
+  exec scripts/verify-deployed.sh "$RPC" \
   "HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E=$DIR/bulkhead_floor.so" \
   "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b=$DIR/bulkhead_vault.so" \
   "6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh=$DIR/bulkhead_harbor.so"

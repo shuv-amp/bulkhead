@@ -12,6 +12,9 @@ while IFS= read -r f; do
   case "$f" in
     .github/*|scripts/ci-changes.sh|rust-toolchain.toml|*/rust-toolchain.toml)
       all ;;
+    # Cargo configuration changes every build (flags, profiles, sources).
+    .cargo/config|.cargo/config.toml|*/.cargo/config.toml)
+      all ;;
     cloud/guardian/*.service)
       workflows=true ;;
   esac
