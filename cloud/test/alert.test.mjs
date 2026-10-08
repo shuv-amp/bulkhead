@@ -18,6 +18,8 @@ test("actions, errors and urgent warnings alert; routine lines do not", () => {
   assert.equal(alertFor({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short" }, seen, 0).severity, "warning");
   assert.equal(alertFor({ level: "warn", msg: "the recovery key was replaced by the admin with a guardian quorum" }, seen, 0).severity, "warning");
   assert.ok(alertFor({ level: "error", msg: "this key is no longer a live guardian" }, seen, 0));
+  // A key that cannot heartbeat at all needs a person before it is dead.
+  assert.ok(alertFor({ level: "warn", msg: "no heartbeat sent: the account does not exist or this key is not on its guardian list", target: "vault" }, seen, 0));
 });
 
 test("repeats are suppressed for the window, freezes never", () => {

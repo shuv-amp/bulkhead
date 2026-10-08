@@ -826,6 +826,12 @@ export function guardianStanding(account, guardian, nowS) {
 
 export const HEARTBEAT_RETRY_MS = 15_000;
 export const HEARTBEAT_RETRY_MAX_MS = 600_000;
+/**
+ * Failed heartbeats in a row before one is logged as an error, which alerts.
+ * A warning does not, so a key whose heartbeats kept failing used to go quiet
+ * until it was already dead (the "no longer a live guardian" error).
+ */
+export const HEARTBEAT_ALERT_AFTER = 3;
 /** How often an absent or dead key's standing is read again. Nothing is sent. */
 export const HEARTBEAT_RECHECK_MS = 3_600_000;
 
