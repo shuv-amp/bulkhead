@@ -1982,6 +1982,9 @@ fn every_account_substitution_is_refused() {
     );
     let mut ok = vec![payer_free(H + 7)];
     ok.extend(unqueued.iter().map(|a| any(a.at, a.why)));
+    // The owner's signature after the price pair: read only for a loan, so an
+    // own-deposit withdrawal takes any key there (finding 74).
+    ok.push(any(H + 12, "owner's signature: consulted only for a loan"));
     s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &ok);
 
     let payee = w.user();
@@ -3090,4 +3093,45 @@ fn an_abdicated_recovery_key_can_still_be_removed() {
     let ix = w.m.replace_recovery_ix(&admin, &Keypair::new().pubkey(), &[g0, g1]);
     assert_eq!(w.env.fails(&[ix], &signers), verr::ABDICATED);
     w.env.ok(&[w.m.replace_recovery_ix(&admin, &Address::default(), &[g0, g1])], &signers);
+}
+
+/// Finding 74: a backed loan needs the borrower's signature. A compromised
+/// caller paying USDC to a SOL holder used to create that loan in the
+/// holder's name, through the backed lane, during a freeze: the USDC vault
+/// drained to holders who never asked, and their own SOL lost its instant
+/// exit. Now the payout is unbacked (queued behind the freeze), the lender's
+/// own exit and the holder's own SOL are untouched, and a borrow the holder
+/// signs is still backed.
+#[test]
+fn a_backed_loan_needs_the_borrowers_signature() {
+    let mut w = World::new();
+    let lender = w.user();
+    let lender_acc = w.deposit("usdc", &lender, 1_000_000 * USDC);
+    let holder = w.user();
+    let holder_sol = w.deposit("sol", &holder, 700 * SOL);
+    w.seal();
+    let both = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+    let g0 = w.m.g[0].pubkey();
+    let freeze = w.m.freeze_ix(&g0, None, 86_400);
+    w.env.ok(&[freeze], &[&w.m.g[0]]);
+    // The admin pays the holder 50,000 USDC: no signature, so not a loan.
+    let holder_usdc = w.account("usdc", &holder.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
+    let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!((o.backed, o.instant, o.queued), (0, 0, 50_000 * USDC), "unbacked: queued behind the freeze");
+    assert_eq!(w.env.balance(&holder_usdc), 0);
+    // The lender's own exit and the holder's own SOL, during the freeze.
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &lender.pubkey(), &lender_acc, 1_000_000 * USDC, &w.usdc_prices(false));
+    w.env.ok(&[ix], &[&lender]);
+    assert_eq!(w.env.balance(&lender_acc), 1_000_000 * USDC);
+    let sol_only = vec![(w.sol.asset, SYSTEM)];
+    let ix = w.m.withdraw_ix(&w.env, &w.sol, &holder.pubkey(), &holder_sol, 100 * SOL, &sol_only);
+    let o = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!(o.backed, 100 * SOL, "own SOL: backed, no prices, frozen");
+    // A borrow the holder signs is backed.
+    let lender2 = w.user();
+    w.deposit("usdc", &lender2, 1_000_000 * USDC);
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, 10_000 * USDC, &both);
+    let o = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!(o.backed, 10_000 * USDC, "signed: a backed loan against the SOL");
 }

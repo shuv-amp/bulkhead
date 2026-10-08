@@ -487,7 +487,11 @@ impl Market {
     /// A user withdraws `amount` to their own token account through Harbor.
     pub fn withdraw_ix(&self, env: &Env, v: &VaultRef, user: &Address, to: &Address, amount: u64, prices: &[(Address, Address)]) -> Instruction {
         let (nonce, _) = self.next_ticket(env);
-        self.harbor_ix(2, &release_args(amount, nonce), vec![AccountMeta::new_readonly(*user, true)], self.release_accounts_with(env, v, to, user, prices, nonce))
+        // The user also signs the Vault's release: a backed loan beyond its own
+        // balance needs the owner's signature (finding 74).
+        let mut vault_accounts = self.release_accounts_with(env, v, to, user, prices, nonce);
+        vault_accounts.push(AccountMeta::new_readonly(*user, true));
+        self.harbor_ix(2, &release_args(amount, nonce), vec![AccountMeta::new_readonly(*user, true)], vault_accounts)
     }
 
     /// Harbor's admin orders a payout to anyone (the Drift path).
