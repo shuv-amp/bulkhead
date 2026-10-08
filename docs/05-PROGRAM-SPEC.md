@@ -65,7 +65,7 @@ The seal waits 72h so anyone can compare the imported backing (public events) wi
 | 3 | `import_backing(amount)` | admin | genesis only | Credits `Backing[owner]`; `vault.imported += amount` |
 | 4 / 6 / 5 | `propose_seal` / `veto_seal` / `execute_seal` | admin / live guardian / anyone | execute: after the delay, not vetoed, not expired; every vault, vault token account, and lifeboat token PDA passed exactly once; `imported + total_in ≤ vault balance + actual spendable lifeboat balance`, where the lifeboat balance excludes what a live (unvetoed) exit will take | `sealed = true` |
 | 7 | `deposit(amount)` | caller + source authority | accounts match the vault; source ≠ vault account | Reference and low-water update (`03 §3`); `transfer_checked`; credits the amount actually **received** (transfer fees) to `Backing[source authority]`; returns `received` |
-| 8 | `release(amount, nonce)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. |
+| 8 | `release(amount, nonce)` | caller | sealed; the recipient's mint matches; `(Asset PDA, price)` pairs for the released mint and every mint in the recipient owner's ledger, in ledger order | Backed part `b` from the ledger (§5), unbacked `u = amount − b` through the limiter: instant, or a `Ticket`, or the **whole instruction fails** (`LaneClosed`, `QueueFull`). Pays `b + instant`. A backed part beyond the owner's own balance of the released mint is a loan to the owner: it is backed only if the recipient's owner signed (as any account of this instruction); otherwise that excess is unbacked (finding 74). Own-deposit exits need no signature. |
 | 23 | `quote_release(amount)` | none | as `release` | The same outcome as return data, no writes (for `simulateTransaction`) |
 | 9 | `settle_ticket` | anyone | `now ≥ ETA`; not frozen (protocol or vault); the stored recipient and payer | Pays the ticket; closes it (rent to its payer) |
 | 10 | `cancel_ticket(id)` | live guardian (not the admin: a stolen admin key could cancel every queued withdrawal, A4) | ticket of this vault; its id equals the expected id (u64 LE in the data), else `WrongTicket` | Closes it; **no refund** of the reservation (G1 depends on it) |
@@ -159,7 +159,7 @@ Measured 8 Oct 2026 by `compute_units_are_within_the_spec_targets` (`programs/te
 
 | Path | Compute units | Target |
 |---|---|---|
-| `deposit` | 10,635 (a first deposit, which creates the ledger: 14,536) | ≤ 25k |
+| `deposit` | 10,635 (a first deposit, which creates the ledger: 14,536, plus ~1,500 per step its backing PDA's bump sits below 255, so up to ~28k for a rare low bump; finding 75) | ≤ 25k typical |
 | `release`, own deposit (G2 path) | 13,760 | ≤ 35k |
 | `release`, priced borrow with two price pairs | 18,414 | ≤ 90k |
 | `release` that becomes a ticket | 18,844 | — |
