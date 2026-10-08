@@ -74,6 +74,10 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           DRAFT: ${{ github.event.pull_request.draft }}
         run: |
+          # The selector is piped into tee: without pipefail its failure would
+          # leave the outputs missing, and every job they gate would be
+          # skipped, which the gate counts as passed.
+          set -o pipefail
           if [ "$EVENT" = pull_request ]; then
             # The files of the pull request, from the API (no history to fetch).
             # A rename's old path counts too: moving a file out of a job's
