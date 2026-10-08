@@ -490,9 +490,15 @@ export function pendingCancels(state, policy = DEFAULT_POLICY) {
  * A freeze that is already on chain retires a local send that failed or timed
  * out. Leaving it queued would freeze the protocol again when that freeze thaws,
  * with no new breach.
+ *
+ * The breach it was sent for is still an incident (`state`). A send reported
+ * "not confirmed" can land later, and only a confirmed send used to open the
+ * incident, so that freeze ran out after 24h with no hold behind it.
  */
-export function retirePendingFreeze(pending, chainFrozenUntil, now) {
-  return pending && chainFrozenUntil > now ? null : pending;
+export function retirePendingFreeze(pending, chainFrozenUntil, now, state = null) {
+  if (!pending || chainFrozenUntil <= now) return pending;
+  if (state) openIncident(state, now);
+  return null;
 }
 
 /** Judge the startup window at the later of the wall clock and the newest outflow. */

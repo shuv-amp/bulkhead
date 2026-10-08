@@ -782,7 +782,8 @@ async function syncFromChain(act, { startup = false } = {}) {
   observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil);
   lastChainFrozenUntil = p.frozenUntil;
   state.frozenUntil = p.frozenUntil;
-  pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now);
+  pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now, state);
+  saveIncident();
   if (p.frozenUntil > now) state.freezing = false;
   const frozen = p.frozenUntil > now;
   const newFreeze = frozen && p.frozenUntil !== sweptFreezeUntil;
