@@ -244,6 +244,19 @@ test("a freeze already on chain retires a failed local freeze", () => {
   assert.equal(retirePendingFreeze(null, 90_000, 1_000), null);
 });
 
+test("a failed freeze that landed after all opens the incident", () => {
+  // The send timed out ("not confirmed") but the freeze landed: the hold must
+  // renew it like any confirmed breach freeze.
+  const s = newState();
+  retirePendingFreeze({ action: { type: "freeze" } }, 90_000, 1_000, s);
+  assert.equal(s.incidentSince, 1_000);
+  assert.ok(incidentHold(s, 1_000 + 3_000, 87_000, { ...DEFAULT_POLICY, holdIncidentS: 7 * 86_400 }));
+  // Nothing pending, nothing opened.
+  const quiet = newState();
+  retirePendingFreeze(null, 90_000, 1_000, quiet);
+  assert.equal(quiet.incidentSince ?? null, null);
+});
+
 test("startup judges a breach at the chain time when the wall clock is behind", () => {
   const s = newState();
   assess(s, released({ instant: 250_000n * USDC }), { worst1h, now: 9_800 }, DEFAULT_POLICY, false);

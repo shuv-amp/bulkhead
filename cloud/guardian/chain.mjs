@@ -193,6 +193,8 @@ export function freshVaultOutflow(drop, settling, windowed) {
  * is not counted. A settlement's own payout is never also an allowlist
  * credit, so one transfer cannot be subtracted twice; and only tokens that
  * came out of the vault earn that credit, not tokens sent there from elsewhere.
+ * Without the inner instructions there is no telling which is which, so no
+ * allowlist credit is given at all: the whole drop counts.
  *
  * Returns `{ outflows: Map(mint -> amount), closed: ticket ids settled here }`.
  */
@@ -201,7 +203,6 @@ export function truncatedOutflows(tx, { vaultProgram, tokenMints, vaultOf, known
   const payees = new Set([...settling.values()].filter(Boolean));
   const transfers = vaultTransfersOut(tx, tokenMints);
   const drops = vaultOutflows(tx, tokenMints);
-  const increases = transfers ? null : tokenIncreases(tx, new Set(tokenMints.keys()));
   const sum = (rows) => rows.reduce((total, row) => total + row.amount, 0n);
   const mints = new Set([...drops.keys(), ...(transfers ?? []).map((t) => t.mint)]);
   const outflows = new Map();
@@ -214,7 +215,10 @@ export function truncatedOutflows(tx, { vaultProgram, tokenMints, vaultOf, known
     const base = gross > toVault ? gross - toVault : 0n;
     const rows = known.filter((k) => k.mint === mint);
     const fresh = freshVaultOutflow(base, settling, rows);
-    const credits = (transfers ? out : increases.filter((r) => r.mint === mint)).filter((r) => !payees.has(r.address));
+    // Without the inner instructions, nothing says where a token gain came
+    // from: an attacker's own tokens sent to an allowlisted owner in the same
+    // transaction would cancel a drain. So that case earns no credit.
+    const credits = out.filter((r) => !payees.has(r.address));
     const countable = countedAfterAllowlist(fresh, credits, allowlist);
     if (countable > 0n) outflows.set(mint, countable);
   }

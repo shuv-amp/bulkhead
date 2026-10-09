@@ -71,7 +71,7 @@ import { basename, dirname } from "node:path";
 import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll } from "./alert.mjs";
@@ -351,7 +351,8 @@ async function beatOne(id, read, ix, logged) {
       log({ ...logged, signature });
       outcome = "sent";
     } catch (e) {
-      log({ level: "warn", msg: `${logged.action} failed: ${e.message}` });
+      const failures = b.failures + 1;
+      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, target: logged.target, failures });
       outcome = "failed";
     }
   }
@@ -915,7 +916,8 @@ async function syncFromChain(act, { startup = false } = {}) {
   observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil);
   lastChainFrozenUntil = p.frozenUntil;
   state.frozenUntil = p.frozenUntil;
-  pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now);
+  pendingFreeze = retirePendingFreeze(pendingFreeze, p.frozenUntil, now, state);
+  saveIncident();
   if (p.frozenUntil > now) state.freezing = false;
   const frozen = p.frozenUntil > now;
   const newFreeze = frozen && p.frozenUntil !== sweptFreezeUntil;
