@@ -49,7 +49,7 @@ while IFS= read -r f; do
   case "$f" in
     # The guardian on a real validator, against the programs as built: what it
     # runs, the programs and core it acts on, the world and build it starts from.
-    cloud/guardian/*|cloud/lib/*|cloud/e2e/*|programs/*|crates/*|scripts/build-programs.sh|scripts/build-harbor.sh)
+    cloud/guardian/*|cloud/lib/*|cloud/e2e/*|programs/*|crates/*|scripts/build-programs.sh|scripts/build-harbor.sh|Cargo.toml|Cargo.lock|.cargo/*)
       scenarios=true ;;
   esac
   case "$f" in

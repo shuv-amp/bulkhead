@@ -84,7 +84,15 @@ jobs:
             # paths must still run that job.
             gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' > files.txt
             echo "changed files: $(wc -l < files.txt)"
-            scripts/ci-changes.sh < files.txt | tee -a "$GITHUB_OUTPUT"
+            # The files API lists at most 3,000 files: past that the list is
+            # cut, and a path left off it could skip its job. Run everything.
+            total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files)
+            if [ "$total" -ge 3000 ]; then
+              echo "$total files changed (the API lists at most 3,000): every job"
+              for j in programs fuzz kani mutants deny workflows devnet scenarios; do echo "$j=true"; done | tee -a "$GITHUB_OUTPUT"
+            else
+              scripts/ci-changes.sh < files.txt | tee -a "$GITHUB_OUTPUT"
+            fi
             echo "heavy=$([ "$DRAFT" = true ] && echo false || echo true)" | tee -a "$GITHUB_OUTPUT"
           else
             for j in programs fuzz kani mutants deny workflows devnet scenarios heavy; do echo "$j=true"; done | tee -a "$GITHUB_OUTPUT"

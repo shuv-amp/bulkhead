@@ -536,6 +536,7 @@ impl Floor {
                 AccountMeta::new(*buffer, false),
                 AccountMeta::new_readonly(self.authority, false),
                 AccountMeta::new_readonly(LOADER_V3, false),
+                AccountMeta::new_readonly(self.programdata, false),
             ],
         )
     }

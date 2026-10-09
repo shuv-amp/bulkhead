@@ -545,6 +545,34 @@ fn release_authority_hands_the_key_back_after_the_delay() {
     assert_eq!(env.account(&p.owner.pubkey()).lamports, before + rent + config_rent);
 }
 
+/// Finding 85: a stolen owner key re-pins and closes the old pin in one
+/// transaction, ahead of a guardian's stop naming that pin. The close used to
+/// pass (the old pin was an "orphan"), the stop then failed with
+/// `SnapshotMismatch`, and the owner could repeat it every slot. A buffer
+/// identical to the live code is never closed while the program is live.
+#[test]
+fn the_owner_cannot_close_a_pin_a_stop_may_name() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let owner = p.owner.pubkey();
+    let spare = env.write_buffer(&honest_v1(), &p.owner);
+    env.set_buffer_authority(&spare, &p.owner, &f.authority);
+    // Re-pin and close the old pin, together, ahead of the stop.
+    let attack = [f.pin_snapshot(&spare), f.close_buffer(&owner, &p.snapshot)];
+    assert_eq!(env.fails(&attack, &[&p.owner]), err::BUFFER_IN_USE);
+    // The re-pin alone lands; the guardian's stop naming the old pin still works.
+    env.ok(&[f.pin_snapshot(&spare)], &[]);
+    assert_eq!(env.fails(&[f.close_buffer(&owner, &p.snapshot)], &[&p.owner]), err::BUFFER_IN_USE);
+    env.next_slot();
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    assert!(env.call(&f.program).is_err());
+    // Stopped: a spare is no stop's any more; it can go (the pin stays).
+    env.ok(&[f.close_buffer(&owner, &spare)], &[&p.owner]);
+    assert_eq!(env.fails(&[f.close_buffer(&owner, &p.snapshot)], &[&p.owner]), err::BUFFER_IN_USE);
+}
+
 /// Issue #37: a pin replaced or cleared, and a proposal's buffer orphaned by a
 /// cancel, kept their rent locked under Floor's authority for good. The owner
 /// now closes them; the stop, the pin and the pending proposal's buffer never.
@@ -584,21 +612,23 @@ fn orphaned_buffers_return_their_rent_to_the_owner() {
     assert!(gone(&env, &v2));
     assert_eq!(env.account(&owner).lamports, before + rent);
 
-    // A re-pin orphans the old pin.
+    // A re-pin leaves the old pin a spare: still identical to the live code,
+    // so a stop in flight may name it, and it stays while the code runs
+    // (finding 85).
     let pin2 = env.write_buffer(&honest_v1(), &p.owner);
     env.set_buffer_authority(&pin2, &p.owner, &f.authority);
     env.ok(&[f.pin_snapshot(&pin2)], &[]);
-    env.ok(&[f.close_buffer(&owner, &p.snapshot)], &[&p.owner]);
-    assert!(gone(&env, &p.snapshot));
+    assert_eq!(env.fails(&[f.close_buffer(&owner, &p.snapshot)], &[&p.owner]), err::BUFFER_IN_USE);
 
-    // An upgrade orphans the pin it replaced.
+    // An upgrade changes the code: both old pins can go.
     let v3 = env.write_buffer(&honest_fix(), &p.owner);
     env.set_buffer_authority(&v3, &p.owner, &f.authority);
     env.ok(&[f.propose(&owner, UPGRADE, &v3, &[], Some(&v3))], &[&p.owner]);
     env.advance(3 * DAY);
     env.ok(&[f.execute_code(&v3, &owner)], &[]);
     env.ok(&[f.close_buffer(&owner, &pin2)], &[&p.owner]);
-    assert!(gone(&env, &pin2));
+    env.ok(&[f.close_buffer(&owner, &p.snapshot)], &[&p.owner]);
+    assert!(gone(&env, &pin2) && gone(&env, &p.snapshot));
 
     // The stop still works after all of it.
     env.next_slot();

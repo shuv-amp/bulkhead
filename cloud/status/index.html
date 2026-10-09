@@ -140,6 +140,12 @@ function floorPending(fl, now) {
     : `${name}, <span class="bad">executable now</span>; any live guardian can veto`;
 }
 
+// Program ids published in SECURITY.md. A link may name any program: a copy
+// of the Vault deployed by anyone has the same layout and can report itself
+// sealed, guarded and safe (docs/09, finding 85).
+const KNOWN_VAULTS = { HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b: "the devnet deployment" };
+const KNOWN_FLOORS = { HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E: "the devnet deployment" };
+
 async function render() {
   const f = Object.fromEntries(new FormData(form));
   if (!f.rpc || !f.vault || !f.protocol || !f.mints) return;
@@ -151,7 +157,14 @@ async function render() {
   const live = protocol.guardians.filter((_, i) => now - protocol.lastHeartbeat[i] <= protocol.heartbeatIntervalS).length;
   let html = "";
   let headline = [];
-  for (const mint of f.mints.split(",").map((m) => m.trim()).filter(Boolean)) {
+  const mints = f.mints.split(",").map((m) => m.trim()).filter(Boolean);
+  const warnings = [];
+  if (!KNOWN_VAULTS[f.vault]) warnings.push(`The Vault program ${esc(f.vault)} is not a published Bulkhead deployment (SECURITY.md). Anyone can deploy a copy that reports itself safe: trust nothing below until you have checked this id.`);
+  if (f.floor && !KNOWN_FLOORS[f.floor]) warnings.push(`The Floor program ${esc(f.floor)} is not a published Bulkhead deployment (SECURITY.md).`);
+  // The headline sums only the vaults named in the link: one left out is
+  // money the page does not count (finding 85).
+  if (mints.length < protocol.vaultCount) warnings.push(`This protocol has ${esc(protocol.vaultCount)} vaults; the link names ${mints.length}, so the worst case below leaves some out. Add every mint.`);
+  for (const mint of mints) {
     const { vault, vaultTokens } = await vc.vault(mint);
     const v = decodeVault((await rpc.account(vault)).bytes);
     const tokens = await rpc.account(vaultTokens);
@@ -209,13 +222,17 @@ async function render() {
         <div class="row"><span>L2BEAT Security Council bar</span><span class="${councilBar ? "ok" : "warn"}">${councilBar ? "met" : "not met"}: ${n} guardians, quorum ${fl.threshold} (bar: ≥ 8, ≥ 75%; outside members not visible on-chain)</span></div>
         <div class="row"><span>Pending proposal</span><span>${floorPending(fl, now)}</span></div>
       </div>`;
+    } else {
+      // It used to vanish without a word.
+      html += `<div class="card"><h2>Floor · upgrade key</h2><div class="big bad">Not under Floor</div><div class="row"><span>No Floor config for</span><span class="mono">${esc(f.protected)}</span></div></div>`;
     }
   }
   // Whose data this is and from when: a link can name any RPC, and a stale
   // page must not pass for a live one.
   const host = (() => { try { return new URL(f.rpc).host; } catch { return f.rpc; } })();
-  const source = `<p class="mono">Read from ${esc(host)} at slot ${esc(slot)}, chain time ${new Date(now * 1000).toLocaleString()} (shown ${new Date().toLocaleTimeString()}). Trust it only as far as you trust that RPC.</p>`;
-  return `<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p>${source}<div class="grid">${html}</div>`;
+  const source = `<p class="mono">Read from ${esc(host)} at slot ${esc(slot)}, chain time ${new Date(now * 1000).toLocaleString()} (shown ${new Date().toLocaleTimeString()}). Vault program ${esc(f.vault)}${KNOWN_VAULTS[f.vault] ? ` (${KNOWN_VAULTS[f.vault]})` : ""}, protocol ${esc(f.protocol)}, mints ${esc(mints.join(", "))}. Trust it only as far as you trust that RPC and these ids.</p>`;
+  const banner = warnings.map((w) => `<p class="headline bad">${w}</p>`).join("");
+  return `${banner}<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p>${source}<div class="grid">${html}</div>`;
 }
 
 // One refresh at a time on the timer, and only the newest result is shown: a

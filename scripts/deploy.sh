@@ -75,7 +75,9 @@ verify_one() {
   if [ "${LOADER:-cli}" = js ]; then
     node cloud/deploy/loader.mjs verify "$URL" "$AUTH" "$pair"
   else
-    SKIP_BUILD=1 scripts/verify-deployed.sh "$URL" "$pair"
+    # The payer must hold the upgrade authority, as the JS path checks: a
+    # program someone else controls is not ours to set a market up on (finding 85).
+    EXPECT_AUTHORITY="$AUTH" SKIP_BUILD=1 scripts/verify-deployed.sh "$URL" "$pair"
   fi
 }
 deploy_one() {

@@ -127,9 +127,12 @@ test("a buffer's role matches what close_buffer refuses (docs/09, finding 78)", 
   assert.equal(floorBufferRole({ ...c, pendingKind: 2 }, P), "pending");
   // Nothing staged or pinned (decodeFloor gives null): every buffer is an orphan.
   assert.equal(floorBufferRole({ abortBuffer: null, snapshotBuffer: null, pendingKind: 0, pendingTarget: "1".repeat(32) }, X), "orphan");
-  // The close carries the owner as a writable signer, then the buffer, the PDA and the loader.
+  // The close carries the owner as a writable signer, then the buffer, the
+  // PDA, the loader, and the programdata (finding 85: a buffer identical to
+  // the live code is refused while the program is live).
   const fc = await new FloorClient("11111111111111111111111111111111", "11111111111111111111111111111112").init();
   const ix = fc.closeBuffer(O, X);
   assert.equal(ix.data[0], 13);
-  assert.deepEqual(ix.accounts.map((a) => [!!a.signer, !!a.writable]), [[false, false], [true, true], [false, true], [false, false], [false, false]]);
+  assert.deepEqual(ix.accounts.map((a) => [!!a.signer, !!a.writable]), [[false, false], [true, true], [false, true], [false, false], [false, false], [false, false]]);
+  assert.equal(b58encode(ix.accounts[5].pubkey), b58encode(fc.programdata));
 });
