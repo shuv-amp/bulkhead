@@ -28,7 +28,7 @@ Re-read the official rules on Sun 11 Oct.
 | 0:00–0:15 | Black. "$285,000,000 · 12 minutes" | "April first. Drift lost two hundred eighty-five million dollars. Drift had withdrawal limits. The attacker got admin power and raised them. Five days earlier, Drift had removed its own timelock." |
 | 0:15–0:35 | Census numbers | "It's not just Drift. Of fifty-four multisigs governing tracked Solana protocols, thirty-seven have no timelock. The longest is a day. A guardrail the admin controls doesn't protect you from the admin." |
 | 0:35–0:55 | SoK numbers | "And stop buttons are too late. In 183 DeFi hacks, eighty-seven of the victims had a pause button. One used it within the first hour. Forty-four percent of attacks finish inside a single transaction. The brake has to sit in the path of the money." |
-| 0:55–1:30 | Diagram: protocol → Bulkhead → vault; two lanes | "Bulkhead is a circuit breaker for Solana protocols that the admin can't turn off. The vault sits under one small program that, once audited, nobody can change. The protocol decides who gets paid; Bulkhead decides how fast. Taking back your own deposit is never limited, frozen or priced. Everything else leaves at most two percent an hour and five percent a day. Loosening takes seventy-two hours by constant. Guardians can stop things, never move money." |
+| 0:55–1:30 | Diagram: protocol → Bulkhead → vault; two lanes | "Bulkhead is a circuit breaker for Solana protocols that the admin can't turn off. The vault sits under one small program that, once audited, nobody can change. The protocol decides who gets paid; Bulkhead decides how fast. Taking back your own deposit is never limited, frozen or priced. Everything that isn't backed by the user's own money leaves at most two percent an hour and five percent a day, and a guardian's freeze stops it, new loans included. Loosening takes seventy-two hours by constant. Guardians can stop things, never move money." |
 | 1:30–1:55 | S8 split screen | "Here's one transaction draining an unprotected protocol while a perfect stop button fires in the very next slot. Too late. Same transaction against Bulkhead: two percent. Then a public queue." |
 | 1:55–2:15 | Floor | "And if you won't move your vault on day one: hand Floor your upgrade key in one transaction. Upgrades wait seventy-two hours. Any guardian can stop the program, and a quorum restores the exact bytes that were stopped." |
 | 2:15–2:30 | Founder + repo | "I find bugs in shipped wallet code; one is now an official Bitcoin test vector. Every bug I found had already shipped. Bulkhead is for the one nobody finds. Open source, and every number you just saw ran on the real Solana runtime." |
@@ -36,7 +36,7 @@ Re-read the official rules on Sun 11 Oct.
 ## 3. Descriptions
 
 - **One-liner (≤ 100 chars):** The circuit breaker your Solana protocol's own admin can't turn off.
-- **Short (≤ 280 chars):** Drift had withdrawal limits; the attacker raised them. Bulkhead holds protocol vaults: taking back your own deposit is never throttled, everything else leaves at most 2%/hour and 5%/day, and loosening waits 72h. Floor puts a 72h floor under the upgrade key.
+- **Short (≤ 280 chars):** Drift had withdrawal limits; the attacker raised them. Bulkhead holds protocol vaults: taking back your own deposit is never throttled, unbacked payouts leave at most 2%/hour and 5%/day, a freeze stops the rest, and loosening waits 72h. Floor puts a 72h floor under the upgrade key.
 - **Long:** the README's first section.
 
 ## 4. Demo video (≤ 3:00, screen only)
@@ -75,7 +75,7 @@ Re-read the official rules on Sun 11 Oct.
 
 - **#1 (Sun 27 Sep):** the Drift insight + the census; the core, the three programs and the guardian built and tested; "our own checks found real bugs in our own code, including one the Rust and Python versions shared."
 - **#2 (Sun 4 Oct):** S8 GIF: one transaction beats a perfect stop button; Bulkhead holds it to 2%.
-- **#3 (Sun 11 Oct):** S1 on devnet with signatures, S4/S9 "nobody noticed," Floor abort, LOIs.
+- **#3 (Sun 11 Oct):** all three programs live on devnet, each byte-identical to CI's build; S1 there with signatures; the guardian freezes 2–3 s after the payout that crosses its limit, and a Floor stop lands in ~4 s; a six-reviewer pre-audit engagement (`16`) found and fixed one High and several Mediums, 90 findings in all, each with its test; LOIs.
 
 ## 8. X thread (post Sun 4 Oct)
 
@@ -94,11 +94,11 @@ Re-read the official rules on Sun 11 Oct.
 | Isn't this a rate limiter? | "Drift had a rate limiter the admin controlled. Ours sits outside the admin's reach and knows the difference between returning your own deposit, never limited, and paying out someone else's money, limited." |
 | Why would Kamino move custody? | "Kamino won't move first. Floor needs no custody: one transaction, a 72h floor under the upgrade key. Vault starts with new launches and relaunches, where migration costs nothing." |
 | Why not just pause? | "One of 87 hacked protocols paused within an hour; 44% of attacks are one transaction. We build the stop button in, but the limit is what works inside the transaction." |
-| What if Bulkhead has a bug? | "It's the top risk. Every rule is stated independently more than once and checked on millions of cases; those checks have already caught real bugs in our own code, one of them shared by two implementations. Then audits, TVL caps, immutability." |
+| What if Bulkhead has a bug? | "It's the top risk. Every rule is stated independently more than once and checked on millions of cases; those checks, mutation testing and a six-reviewer pre-audit have caught 90 issues in our own code, each fixed with a test and listed publicly. Then an independent audit, TVL caps, immutability." |
 | Slow drain under the limit? | "The daily cap: with nobody watching for a full day, at most 10% leaves (the day's 5% on top of a full 5% bucket), not everything. Half a vault takes nine days. Guardians and alerts do the rest." |
 | Won't it block liquidations in a crash? | "It can, and we measured it. On a synthetic −30% day, the defaults start queuing liquidations once a 10-minute crash liquidates 17% of a vault. A lending market sets 4% an hour and 10% a day and a 30% cascade goes through, at the cost of a bigger theft bound. We publish that trade-off per market." (`08` S11) |
 | Who controls Bulkhead itself? | "Today a disclosed team key, on devnet. On mainnet: two audits, a capped first partner, then we burn it. After that nobody can change Bulkhead, including us; a new version is a new deployment that protocols move to through their 72-hour lifeboat exit." |
-| What if the admin key is stolen for good? | "It can't steal. Today it can block its own rotation, which is a denial of service we list as open (A4). The option we're weighing is letting a guardian quorum rotate the key after 72 hours." |
+| What if the admin key is stolen? | "It can't move money faster than the limits, and every loosening waits 72 hours under guardian veto. A separate recovery key replaces it; the thief's queued changes then go stale and never execute. Before the seal, the recovery key can stop a thief's seal, and the lifeboat stays shut until depositors have had a full delay to leave." |
 | Business? | "Free, immutable core. Protocols pay for Cloud: a guardian that freezes in minutes, calibration, attestations, STRIDE evidence. 10 Pro customers is $300k ARR." |
 | Why you? | "I find bugs in shipped crypto code. One is an official BIP-352 test vector; two Bitcoin Core PRs merged. Bulkhead is verified the same way." |
 | What do you need? | "Intros to three protocol design partners and one security firm to run a guardian." |

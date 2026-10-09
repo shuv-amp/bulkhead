@@ -328,8 +328,19 @@ pub fn release(
     // taking away the holder's instant own-deposit exit (docs/09, finding 74).
     // Without the signature the excess is unbacked: limited and freezable.
     let mut backed = ledger.backed_amount(&v.mint, amount, &lookup);
+    let own = ledger.net(&v.mint).clamp(0, u64::MAX as i128) as u64;
     if !accounts.iter().any(|a| a.is_signer() && key(a) == owner) {
-        backed = backed.min(ledger.net(&v.mint).clamp(0, u64::MAX as i128) as u64);
+        backed = backed.min(own);
+    }
+    // A freeze stops new loans too. A loan against allowlisted collateral is
+    // bounded by haircuts and Pyth, not by the limiter: a forged or
+    // manipulated price, or a compromised program holding a user's signature,
+    // drained it through a lane no freeze reached (docs/09, finding 90). While
+    // frozen, only the owner's own balance of this mint is backed (G2 is
+    // unchanged: own deposits leave instantly, frozen or not); the rest is
+    // unbacked, and waits behind the freeze.
+    if t < p.frozen_until.max(v.frozen_until) {
+        backed = backed.min(own);
     }
     let unbacked = amount - backed;
 

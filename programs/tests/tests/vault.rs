@@ -212,10 +212,16 @@ fn s9_honest_borrower_is_backed_exactly_as_the_core_computes() {
 /// collateral covers the loan is still paid at once, and only the part the
 /// ledger can't back waits, until after the freeze.
 #[test]
-fn a_backed_borrow_is_paid_during_a_freeze_and_only_the_unbacked_rest_waits() {
+/// Finding 90: a freeze stops new loans. A loan is bounded by haircuts and
+/// Pyth, not by the limiter, so a forged or manipulated price drained it
+/// through a lane no freeze reached. While frozen, only the owner's own
+/// balance of the mint is backed: a lender's own deposit still leaves at once
+/// (G2), a borrow waits behind the freeze, and after it the same borrow is
+/// backed again.
+fn a_freeze_stops_new_loans_but_never_own_deposits() {
     let mut w = World::new();
     let lender = w.user();
-    w.deposit("usdc", &lender, 5_000_000 * USDC);
+    let lender_acc = w.deposit("usdc", &lender, 5_000_000 * USDC);
     let borrower = w.user();
     w.deposit("sol", &borrower, 10 * SOL);
     w.seal();
@@ -229,20 +235,24 @@ fn a_backed_borrow_is_paid_during_a_freeze_and_only_the_unbacked_rest_waits() {
     let ask = 1_200 * USDC;
     let ix = w.m.withdraw_ix(&w.env, &w.usdc, &borrower.pubkey(), &to, ask, &prices);
     let m = w.env.ok(&[ix], &[&borrower]);
-    assert_eq!((outcome(&m).backed, outcome(&m).instant, outcome(&m).queued), (ask, 0, 0));
-    assert_eq!(w.env.balance(&to), ask, "paid during the freeze");
-
-    // Beyond what the collateral supports: the backed part is paid, the rest
-    // becomes a ticket that can't come due before the freeze ends.
-    let big = 5_000 * USDC;
-    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &borrower.pubkey(), &to, big, &prices);
-    let m = w.env.ok(&[ix], &[&borrower]);
     let o = outcome(&m);
-    assert!(o.backed > 0 && o.backed < big);
-    assert_eq!(o.instant, 0, "nothing unbacked is paid while frozen");
-    assert_eq!(o.backed + o.queued, big);
-    assert!(o.eta_s >= frozen_until, "the ticket waits for the freeze to end");
-    assert_eq!(w.env.balance(&to), ask + o.backed);
+    assert_eq!((o.backed, o.instant, o.queued), (0, 0, ask), "the borrow waits");
+    assert!(o.eta_s >= frozen_until, "behind the freeze");
+    assert_eq!(w.env.balance(&to), 0);
+
+    // The lender's own deposit leaves at once, frozen or not (G2).
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &lender.pubkey(), &lender_acc, 1_000_000 * USDC, &w.usdc_prices(false));
+    let m = w.env.ok(&[ix], &[&lender]);
+    assert_eq!(outcome(&m).backed, 1_000_000 * USDC);
+    assert_eq!(w.env.balance(&lender_acc), 1_000_000 * USDC);
+
+    // After the freeze, the same kind of borrow is backed again.
+    w.env.advance(86_400 + 1);
+    w.refresh_prices();
+    let prices = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &borrower.pubkey(), &to, 600 * USDC, &prices);
+    let m = w.env.ok(&[ix], &[&borrower]);
+    assert_eq!(outcome(&m).backed, 600 * USDC);
 }
 
 #[test]
@@ -3236,7 +3246,10 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     let ix = w.m.withdraw_ix(&w.env, &w.sol, &holder.pubkey(), &holder_sol, 100 * SOL, &sol_only);
     let o = outcome(&w.env.ok(&[ix], &[&holder]));
     assert_eq!(o.backed, 100 * SOL, "own SOL: backed, no prices, frozen");
-    // A borrow the holder signs is backed.
+    // A borrow the holder signs is backed, once the freeze is over (while
+    // frozen, no loan is backed: finding 90).
+    w.env.advance(86_400 + 1);
+    w.refresh_prices();
     let lender2 = w.user();
     w.deposit("usdc", &lender2, 1_000_000 * USDC);
     let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, 10_000 * USDC, &both);
