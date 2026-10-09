@@ -277,9 +277,29 @@ async function refreshWorstCase() {
       worst1h.set(mint, a.worst1h);
       worst24h.set(mint, a.worst24h);
       if (policy.freezeFractionOfWorst72h > 0) await refreshWorst72h(mint, a.clockS);
+      if (!capsChecked.has(mint)) await checkCaps(mint);
     } catch (e) {
       log({ level: "warn", msg: `attest failed for ${mint}: ${e.message}` });
     }
+  }
+}
+
+/**
+ * Once per mint, says so (and alerts) when a watched vault has no absolute
+ * caps: without them, capital an attacker parks in the vault first widens the
+ * base the percentages apply to, and so the worst case this guardian freezes
+ * against (docs/15, A1b; docs/16 §4.5). An unreadable vault is tried again on
+ * the next refresh.
+ */
+const capsChecked = new Set();
+async function checkCaps(mint) {
+  const { vault } = await vc.vault(mint);
+  const v = await rpc.account(vault);
+  if (!v) return;
+  capsChecked.add(mint);
+  const { shortCap, longCap } = decodeVault(v.bytes).limits;
+  if (shortCap === 0n || longCap === 0n) {
+    log({ level: "warn", notify: true, mint, msg: `the vault for ${mint} has no absolute cap (1h ${shortCap}, 24h ${longCap}): parked capital widens its worst case; set caps (docs/07 §4)` });
   }
 }
 
@@ -1000,6 +1020,7 @@ async function syncFromChain(act, { startup = false } = {}) {
   if (!acc) return;
   const p = decodeProtocol(acc.bytes);
   const now = wallNow();
+  checkGuardianSet(p);
   observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil);
   lastChainFrozenUntil = p.frozenUntil;
   state.frozenUntil = p.frozenUntil;
@@ -1034,6 +1055,22 @@ async function syncFromChain(act, { startup = false } = {}) {
   saveIncident();
 }
 
+
+/**
+ * A guardian set with fewer than threshold + 2 members can lose governance
+ * for good: one lost key plus one rogue guardian leave no quorum that can
+ * replace either (docs/16 §4.4, AUD-2). Said once per set shape; on mainnet
+ * it alerts.
+ */
+let guardianSetShape = "";
+function checkGuardianSet(p) {
+  const shape = `${p.threshold}/${p.guardians.length}`;
+  if (shape === guardianSetShape) return;
+  guardianSetShape = shape;
+  if (p.guardians.length < p.threshold + 2) {
+    log({ level: "warn", notify: cfg.cluster === "mainnet-beta", msg: `${p.threshold}-of-${p.guardians.length} guardians: one lost key and one rogue guardian lock governance; run at least ${p.threshold}-of-${p.threshold + 2} with independent operators (docs/07 §6)` });
+  }
+}
 
 /** Log each Floor program's missing pieces, once per change (A5). */
 async function checkFloor() {
