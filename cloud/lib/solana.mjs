@@ -223,6 +223,18 @@ export function serializeTransaction(message, signatures) {
   return concat(shortvec(signatures.length), ...signatures, message);
 }
 
+/**
+ * How long to wait before retrying a 429 or 5xx: the server's `Retry-After`
+ * (seconds) when it gives one, at most 30 s; otherwise 1, 2, 4, 8, 8… s. Either
+ * way ±20% jitter, so eight fetches refused together do not all come back in
+ * the same instant and be refused again (docs/09, finding 83).
+ */
+export function retryWaitMs(retryAfter, attempt, random = Math.random) {
+  const s = Number(retryAfter);
+  const base = Number.isFinite(s) && s >= 0 && retryAfter != null && retryAfter !== "" ? Math.min(30_000, s * 1_000) : 1_000 * 2 ** Math.min(attempt, 3);
+  return Math.round(base * (0.8 + 0.4 * random()));
+}
+
 // --- JSON-RPC ------------------------------------------------------------------
 export class Rpc {
   /**
@@ -266,7 +278,7 @@ export class Rpc {
       const busy = r.status === 429 || r.status >= 500;
       const j = busy ? { error: { code: r.status } } : await r.json();
       if (busy && attempt < this.retries) {
-        await new Promise((res) => setTimeout(res, 1_000 * 2 ** Math.min(attempt, 3)));
+        await new Promise((res) => setTimeout(res, retryWaitMs(r.headers?.get?.("retry-after"), attempt)));
         continue;
       }
       if (j.error) {
@@ -389,6 +401,16 @@ export class FailoverRpc extends Rpc {
       const sig = list?.[0]?.signature;
       if (i !== active && sig && !listed.has(sig) && !this.missing.has(sig)) this.missing.set(sig, { at: nowMs, from: i });
     });
+    // A candidate the active endpoint has, though no longer among its newest
+    // `depth` (a busy account moves past 100 in a minute), is not missing: ask
+    // for those exact signatures. Membership alone switched endpoints, with an
+    // urgent alert, every few minutes on a busy protocol (docs/09, finding 81).
+    const pending = [...this.missing.keys()].filter((sig) => !listed.has(sig));
+    if (pending.length) {
+      const st = await quiet(this.endpoints[active].call("getSignatureStatuses", [pending, { searchTransactionHistory: true }]));
+      if (!st) return { switched: false, reason: null, slots }; // unknown: decide next time
+      pending.forEach((sig, i) => { if (st.value?.[i]) listed.add(sig); });
+    }
     for (const [sig, m] of this.missing) {
       if (listed.has(sig) || nowMs - m.at > 600_000) {
         this.missing.delete(sig);

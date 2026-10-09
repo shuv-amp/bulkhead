@@ -158,10 +158,64 @@ export function unpinnedChangeApprovals(policy) {
  * names whatever is proposed under it, so a guardian still reading one would
  * let a thief's change through and execute it.
  */
+/** Each policy field's type and range. A typo, a percent for a fraction or a
+ * string for a number used to pass and quietly turn a rule off, or send a
+ * heartbeat every poll (docs/09, finding 83). */
+const POLICY_RULES = {
+  freezeFractionOfWorst1h: ["fraction>0"],
+  freezeFractionOfWorst24h: ["fraction>0"],
+  freezeFractionOfWorst72h: ["fraction"],
+  alertFractionOfThreshold: ["fraction"],
+  sustainedDays: ["int", 1, 3],
+  outflowAlertEveryS: ["int", 60, 7 * 86_400],
+  freezeSecs: ["int", 1, 86_400],
+  holdIncidentS: ["int", 0, 30 * 86_400],
+  holdRenewBeforeS: ["int", 1, 86_400],
+  allowlistedOwners: ["keys"],
+  cancelTicketsWhenFrozen: ["bool"],
+  vetoLoosenings: ["bool"],
+  approvedChanges: ["array"],
+  approvalCheckGiveUpS: ["int", 1, 86_400],
+  approvedUpgradeBuffers: ["keys"],
+  approvedFloorProposals: ["array"],
+  executeApproved: ["bool"],
+  vetoLifeboatExits: ["bool"],
+  approvedExits: ["array"],
+  heartbeatEveryS: ["int", 3_600, 30 * 86_400],
+  computeUnits: ["int", 5_000, 1_400_000],
+  priorityMicroLamports: ["price"],
+  maxPriorityMicroLamports: ["int", 0, 1e12],
+  minPriorityMicroLamports: ["int", 0, 1e12],
+  freezeMinPriorityMicroLamports: ["int", 0, 1e12],
+  freezeDeadlineS: ["int", 10, 3_600],
+};
+const BASE58_KEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+function checkField(name, v, [kind, lo, hi]) {
+  const bad = (what) => { throw new Error(`policy.${name}: ${JSON.stringify(v)} is not ${what}`); };
+  switch (kind) {
+    case "fraction>0": if (typeof v !== "number" || !(v > 0 && v <= 1)) bad("a fraction in (0, 1] (0.5 is half; not a percent)"); break;
+    case "fraction": if (typeof v !== "number" || !(v >= 0 && v <= 1)) bad("a fraction in [0, 1] (0 turns the rule off; not a percent)"); break;
+    case "int": if (typeof v !== "number" || !Number.isInteger(v) || v < lo || v > hi) bad(`a whole number from ${lo} to ${hi}`); break;
+    case "bool": if (typeof v !== "boolean") bad("true or false"); break;
+    case "array": if (!Array.isArray(v)) bad("a list"); break;
+    case "keys": if (!Array.isArray(v) || !v.every((k) => typeof k === "string" && BASE58_KEY.test(k))) bad("a list of base58 addresses"); break;
+    case "price": if (v !== "auto" && (typeof v !== "number" || !Number.isInteger(v) || v < 0)) bad('"auto" or a whole number of micro-lamports per compute unit'); break;
+  }
+}
+
 export function checkPolicy(policy) {
   if ("approvedChangeIds" in policy) {
     throw new Error('policy.approvedChangeIds is no longer read: approve a change by what it does, in approvedChanges as "kind:target:payloadHex" (docs/07)');
   }
+  for (const name of Object.keys(policy)) {
+    if (!(name in POLICY_RULES)) throw new Error(`policy.${name} is not a policy setting (a typo? the settings are DEFAULT_POLICY's, cloud/guardian/policy.mjs)`);
+    checkField(name, policy[name], POLICY_RULES[name]);
+  }
+  if (policy.minPriorityMicroLamports > policy.maxPriorityMicroLamports || policy.freezeMinPriorityMicroLamports > policy.maxPriorityMicroLamports) {
+    throw new Error("policy: the minimum priority prices must not exceed maxPriorityMicroLamports");
+  }
+  if (policy.holdRenewBeforeS >= policy.freezeSecs) throw new Error("policy.holdRenewBeforeS must be shorter than freezeSecs, or the hold renews every pass");
   for (const a of policy.approvedChanges ?? []) {
     if (typeof a !== "string" || !CHANGE_APPROVAL.test(a)) throw new Error(`policy.approvedChanges: ${JSON.stringify(a)} is not "kind:target:payloadHex[#baseVersion][@expiry]"`);
   }
@@ -279,7 +333,56 @@ export const DEFAULT_POLICY = {
    * freeze is only as good as the slot it lands in. */
   priorityMicroLamports: "auto",
   maxPriorityMicroLamports: 1_000_000,
+  /** The least price for any guardian transaction, and for a freeze, whatever
+   * recent fees say: a quiet protocol account shows 0 (docs/09, finding 82).
+   * At 50,000 units, 100,000 µL/CU is 5,000 lamports. */
+  minPriorityMicroLamports: 10_000,
+  freezeMinPriorityMicroLamports: 100_000,
+  /** How long a freeze keeps signing again at a doubled price before it is
+   * handed to the next loop pass (and alerted). */
+  freezeDeadlineS: 90,
 };
+
+/** The settings a guardian config may have (cloud/guardian/main.mjs). */
+const CONFIG_KEYS = new Set(["rpc", "rpcs", "vaultProgram", "protocolProgram", "mints", "guardianKey", "pollMs", "policy", "floorProgram", "floorProtected", "alert", "stateFile", "stallAlertS", "lagAlertS", "ingestBudgetMs", "ingestConcurrency", "freshnessCheckS", "startupMaxSignatures", "cluster", "minBalanceSol", "liveness"]);
+/** Genesis hashes of the clusters a config may name (`cluster`). */
+export const GENESIS = { "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", devnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", testnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY" };
+
+/**
+ * A guardian config, checked before anything runs: unknown settings (typos),
+ * wrong types, out-of-range numbers. `cluster: "mainnet-beta"` also requires
+ * what production needs: at least one backup endpoint (`rpcs`) and an alert
+ * webhook, since a guardian nobody hears is no guardian (docs/09, finding 83).
+ * Returns warnings to log; throws on an error.
+ */
+export function checkConfig(cfg) {
+  const warnings = [];
+  if (!cfg || typeof cfg !== "object") throw new Error("the config is not a JSON object");
+  for (const k of Object.keys(cfg)) if (!CONFIG_KEYS.has(k)) throw new Error(`config.${k} is not a guardian setting (a typo? see the header of cloud/guardian/main.mjs)`);
+  const url = (u) => typeof u === "string" && /^https?:\/\//.test(u);
+  if (!url(cfg.rpc)) throw new Error("config.rpc must be an http(s) URL");
+  if (cfg.rpcs !== undefined && (!Array.isArray(cfg.rpcs) || !cfg.rpcs.every(url))) throw new Error("config.rpcs must be a list of http(s) URLs");
+  for (const k of ["vaultProgram", "protocolProgram"]) if (!BASE58_KEY.test(cfg[k] ?? "")) throw new Error(`config.${k} must be a base58 address`);
+  if (!Array.isArray(cfg.mints) || !cfg.mints.every((m) => BASE58_KEY.test(m))) throw new Error("config.mints must be a list of base58 mint addresses");
+  if (typeof cfg.guardianKey !== "string") throw new Error("config.guardianKey must be the path of the guardian's keypair file");
+  for (const [k, lo, hi] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000], ["minBalanceSol", 0, 1_000]]) {
+    const v = cfg[k];
+    if (v !== undefined && (typeof v !== "number" || !(v >= lo && v <= hi))) throw new Error(`config.${k}: ${JSON.stringify(v)} is not a number from ${lo} to ${hi}`);
+  }
+  if (cfg.floorProtected !== undefined && (!Array.isArray(cfg.floorProtected) || !cfg.floorProtected.every((m) => BASE58_KEY.test(m)) || !BASE58_KEY.test(cfg.floorProgram ?? ""))) throw new Error("config.floorProtected must be a list of program addresses, with config.floorProgram set");
+  if (cfg.alert !== undefined && !url(cfg.alert?.url)) throw new Error("config.alert.url must be an http(s) URL");
+  if (cfg.liveness !== undefined && (!url(cfg.liveness?.url) || (cfg.liveness.everyS !== undefined && !(cfg.liveness.everyS >= 10)))) throw new Error("config.liveness must be { url, everyS ≥ 10 }");
+  if (cfg.cluster !== undefined && !(cfg.cluster in GENESIS) && cfg.cluster !== "localnet") throw new Error(`config.cluster must be one of ${[...Object.keys(GENESIS), "localnet"].join(", ")}`);
+  if (cfg.cluster === "mainnet-beta") {
+    if (!cfg.rpcs?.length) throw new Error("a mainnet guardian needs at least one backup endpoint (config.rpcs) from another provider (docs/07 §6)");
+    if (!cfg.alert) throw new Error("a mainnet guardian needs config.alert: without it nobody is told of a freeze, an error or a dead key");
+    if (!cfg.liveness) warnings.push("no config.liveness: if this process or its host dies, nothing tells anyone (docs/07 §6)");
+  } else if (cfg.cluster === undefined) {
+    warnings.push("config.cluster is not set: the RPC's cluster is not checked, and production requirements (backup endpoints, alerts) are not enforced");
+  }
+  if (!cfg.alert) warnings.push("no config.alert: actions, errors and urgent warnings go to this log only, and page nobody");
+  return warnings;
+}
 
 export const HOUR_S = 3_600;
 export const DAY_S = 86_400;
@@ -1097,6 +1200,10 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
     case "ticket_closed":
       state.pendingTickets.delete(e.ticketId);
       state.cancelled.delete(e.ticketId);
+      // Its release was counted once; a closed ticket is never released or
+      // scanned again, so its id need not be kept: the set grew by one for
+      // every ticket ever seen, for as long as the process ran (finding 83).
+      state.tickets.delete(e.ticketId);
       break;
     case "change_proposed":
       if (!policy.vetoLoosenings || state.vetoed.has(`c${e.id}`)) break;

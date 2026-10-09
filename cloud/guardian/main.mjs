@@ -27,6 +27,15 @@
 // `freshnessCheckS` (default 60): with backup endpoints, how often they are
 // cross-checked for a primary that answers but is stale (FailoverRpc.crossCheck).
 //
+// Production (docs/07 §6; docs/09, finding 83): `cluster` ("mainnet-beta",
+// "devnet", "testnet" or "localnet") is checked against the RPC's genesis
+// hash, and "mainnet-beta" requires `rpcs` and `alert`. `liveness`
+// ({ url, everyS: 60 }) is pinged every pass's minute: a dead-man's switch
+// for when this process or its host dies. `minBalanceSol` (default 0.05):
+// below it, an urgent alert. `startupMaxSignatures` (default 50,000): the
+// startup replay's bound. Every setting and policy value is checked at start;
+// an unknown one (a typo) or an out-of-range value refuses to start.
+//
 // With `floorProtected`, the bot also follows each program's Floor config
 // transactions (its proposals, executions and recovery-key changes), and checks it every
 // minute and logs a warning whenever what is missing changes: no abort buffer
@@ -69,10 +78,10 @@
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
-import { Keypair, sendWithFallback, priorityPrice } from "../lib/signer.mjs";
+import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
-import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction } from "./follow.mjs";
+import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
@@ -113,6 +122,7 @@ async function must(run) {
   }
 }
 
+const configWarnings = await must(() => checkConfig(cfg));
 const policy = await must(() => checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) }));
 // With backup endpoints, reads and sends move to the next endpoint when one
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
@@ -167,6 +177,7 @@ let saved = persisted();
 // Whether a state file of this protocol was read: without one, the incident
 // hold may have to be rebuilt from chain (`rebuildIncident`).
 let restoredState = false;
+let stateProblem = null;
 {
   let text = null;
   try {
@@ -176,6 +187,7 @@ let restoredState = false;
   }
   if (text !== null) {
     const r = restoreState(text, protocolKey, state);
+    if (r.problem) stateProblem = `${r.problem}: nothing was restored from ${stateFile}. An open incident hold, the Floor cursors and spent approvals are forgotten; the hold is rebuilt from chain if the protocol is frozen. Check the file (docs/09, finding 83)`;
     if (r.incidentSince !== null) state.incidentSince = r.incidentSince;
     if (r.frozenUntil !== null) {
       lastChainFrozenUntil = r.frozenUntil;
@@ -292,18 +304,29 @@ async function refreshWorst72h(mint, clockS) {
   }
 }
 
-/** Compute budget, priority price and extra endpoints for one guardian transaction. */
-async function sendOptions() {
+/** A promise that gives up after `ms` (resolving to `fallback`): no read may hold a freeze back. */
+const within = (p, ms, fallback) => Promise.race([p.catch(() => fallback), new Promise((r) => setTimeout(() => r(fallback), ms))]);
+
+/**
+ * The priority price: "auto" is the 90th percentile of recent fees on the
+ * protocol account, never below `minPriorityMicroLamports`. On a quiet
+ * account every slot's fee is 0, and the price was 0, at any congestion; an
+ * attacker write-locking the protocol at 1 µL/CU made it 1 (docs/09, finding 82).
+ */
+async function priorityFor(floor) {
   let microLamports = policy.priorityMicroLamports;
   if (microLamports === "auto") {
-    try {
-      const fees = await rpc.call("getRecentPrioritizationFees", [[b58encode(vc.protocol)]]);
-      microLamports = priorityPrice(fees, { cap: policy.maxPriorityMicroLamports });
-    } catch {
-      microLamports = 0; // no fee data: send anyway, without a price
-    }
+    const fees = await within(rpc.call("getRecentPrioritizationFees", [[b58encode(vc.protocol)]]), 1_500, []);
+    microLamports = priorityPrice(fees, { cap: policy.maxPriorityMicroLamports });
   }
-  return { computeUnits: policy.computeUnits, microLamports: Number(microLamports) || 0, rpcs: extraRpcs };
+  return Math.min(policy.maxPriorityMicroLamports, Math.max(Number(microLamports) || 0, floor));
+}
+
+/** Compute budget, priority price and extra endpoints for one guardian transaction. */
+async function sendOptions() {
+  // A send that does not confirm in 20 s is retried by its own step: waiting
+  // the old minute held up ingest, and with it the next freeze (finding 82).
+  return { computeUnits: policy.computeUnits, microLamports: await priorityFor(policy.minPriorityMicroLamports), rpcs: extraRpcs, confirmMs: 20_000 };
 }
 
 /**
@@ -313,6 +336,33 @@ async function sendOptions() {
 async function guardianSend(ixs) {
   return sendWithFallback(rpc, guardian, ixs, [], await sendOptions(), (e) =>
     log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", refused: e.message.slice(0, 300) }));
+}
+
+/**
+ * The freeze: its own sending loop, as `stop.mjs` (docs/09, finding 82). No
+ * preflight; every endpoint, every 400 ms; a fresh signature at twice the
+ * price after each 6 s without confirmation, from at least
+ * `freezeMinPriorityMicroLamports`; until the chain shows the protocol frozen
+ * for this incident, or `freezeDeadlineS`. `basePrice` was read alongside the
+ * pre-freeze account read.
+ */
+async function freezeSend(ixs, secs, basePrice) {
+  const r = await sendEscalating(rpc, guardian, ixs, {
+    computeUnits: policy.computeUnits,
+    price: basePrice,
+    floor: policy.freezeMinPriorityMicroLamports,
+    cap: policy.maxPriorityMicroLamports,
+    rpcs: extraRpcs,
+    deadlineMs: policy.freezeDeadlineS * 1000,
+    settled: async () => {
+      const acc = await within(readProtocolAccount(), 1_500, null);
+      return Boolean(acc) && freezeAlreadyCovers(decodeProtocol(acc.bytes).frozenUntil, wallNow(), secs);
+    },
+    onAttempt: ({ attempt, error, nextPrice }) => log({ level: "warn", msg: `freeze attempt ${attempt} did not confirm; signing again at ${nextPrice} µL/CU`, error: String(error.message).slice(0, 200) }),
+    onFallback: (e) => log({ level: "error", msg: "the freeze ran and failed in its compute budget; sending it without one: check the budget settings", error: String(e.message).slice(0, 300) }),
+  });
+  if (r.attempts > 1) log({ level: "warn", msg: `the freeze took ${r.attempts} attempts (last at ${r.price} µL/CU)`, attempts: r.attempts });
+  return r.signature ?? "already frozen (an earlier attempt or another guardian)";
 }
 
 /** Decoded account, null when it does not exist, undefined when it could not be read. */
@@ -381,6 +431,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
   const started = Date.now();
   try {
     let ixs;
+    let freezeArgs = null;
     switch (action.type) {
       case "freeze": {
         // Another guardian may have frozen for the same breach seconds ago.
@@ -388,7 +439,10 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         // covers this freeze stands for it: no duplicate freeze, no duplicate
         // critical alert (docs/09, finding 76). An unreadable account is no
         // reason to hold a freeze back.
-        const acc = await readProtocolAccount().catch(() => null);
+        // The account and the fee data together, each given 1.5 s: on a slow
+        // node these reads, one after another, came before every freeze
+        // (9 s at 1.5 s a call; docs/09, finding 82).
+        const [acc, basePrice] = await Promise.all([within(readProtocolAccount(), 1_500, null), priorityFor(policy.freezeMinPriorityMicroLamports)]);
         const until = acc ? decodeProtocol(acc.bytes).frozenUntil : 0;
         if (freezeAlreadyCovers(until, wallNow(), action.secs)) {
           state.frozenUntil = Math.max(state.frozenUntil, until);
@@ -397,6 +451,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
           log({ action: "freeze", skipped: `already frozen until ${until} by another freeze`, reason: action.reason });
           return true;
         }
+        freezeArgs = { secs: action.secs, basePrice };
         ixs = [vc.freeze(guardian.publicKey, action.secs)];
         break;
       }
@@ -492,7 +547,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       default:
         return false;
     }
-    const sig = await guardianSend(ixs);
+    const sig = freezeArgs ? await freezeSend(ixs, freezeArgs.secs, freezeArgs.basePrice) : await guardianSend(ixs);
     const confirmed = Date.now();
     if (action.type === "freeze") {
       openIncident(state, wallNow());
@@ -639,13 +694,23 @@ async function checkChanges() {
 }
 
 /** Newest-first. `oldestWanted` null walks until `until` (live); a number walks the startup window. */
-async function signatures(until, oldestWanted) {
+/** Whether the node has this signature (an empty page after a full one; docs/09, finding 81). */
+const knowsSignature = async (signature) => {
+  const r = await rpc.call("getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
+  return Boolean(r?.value?.[0]);
+};
+
+async function signatures(until, oldestWanted, { minSlot = null, seen = null, maxRows = Infinity } = {}) {
   let lastLoggedPage = 0;
   return signatureWalk(
     (query) => rpc.call("getSignaturesForAddress", [b58encode(vc.protocol), query]),
     {
       until,
       oldestWanted,
+      minSlot,
+      seen,
+      knows: knowsSignature,
+      maxRows,
       onPage: (count) => {
         if (count % PAGE_LOG_INTERVAL === 0 && count !== lastLoggedPage) {
           lastLoggedPage = count;
@@ -786,18 +851,19 @@ let truncatedSeen = false;
  * `ingestConcurrency` at a time and processed in order; with `budgetMs`, it
  * stops after that long and returns the signatures left (newest-first).
  */
-async function ingest(sigs, act, checkpoint = () => {}, floor = null, budgetMs = Infinity) {
+async function ingest(sigs, act, checkpoint = () => {}, floor = null, budgetMs = Infinity, { skipUnreadable = false } = {}) {
+  const onSkip = (signature, e) => log({ level: "error", msg: "startup replay: a transaction the RPC will not return was skipped; an outflow in it is not counted in the rolling windows. Use an RPC with full history (docs/07 §6)", signature, error: String(e?.message ?? e).slice(0, 200) });
   return ingestBudgeted(sigs, {
     concurrency: cfg.ingestConcurrency ?? 8,
     budgetMs,
     checkpoint,
-    fetchOne: (s) => (s.err ? null : requireTransaction(rpc, s.signature)),
+    fetchOne: (s) => (s.err ? null : skipUnreadable ? transactionOrSkip(rpc, s.signature, { onSkip }) : requireTransaction(rpc, s.signature)),
     processOne: (s, tx) => ingestOne(s, tx, act, floor),
   });
 }
 
 async function ingestOne(s, tx, act, floor) {
-  if (s.err) return;
+  if (s.err || tx?.skipped) return;
   const now = s.blockTime ?? tx?.blockTime ?? wallNow();
   const { events: decoded, truncated, unnamed } = watchedEvents(tx?.meta?.logMessages, floor
     ? { floorProgram: cfg.floorProgram, floorPrograms: [floor] }
@@ -1147,7 +1213,7 @@ async function followFloor() {
     const program = b58encode(fc.protected);
     const page = (q) => rpc.call("getSignaturesForAddress", [address, q]);
     const resuming = !floorFollowed.has(address);
-    const r = await followAccount(page, { cursor: floorCursors.get(address) ?? null, oldestWanted: resuming ? wallNow() - DAY_S : null });
+    const r = await followAccount(page, { cursor: floorCursors.get(address) ?? null, oldestWanted: resuming ? wallNow() - DAY_S : null, knows: knowsSignature });
     if (r.status === "gone") {
       log({ level: "error", msg: "the node no longer has the Floor config's cursor signature; reading on from its newest. Floor history in the gap was not reviewed: check this program's proposals, executions and recovery key by hand", program });
     } else if (r.status === "gap") {
@@ -1185,8 +1251,51 @@ function rebuildIncident() {
   log({ level: "warn", msg: "incident hold rebuilt from chain: no state file, the protocol is frozen, and the replayed window broke a freeze rule", incidentSince: since });
 }
 
+/**
+ * A config naming its cluster is checked against the node's genesis hash: a
+ * mainnet guardian pointed at a devnet RPC (or the reverse) watched nothing
+ * real and looked healthy (docs/09, finding 83).
+ */
+async function checkCluster() {
+  if (!cfg.cluster || cfg.cluster === "localnet") return;
+  const got = await rpc.call("getGenesisHash", []);
+  if (got !== GENESIS[cfg.cluster]) throw new Error(`config.cluster is ${cfg.cluster}, but the RPC serves another cluster (genesis ${got})`);
+}
+
+/**
+ * The guardian key pays every freeze, veto, cancel and heartbeat. Below
+ * `minBalanceSol` (default 0.05) it says so, urgently, at most every 6 hours:
+ * a key with no SOL learns it at the first freeze (docs/09, finding 83).
+ */
+let balanceWarnedAt = 0;
+async function checkBalance() {
+  const lamports = (await rpc.call("getBalance", [guardian.address, { commitment: "confirmed" }]))?.value;
+  const min = (cfg.minBalanceSol ?? 0.05) * 1e9;
+  if (lamports != null && lamports < min && Date.now() - balanceWarnedAt > 6 * 3_600_000) {
+    balanceWarnedAt = Date.now();
+    log({ level: "error", msg: `the guardian key holds ${lamports / 1e9} SOL, under ${min / 1e9}: fund it, or its freezes, vetoes and heartbeats will fail`, lamports });
+  }
+}
+
+/**
+ * An outbound liveness ping (a dead-man's switch: healthchecks.io, a pager's
+ * heartbeat URL) every `liveness.everyS` (default 60) while the loop runs.
+ * The bot's own alerts stop when the process or its host dies; the service
+ * that stops hearing this ping is what tells someone (docs/09, finding 83).
+ */
+let livenessAt = 0;
+function pingLiveness() {
+  if (!cfg.liveness || Date.now() < livenessAt) return;
+  livenessAt = Date.now() + (cfg.liveness.everyS ?? 60) * 1000;
+  fetch(cfg.liveness.url, { method: "GET", signal: AbortSignal.timeout(10_000) }).catch((e) => log({ level: "warn", msg: `liveness ping failed: ${e.message}` }));
+}
+
 async function main() {
   log({ msg: "guardian started", guardian: guardian.address, protocol: b58encode(vc.protocol), policy });
+  for (const w of configWarnings) log({ level: "warn", msg: w });
+  if (stateProblem) log({ level: "error", msg: stateProblem });
+  await must(checkCluster);
+  await checkBalance().catch((e) => log({ level: "warn", msg: `could not read the guardian key's balance: ${e.message}` }));
   if (state.incidentSince != null) log({ msg: "incident hold resumed from saved state", incidentSince: state.incidentSince, stateFile });
   const unpinned = unpinnedChangeApprovals(policy);
   if (unpinned.length) {
@@ -1195,13 +1304,19 @@ async function main() {
   if (!state.changeBaseline) log({ msg: "no record of executed changes yet: the first change scan records them and spends no approval", stateFile });
   await refreshWorstCase();
   let heartbeatAt = await beat();
+  let balanceAt = Date.now() + 600_000;
   // As far back as the longest freeze rule reads: 72 hours with the 72-hour
   // rule on (finding 76), else the day.
   const oldest = wallNow() - (policy.freezeFractionOfWorst72h > 0 ? OUTFLOW_KEEP_S : DAY_S);
-  const history = await signatures(undefined, oldest);
+  const maxReplay = cfg.startupMaxSignatures ?? 50_000;
+  const history = await signatures(undefined, oldest, { maxRows: maxReplay });
   const until = history[0]?.signature;
   const inWindow = history.filter((s) => s.blockTime == null || s.blockTime >= oldest);
-  await ingest(inWindow, false);
+  if (history.truncated) {
+    const from = history.at(-1)?.blockTime;
+    log({ level: "error", msg: `startup replay capped at its newest ${history.length} signatures (startupMaxSignatures): outflows before ${from ? new Date(from * 1000).toISOString() : "then"} are not counted, so the 24-hour and 72-hour rules undercount until that time leaves their window. Spam on the protocol account? (docs/09, finding 83)`, signatures: history.length });
+  }
+  await ingest(inWindow, false, () => {}, null, Infinity, { skipUnreadable: true });
   // The chain scan recovers every active ticket, including older tickets whose
   // release is outside the rolling outflow window. Current chain state is live,
   // so an already-active freeze must sweep tickets at startup too.
@@ -1249,7 +1364,7 @@ async function main() {
     await step("ingest", async () => {
       if (!backlog.length) {
         try {
-          backlog = await signatures(cursor, null);
+          backlog = await signatures(cursor, null, { minSlot: cursorSlot || null, seen: cursorSeen });
         } catch (e) {
           if (!cursorGone(e, cursor)) throw e;
           if (goneLogged !== cursor) {
@@ -1331,6 +1446,11 @@ async function main() {
       await step("floor check", checkFloor);
     }
     if (Date.now() >= heartbeatAt) await step("heartbeat", async () => { heartbeatAt = await beat(); });
+    if (Date.now() >= balanceAt) {
+      balanceAt = Date.now() + 600_000;
+      await step("balance", checkBalance);
+    }
+    pingLiveness();
     await new Promise((r) => setTimeout(r, cfg.pollMs ?? 400));
   }
 }
