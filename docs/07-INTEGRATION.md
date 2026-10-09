@@ -43,6 +43,14 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay,
 9. **Calibrate** (§4) before the seal. Tightening later is instant; loosening takes 72h.
 10. **Run a guardian** (Bulkhead Cloud or your own `cloud/guardian`) and publish the status page. It vetoes every loosening, lifeboat exit and Floor proposal you have not pre-approved, and it is also your **keeper**: a change you did approve (`approvedChanges`, `approvedFloorProposals`, `approvedUpgradeBuffers`, each by what it does) is executed by it as soon as its delay ends. Solana programs never run on their own, so after a delay someone must send `execute`; anyone may, and the keeper makes sure someone does, before the 7-day expiry. It never executes the release of Floor's upgrade authority, which closes Floor's config.
 
+**Before the seal, the admin key is trusted completely** (`04`, T19b). Configuration is instant then: guardians, limits, assets, imported backing. Nothing can be paid out, not even a depositor's own deposit, and the lifeboat is shut until the seal (finding 86). So:
+
+- **Admin.** Make it a multisig (a Squads vault, at least 2-of-3, hardware keys) from registration. Set the recovery key at registration, a separate cold key.
+- **Guardians.** Use independent operators, each running a guardian from registration.
+- **A short, public genesis.** Register, create the vaults, add the assets, import and `propose_seal` on the same day. Publish the snapshot of imported balances with the seal proposal, so anyone can compare it during the 72h review.
+- **No deposits before the seal.** Open deposits in your UI only once the status page (or `attest`) shows the protocol sealed. Before that, a deposit cannot be withdrawn.
+- **After the seal**, check that the guardian set, the admin, the recovery key and the lifeboat destination are the ones you published, then announce.
+
 **Hard rules.** Each one is a way to lose the guarantee without a bug in Bulkhead:
 
 - **Pin the Vault program id** in every CPI that carries the caller PDA's signature (step 1; `15`, A11). Compare it with a constant, never with an account the transaction supplies.

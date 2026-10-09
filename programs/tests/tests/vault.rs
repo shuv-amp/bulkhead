@@ -1164,14 +1164,16 @@ fn sealing_counts_the_spendable_lifeboat_balance_after_token_2022_fees() {
         AccountMeta::new(w.env.payer.pubkey(), true),
         AccountMeta::new_readonly(SYSTEM, false),
     ]);
-    w.env.ok(&[mv], &[&w.m.admin]);
-    assert_eq!(w.env.balance(&lifeboat), 810 * USDC);
-
+    // The lifeboat is shut before the seal (finding 86): the 900 cannot be
+    // moved where a fee would shrink them to 810 behind the seal's back.
+    assert_eq!(w.env.fails(&[mv], &[&w.m.admin]), verr::NOT_SEALED);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 900 * USDC);
+    // The deposit's backing is what arrived (900), so the seal holds.
     w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
     w.env.advance(3 * DAY);
+    w.refresh_prices();
     let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
-    assert_eq!(w.env.fails(&[seal], &[]), verr::IMPORT_EXCEEDS_BALANCE,
-        "the seal must reject 900 in backing claims against 810 spendable tokens");
+    w.env.ok(&[seal], &[]);
 }
 
 #[test]
@@ -3062,21 +3064,25 @@ fn the_admin_never_becomes_the_lifeboat_destination() {
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_INSTRUCTION);
 }
 
-/// Finding 72: lifeboat tokens a live exit will take out do not cover claims
-/// at the seal.
+/// Finding 86: the lifeboat is shut before the seal. Then every change is
+/// instant and depositors cannot withdraw at all, so a stolen admin key could
+/// swap in its own guardians, park the deposits, and take them out through an
+/// exit about 6 days later. Neither a move nor an exit is possible until the
+/// seal; after it, a depositor's own deposit leaves instantly, and an exit
+/// still waits 72h. (Finding 72's case, the seal counting tokens a pending
+/// exit takes, can no longer arise; the seal still subtracts a live exit.)
 #[test]
-fn the_seal_does_not_count_tokens_a_pending_exit_will_take() {
+fn the_lifeboat_stays_shut_until_the_seal() {
     let mut w = World::new();
     let alice = w.user();
     w.deposit("usdc", &alice, 1_000_000 * USDC);
     w.env.advance(3 * DAY + 1); // the registration destination is now 72h old
-    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
-    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
-    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
-    w.env.advance(3 * DAY + 1);
-    w.refresh_prices();
-    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
-    assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
+    assert_eq!(w.env.fails(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]), verr::NOT_SEALED);
+    assert_eq!(w.env.fails(&[r2_propose_exit(&w, 1)], &[&w.m.admin]), verr::NOT_SEALED);
+    w.seal();
+    // Sealed: the lifeboat works as before.
+    w.env.ok(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
 }
 
 /// Issue #38: a lifeboat destination this program owns (here the SOL vault,

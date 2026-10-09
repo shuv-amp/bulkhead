@@ -11,6 +11,14 @@ use bulkhead_core::classify::Class;
 use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
 use bulkhead_core::governance::{can_execute, quorum, schedule, Schedule};
 
+/// The lifeboat opens with the seal (finding 86).
+fn require_sealed(p: &crate::state::Protocol) -> ProgramResult {
+    if !p.sealed {
+        return Err(VaultError::NotSealed.into());
+    }
+    Ok(())
+}
+
 fn check_lifeboat(
     program_id: &Address,
     protocol: &[u8; 32],
@@ -31,6 +39,13 @@ pub fn move_in(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
     require_admin(&p, acc(accounts, 6)?)?;
+    // Not before the seal. Then every change is instant and nothing can be
+    // paid out, the depositors' own withdrawals included: a stolen admin key
+    // swapped in its own guardians, parked the deposits and took them out
+    // through an exit about 6 days later, with nobody to veto and no way out
+    // for depositors (docs/09, finding 86). From the seal, a depositor's own
+    // deposit leaves instantly, and an exit still waits 72h in public.
+    require_sealed(&p)?;
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
     let t = now()?;
     // A freeze stops the admin parking the vault: otherwise a stolen admin key
@@ -167,6 +182,7 @@ pub fn propose_exit(
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
     require_admin(&p, acc(accounts, 2)?)?;
+    require_sealed(&p)?; // finding 86, as `move_in`
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
     let t = now()?;
     if t - p.destination_set_s < MIN_LOOSEN_DELAY_S {

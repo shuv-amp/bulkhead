@@ -17,6 +17,8 @@ echo "== regressions"
 for f in reference/regressions/*.txt; do python3 reference/diff_runner.py --replay "$f" >/dev/null; done
 echo "== differential (python reference vs rust core, $CASES cases x 3 seeds)"
 for seed in 11 12 13; do python3 reference/diff_runner.py --cases "$CASES" --seed "$seed"; done
+echo "== extreme values (full-range i64/i32/u128 inputs, time going backwards; python vs rust)"
+for seed in 5 9 11; do python3 reference/extreme_diff.py "$seed"; done
 echo "== model";    python3 reference/drift_model.py > /dev/null
 echo "== floor_check self-test (curve25519 vectors, PDA derivation)"
 python3 tools/floor_check.py --self-test
