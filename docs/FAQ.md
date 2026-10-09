@@ -103,4 +103,4 @@ Measured on the real runtime, through a protocol's CPI:
 Measured 8 Oct 2026 on a macOS build. See `05 §10` and `06 §7`.
 
 **Is it live?**
-On devnet, since 28 Sep 2026, with test tokens only (ids in the README). Devnet runs this tree's build (PR #59, 9 Oct), checked byte for byte. Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.
+On devnet, since 28 Sep 2026, with test tokens only (ids in the README). Devnet runs this tree's build (PR #61, 9 Oct), checked byte for byte. Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.
