@@ -436,3 +436,64 @@ test("a primary's preflight that finds the transaction already processed is a su
   assert.ok(sig);
   assert.equal(sends, 1, "not sent again without its budget");
 });
+
+test("a send that fails at once is paced and not priced up; a refusal ends the loop; an earlier copy that lands is the answer (finding 84)", async () => {
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  // Every endpoint refuses at once (unhealthy): no doubling, no spin.
+  let sends = 0;
+  const down = {
+    latestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: null }),
+    call: async (method) => {
+      if (method === "sendTransaction") { sends++; throw new Error("node unhealthy"); }
+      return { value: [] };
+    },
+  };
+  const prices = [];
+  await assert.rejects(sendEscalating(down, payer, [ix], { floor: 100_000, retryPauseMs: 20, deadlineMs: 200, onAttempt: ({ nextPrice }) => prices.push(nextPrice) }), /unhealthy/);
+  assert.ok(sends <= 15, `paced (${sends} sends in 200 ms)`);
+  assert.ok(prices.every((p) => p === 100_000), "the price stays: no copy went out");
+  // A simulation that says no price helps (no SOL) ends it at the next check.
+  const t0 = Date.now();
+  await assert.rejects(sendEscalating(congested(), payer, [ix], { floor: 100_000, attemptMs: 30, rebroadcastMs: 10, pollMs: 5, deadlineMs: 5_000, precheck: async () => new Error("cannot be paid for") }), /cannot be paid for/);
+  assert.ok(Date.now() - t0 < 1_000);
+  // The first copy lands late, during the second attempt's window: that
+  // attempt returns it (it used to be noticed only after its own 6 s).
+  const distinct = [];
+  const late = {
+    latestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: null }),
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        if (!distinct.includes(params[0])) distinct.push(params[0]);
+        return `sig${distinct.indexOf(params[0])}`;
+      }
+      if (method === "getSignatureStatuses") return { value: params[0].map((x) => (x === "sig0" && distinct.length >= 2 ? { confirmationStatus: "confirmed" } : null)) };
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const t1 = Date.now();
+  const r = await sendEscalating(late, payer, [ix], { floor: 100_000, attemptMs: 200, rebroadcastMs: 10, pollMs: 5 });
+  assert.deepEqual([r.signature, r.attempts], ["sig0", 2], "the earlier copy, from within the second attempt");
+  assert.ok(Date.now() - t1 < 380, "before the second attempt's window ran out");
+});
+
+test("a blockhash refusal after a backup landed the first copy is that copy, not a second (finding 84)", async () => {
+  let distinct = new Set();
+  const primary = {
+    latestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: null }),
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        distinct.add(params[0]);
+        throw Object.assign(new Error("sendTransaction: blockhash"), { rpcError: { code: PREFLIGHT_REFUSED, data: { err: "BlockhashNotFound" } } });
+      }
+      if (method === "getSignatureStatuses") return { value: params[0].map(() => ({ confirmationStatus: "confirmed" })) };
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const backup = { call: async () => "ok" };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  const sig = await sendWithFallback(primary, payer, [ix], [], { computeUnits: 50_000, microLamports: 10_000, rpcs: [backup], landedWaitMs: 50 });
+  assert.ok(sig);
+  assert.equal(distinct.size, 1, "not signed again");
+});

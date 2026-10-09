@@ -398,19 +398,18 @@ export class FailoverRpc extends Rpc {
     if (!mine) return { switched: false, reason: null, slots };
     const listed = new Set(mine.map((x) => x.signature));
     theirs.forEach((list, i) => {
-      const sig = list?.[0]?.signature;
-      if (i !== active && sig && !listed.has(sig) && !this.missing.has(sig)) this.missing.set(sig, { at: nowMs, from: i });
+      const row = list?.[0];
+      if (i !== active && row?.signature && !listed.has(row.signature) && !this.missing.has(row.signature)) this.missing.set(row.signature, { at: nowMs, from: i, slot: row.slot ?? null });
     });
-    // A candidate the active endpoint has, though no longer among its newest
-    // `depth` (a busy account moves past 100 in a minute), is not missing: ask
-    // for those exact signatures. Membership alone switched endpoints, with an
-    // urgent alert, every few minutes on a busy protocol (docs/09, finding 81).
-    const pending = [...this.missing.keys()].filter((sig) => !listed.has(sig));
-    if (pending.length) {
-      const st = await quiet(this.endpoints[active].call("getSignatureStatuses", [pending, { searchTransactionHistory: true }]));
-      if (!st) return { switched: false, reason: null, slots }; // unknown: decide next time
-      pending.forEach((sig, i) => { if (st.value?.[i]) listed.add(sig); });
-    }
+    // Judged on the list ingestion reads (`getSignaturesForAddress`), by slot:
+    // a candidate older than the oldest of a full newest-`depth` list has
+    // been pushed out of it by newer transactions (a busy protocol), and is
+    // there. Membership alone switched endpoints every few minutes on a busy
+    // protocol; asking the status cache instead missed a primary whose
+    // address index lags while its status cache is current (docs/09,
+    // findings 81 and 84).
+    const oldestListed = mine.length >= depth ? mine.at(-1)?.slot : null;
+    for (const [sig, m] of this.missing) if (oldestListed != null && m.slot != null && m.slot < oldestListed) listed.add(sig);
     for (const [sig, m] of this.missing) {
       if (listed.has(sig) || nowMs - m.at > 600_000) {
         this.missing.delete(sig);

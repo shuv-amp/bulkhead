@@ -339,6 +339,20 @@ async function guardianSend(ixs) {
 }
 
 /**
+ * A simulated freeze's error that no retry or price changes: no SOL for the
+ * fee, a fee payer that does not exist, or the Vault refusing it (a key no
+ * longer a live guardian, say). Null for anything else (a node behind the
+ * blockhash, or no error).
+ */
+function freezeRefusal(err) {
+  if (!err) return null;
+  if (err === "InsufficientFundsForFee" || err === "AccountNotFound" || err?.InsufficientFundsForRent) return new Error(`the freeze cannot be paid for (${JSON.stringify(err)}): fund the guardian key`);
+  const code = err?.InstructionError?.[1]?.Custom;
+  if (code != null) return new Error(`the Vault refuses this freeze (custom error ${code}; 8006 is NotGuardian), whatever the price`);
+  return null;
+}
+
+/**
  * The freeze: its own sending loop, as `stop.mjs` (docs/09, finding 82). No
  * preflight; every endpoint, every 400 ms; a fresh signature at twice the
  * price after each 6 s without confirmation, from at least
@@ -358,6 +372,9 @@ async function freezeSend(ixs, secs, basePrice) {
       const acc = await within(readProtocolAccount(), 1_500, null);
       return Boolean(acc) && freezeAlreadyCovers(decodeProtocol(acc.bytes).frozenUntil, wallNow(), secs);
     },
+    // Alongside the first attempt: a refusal no price changes ends the loop
+    // at the next check, with its cause (finding 84).
+    precheck: async () => freezeRefusal((await rpc.simulate(guardian.publicKey, ixs))?.err),
     onAttempt: ({ attempt, error, nextPrice }) => log({ level: "warn", msg: `freeze attempt ${attempt} did not confirm; signing again at ${nextPrice} µL/CU`, error: String(error.message).slice(0, 200) }),
     onFallback: (e) => log({ level: "error", msg: "the freeze ran and failed in its compute budget; sending it without one: check the budget settings", error: String(e.message).slice(0, 300) }),
   });
@@ -602,10 +619,14 @@ async function sweepCancels(event, eventTime, { refresh = true } = {}) {
   if (refresh) {
     await tryRefreshPendingTickets();
   }
-  for (const action of pendingCancels(state, policy)) {
-    afterCancel(action, await execute(action, event, eventTime));
+  // Four at a time: one after another, a sweep of eight tickets took over
+  // 15 s with 1.5 s RPC latency, and ingestion waited for it (docs/09, finding 84).
+  const queue = pendingCancels(state, policy);
+  for (let i = 0; i < queue.length; i += CANCEL_CONCURRENCY) {
+    await Promise.all(queue.slice(i, i + CANCEL_CONCURRENCY).map(async (action) => afterCancel(action, await execute(action, event, eventTime))));
   }
 }
+const CANCEL_CONCURRENCY = 4;
 
 /** A proposal to read by id (checkProposedChange), once; kept in the state file. */
 function queueCheck(changeId) {

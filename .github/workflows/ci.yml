@@ -168,7 +168,8 @@ jobs:
   scenarios:
     # The guardian on a real validator, one scenario per bug it once had
     # (cloud/e2e/guardian-scenarios.mjs): the incident hold across a restart,
-    # a restart after a quorum's unfreeze, a dead primary RPC; weekly also a
+    # a restart after a quorum's unfreeze, a dead primary RPC, a thief proposing
+    # ahead of an approved change, a replaced recovery key; weekly also a
     # forgotten cursor (about 10 minutes of quiet first).
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.scenarios == 'true'

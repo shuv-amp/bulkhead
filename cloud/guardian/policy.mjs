@@ -187,7 +187,7 @@ const POLICY_RULES = {
   maxPriorityMicroLamports: ["int", 0, 1e12],
   minPriorityMicroLamports: ["int", 0, 1e12],
   freezeMinPriorityMicroLamports: ["int", 0, 1e12],
-  freezeDeadlineS: ["int", 10, 3_600],
+  freezeDeadlineS: ["int", 10, 300],
 };
 const BASE58_KEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -1200,10 +1200,17 @@ export function assess(state, e, ctx, policy = DEFAULT_POLICY, act = true) {
     case "ticket_closed":
       state.pendingTickets.delete(e.ticketId);
       state.cancelled.delete(e.ticketId);
-      // Its release was counted once; a closed ticket is never released or
-      // scanned again, so its id need not be kept: the set grew by one for
-      // every ticket ever seen, for as long as the process ran (finding 83).
-      state.tickets.delete(e.ticketId);
+      // Its id stays for the longest rule's window (72h): a ticket scan from
+      // a node that has not seen the close yet still lists it, and without
+      // the id it was counted as a new release, which could freeze an honest
+      // protocol (docs/09, finding 84). After that, it goes: the set grew by
+      // one for every ticket ever seen (finding 83).
+      (state.closedAt ??= new Map()).set(e.ticketId, ctx.now);
+      for (const [id, at] of state.closedAt) {
+        if (at > ctx.now - OUTFLOW_KEEP_S) continue;
+        state.closedAt.delete(id);
+        state.tickets.delete(id);
+      }
       break;
     case "change_proposed":
       if (!policy.vetoLoosenings || state.vetoed.has(`c${e.id}`)) break;

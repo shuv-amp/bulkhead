@@ -219,20 +219,33 @@ test("the freshness cross-check leaves a primary that answers but is stale (find
   }
 });
 
-test("on a busy protocol, a signature the primary has but no longer lists in its newest 100 is not missing (finding 81)", async () => {
-  // The backup's newest is "b1", which the primary has but which 100 newer
-  // transactions have pushed out of its newest-100 list.
-  const newest100 = Array.from({ length: 100 }, (_, i) => ({ signature: `p${i}` }));
-  const f = stubFetch({
-    "a.invalid": (m, params) => ({
-      result: m === "getSlot" ? 1_000 : m === "getSignatureStatuses" ? { value: params[0].map((s) => (s === "b1" ? { confirmationStatus: "confirmed" } : null)) } : newest100,
-    }),
-    "b.invalid": (m) => ({ result: m === "getSlot" ? 1_000 : [{ signature: "b1" }] }),
+test("on a busy protocol, a signature pushed out of the primary's newest 100 is not missing; a lagging index still is (findings 81, 84)", async () => {
+  // The backup's newest is "b1" (slot 1000); 100 newer transactions (slots
+  // 1001-1100) fill the primary's newest-100 list.
+  const newest100 = Array.from({ length: 100 }, (_, i) => ({ signature: `p${i}`, slot: 1100 - i }));
+  let f = stubFetch({
+    "a.invalid": (m) => ({ result: m === "getSlot" ? 1_100 : newest100 }),
+    "b.invalid": (m) => ({ result: m === "getSlot" ? 1_100 : [{ signature: "b1", slot: 1_000 }] }),
   });
   try {
     const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"]);
     for (const t of [0, 31_000, 61_000, 120_000]) assert.equal((await rpc.crossCheck(PROTOCOL, { nowMs: t })).switched, false, `${t}`);
     assert.equal(rpc.url, "http://a.invalid");
+  } finally {
+    f.restore();
+  }
+  // The primary's address index lags (its newest listed is slot 900), though
+  // its status cache knows the backup's newest: ingestion reads the index, so
+  // that primary is blind, and is left.
+  f = stubFetch({
+    "a.invalid": (m, params) => ({ result: m === "getSlot" ? 1_000 : m === "getSignatureStatuses" ? { value: params[0].map(() => ({ confirmationStatus: "confirmed" })) } : [{ signature: "old", slot: 900 }] }),
+    "b.invalid": (m) => ({ result: m === "getSlot" ? 1_000 : [{ signature: "new", slot: 995 }] }),
+  });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"]);
+    assert.equal((await rpc.crossCheck(PROTOCOL, { nowMs: 0 })).switched, false);
+    const r = await rpc.crossCheck(PROTOCOL, { nowMs: 31_000 });
+    assert.equal(r.switched, true);
   } finally {
     f.restore();
   }

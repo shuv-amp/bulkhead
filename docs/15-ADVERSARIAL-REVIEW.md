@@ -9,7 +9,7 @@ Unaudited, like everything else here. This is not a substitute for the external 
 | Area | Read | Attacked with |
 |---|---|---|
 | `bulkhead-core` (limiter, EMA, ledger, governance, Floor checks) | All | New tests in `crates/bulkhead-core/tests/adversarial.rs`, run through the real core functions |
-| `programs/vault` (custody, brakes, governance, lifeboat, genesis, token, Pyth) | All | Account-validation review against `05 §5b`; admin- and guardian-key abuse walked through by hand |
+| `programs/vault` (custody, brakes, governance, lifeboat, genesis, token, Pyth) | All | Account-validation review against `05 §9`; admin- and guardian-key abuse walked through by hand |
 | `programs/floor` | Abort, propose, veto, approve, execute, restore, eject | Owner- and guardian-key abuse walked through by hand |
 | `cloud/guardian` | Policy and main loop | New tests in `cloud/test/adversarial.test.mjs`: an attacker who paces payouts against the policy |
 | The idea (`00`–`04`, README, pitch) | All | Section 4 |

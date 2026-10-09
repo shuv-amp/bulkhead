@@ -727,3 +727,16 @@ test("a failed cancel backs off; a refusal no retry changes stops it", () => {
   assert.equal(afterCancelFailure(undefined, refused(8049), 0).final, null, "anything else is retried");
   assert.equal(programErrorCode(new Error("no code")), null);
 });
+
+test("a stale ticket scan after a close does not count the ticket again; ids go after 72h (finding 84)", () => {
+  const s = newState();
+  const now = 10_000;
+  assess(s, released({ queued: 150_000n * USDC, ticketId: 7n }), { worst1h, now }, DEFAULT_POLICY, false);
+  assess(s, { kind: "ticket_closed", ticketId: 7n }, { now: now + 60 }, DEFAULT_POLICY, false);
+  // A node that has not seen the close lists the ticket again in its scan.
+  assess(s, released({ queued: 150_000n * USDC, ticketId: 7n }), { worst1h, now: now + 120 }, DEFAULT_POLICY, false);
+  assert.equal(s.outflows.reduce((t, o) => t + o.amount, 0n), 150_000n * USDC, "counted once");
+  // 72h later, another close prunes it.
+  assess(s, { kind: "ticket_closed", ticketId: 8n }, { now: now + 3 * 86_400 + 61 }, DEFAULT_POLICY, false);
+  assert.equal(s.tickets.has(7n), false);
+});
