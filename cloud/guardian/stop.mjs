@@ -84,7 +84,7 @@ async function verifyStopped() {
 
 /** Compute for the stop: grows with the code it replaces (measured: ~8.4k CU at 200 KB, ~93k at 10 MiB). */
 async function computeFor() {
-  const pd = await rpc.call("getAccountInfo", [b58encode(fc.programdata), { encoding: "base64", dataSlice: { offset: 0, length: 0 } }]).catch(() => null);
+  const pd = await rpc.call("getAccountInfo", [b58encode(fc.programdata), { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 0 } }]).catch(() => null);
   const size = pd?.value?.space ?? 10 * 1024 * 1024;
   return Math.min(1_400_000, 30_000 + Math.ceil(size / 100));
 }

@@ -10,7 +10,9 @@
 //   5. has ONE guardian stop the program, and calls it again;
 //   6. has TWO guardians restore the snapshot, calls it again, and checks the
 //      code is byte-identical to before;
-//   7. re-arms: a new abort buffer and a new snapshot, so a stop is ready again.
+//   7. re-arms: a new abort buffer and a new snapshot, so a stop is ready again;
+//   8. has the owner close the buffer step 4's withdrawn upgrade left behind
+//      (cloud/deploy/floor-buffers.mjs), which returns its rent.
 // Along the way every forbidden action (a stranger stopping, one guardian
 // restoring, an early upgrade, ...) is simulated and must fail with its exact
 // Floor error. Simulations change nothing on chain.
@@ -205,12 +207,34 @@ const c = await config();
 const armed = c.status === "live" && c.abortStaged && c.snapshotPinned && c.pendingKind === 0;
 say(`   status ${c.status}, abort staged ${c.abortStaged}, snapshot pinned ${c.snapshotPinned}, nothing pending ${c.pendingKind === 0}; guardians ${c.guardians.length} (quorum ${c.threshold}), upgrade delay ${c.upgradeDelayS / 3600}h`);
 
+say("\n7. the owner takes back the rent of a buffer nothing refers to (docs/09, finding 78)");
+// Step 3's upgrade buffer was cancelled: still frozen under Floor, an orphan.
+// The operator's tool (cloud/deploy/floor-buffers.mjs) finds it and closes it;
+// the stop button and the pin stay, and only the owner may close.
+await refused("closing the staged abort buffer", [f.closeBuffer(owner.publicKey, abort2)], "BufferInUse");
+await refused("closing the pinned snapshot", [f.closeBuffer(owner.publicKey, snapshot2)], "BufferInUse");
+await refused("closing the program's own data", [f.closeBuffer(owner.publicKey, b58encode(f.programdata))], "WrongBuffer");
+await refused("a stranger closing the orphan", [f.closeBuffer(stranger.publicKey, upgrade)], "NotOwner");
+const orphanRent = (await rpc.account(upgrade))?.lamports ?? 0;
+const ownerBefore = (await rpc.account(owner.publicKey)).lamports;
+const buffersOut = execFileSync("node", ["cloud/deploy/floor-buffers.mjs", url, floorProgram, program, "--close", `${dir}/keys/owner.json`], { encoding: "utf8" });
+const ownerGot = (await rpc.account(owner.publicKey)).lamports - ownerBefore;
+const leftover = (await f.heldBuffers(rpc)).map((b) => b.address).sort();
+const reclaimed =
+  orphanRent > 0 &&
+  !(await rpc.account(upgrade)) &&
+  ownerGot > orphanRent - 100_000 && ownerGot <= orphanRent && // the rent, less the close's fee
+  JSON.stringify(leftover) === JSON.stringify([abort2, snapshot2].sort());
+say(`   floor-buffers: ${buffersOut.trim().split("\n").filter((l) => /orphan|closed/.test(l)).join("; ")}`);
+say(`   the owner got ${ownerGot} of the orphan's ${orphanRent} lamports back (the rest paid the fee); Floor now holds only the stop button and the pin: ${reclaimed}`);
+
 const ok =
   afterRegister.sha256 === before.sha256 &&
   callStopped.err.includes("1179406162") && // Custom(0x464C4F52) "FLOR"
   after.sha256 === before.sha256 &&
   callAfter.err === callBefore.err &&
   armed &&
+  reclaimed &&
   failures === 0;
 say(ok ? "\nFLOOR DEMO PASSED" : `\nFLOOR DEMO FAILED${failures ? ` (${failures} forbidden actions were not refused as expected)` : ""}`);
 process.exit(ok ? 0 : 1);

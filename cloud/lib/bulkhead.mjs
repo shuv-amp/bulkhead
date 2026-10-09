@@ -1,7 +1,7 @@
 // Instruction builders for Bulkhead Vault and Floor, and the views a guardian
 // reads. Account orders follow programs/vault/src and programs/floor/src.
 
-import { key, findPda, concat, i64le, u64le, IDS, decodeAttestation } from "./solana.mjs";
+import { key, findPda, concat, i64le, u64le, IDS, decodeAttestation, b58encode as b58 } from "./solana.mjs";
 
 const w = (pubkey) => ({ pubkey: key(pubkey), writable: true });
 const r = (pubkey) => ({ pubkey: key(pubkey) });
@@ -93,6 +93,19 @@ export class VaultClient {
   }
 }
 
+/**
+ * What each buffer Floor holds is for, as `close_buffer` judges it
+ * (`buffer_closable`, docs/09 finding 78): the staged abort buffer, the pin,
+ * the pending upgrade's or restore's buffer, or an orphan the owner may close.
+ * `config` is `decodeFloor`'s result.
+ */
+export function floorBufferRole(config, address) {
+  if (address === config.abortBuffer) return "abort";
+  if (address === config.snapshotBuffer) return "pin";
+  if ((config.pendingKind === 1 || config.pendingKind === 2) && address === config.pendingTarget) return "pending";
+  return "orphan";
+}
+
 export class FloorClient {
   constructor(floorProgram, protectedProgram) {
     this.program = key(floorProgram);
@@ -173,6 +186,22 @@ export class FloorClient {
     const a = [w(this.config), w(this.programdata), r(this.authority), r(IDS.loaderV3), w(owner)];
     if (newAuthority) a.push(s(newAuthority));
     return this.ix(7, new Uint8Array(0), [...a, ...held.map((b) => w(b))]);
+  }
+  /**
+   * Every loader-v3 buffer whose authority is this program's Floor PDA:
+   * `[{ address, lamports }]`. Buffer accounts begin with the tag 1 (u32) and
+   * an authority option, so the PDA sits at byte 5. Read at "confirmed", like
+   * every other read here: the RPC's default, "finalized", still lists for
+   * ~13 s a buffer that a restore or close has just consumed.
+   */
+  async heldBuffers(rpc) {
+    const rows = await rpc.call("getProgramAccounts", [b58(IDS.loaderV3), {
+      encoding: "base64",
+      commitment: "confirmed",
+      dataSlice: { offset: 0, length: 0 },
+      filters: [{ memcmp: { offset: 0, bytes: "2UzHM" } }, { memcmp: { offset: 4, bytes: "2" } }, { memcmp: { offset: 5, bytes: b58(this.authority) } }],
+    }]);
+    return rows.map((r) => ({ address: r.pubkey, lamports: r.account.lamports }));
   }
   /** The owner closes a buffer Floor holds that nothing refers to; its rent goes to the owner (docs/09, 78). */
   closeBuffer(owner, buffer) {
