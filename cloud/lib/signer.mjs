@@ -90,7 +90,7 @@ export function priorityPrice(fees, { percentile = 0.9, cap = 1_000_000 } = {}) 
  * out the whole minute and never land. Once the blockhash has expired it can
  * never land, and that is said at once.
  */
-export async function send(rpc, payer, instructions, extraSigners = [], { skipPreflight = false, computeUnits = 0, microLamports = 0, rpcs = [], pollMs = 500, rebroadcastMs = 2_000, confirmMs = 60_000 } = {}) {
+export async function send(rpc, payer, instructions, extraSigners = [], { skipPreflight = false, computeUnits = 0, microLamports = 0, rpcs = [], pollMs = 500, rebroadcastMs = 2_000, confirmMs = 60_000, alsoWatch = [] } = {}) {
   const ixs = computeUnits > 0 ? [...computeBudget(computeUnits, microLamports), ...instructions] : instructions;
   const latest = rpc.latestBlockhash ? await rpc.latestBlockhash() : { blockhash: await rpc.blockhash(), lastValidBlockHeight: null };
   const { message, signers } = compileMessage(payer.publicKey, ixs, latest.blockhash);
@@ -120,15 +120,21 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
   }
   // One failed poll is not an answer: the transaction may still land, and
   // giving up on it here sent a second one later (docs/09, finding 82).
+  // `alsoWatch`: earlier signed copies of the same intent (`sendEscalating`);
+  // one of them landing is the answer too, and is returned at once.
+  const watched = [signature, ...alsoWatch];
+  const ok = (st) => st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
   const status = async () => {
-    let st;
+    let all;
     try {
-      st = (await rpc.call("getSignatureStatuses", [[signature]])).value?.[0];
+      all = (await rpc.call("getSignatureStatuses", [watched])).value ?? [];
     } catch {
-      return false;
+      return null;
     }
+    const st = all[0];
     if (st?.err) throw Object.assign(new Error(`transaction ${signature} failed: ${JSON.stringify(st.err)}`), { signature, onChainErr: st.err });
-    return Boolean(st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized"));
+    const i = all.findIndex(ok);
+    return i >= 0 ? watched[i] : null;
   };
   const again = () => {
     for (const r of [rpc, ...rpcs]) void Promise.resolve().then(() => r.call("sendTransaction", [tx, { ...opts, skipPreflight: true }])).catch(() => {});
@@ -136,14 +142,16 @@ export async function send(rpc, payer, instructions, extraSigners = [], { skipPr
   const started = Date.now();
   let sentAt = started;
   for (;;) {
-    if (await status()) return signature;
+    const landed = await status();
+    if (landed) return landed;
     if (Date.now() - started >= confirmMs) break;
     if (Date.now() - sentAt >= rebroadcastMs) {
       sentAt = Date.now();
       if (latest.lastValidBlockHeight != null) {
         const height = await rpc.call("getBlockHeight", [{ commitment: "confirmed" }]).catch(() => null);
         if (height != null && height > latest.lastValidBlockHeight) {
-          if (await status()) return signature;
+          const landed = await status();
+          if (landed) return landed;
           throw Object.assign(new Error(`transaction ${signature} expired unconfirmed (its blockhash is no longer valid)`), { signature, expired: true });
         }
       }
@@ -193,6 +201,10 @@ export async function sendWithFallback(rpc, payer, instructions, extraSigners = 
     if (!(opts.computeUnits > 0) || e.rpcError?.code !== PREFLIGHT_REFUSED) throw e;
     const budgetIxs = opts.microLamports > 0 ? 2 : 1;
     if (refusalCause(e, budgetIxs) === "blockhash") {
+      // A backup may have landed the first copy already (it skipped the
+      // preflight the lagging node refused): then that is the answer, and a
+      // second copy would fail as a duplicate (docs/09, finding 84).
+      if (opts.rpcs?.length && e.signature && (await landedBy(rpc, e.signature, opts.landedWaitMs ?? 2_000)) === "confirmed") return e.signature;
       // Signed again with a fresh blockhash, budget kept.
       try {
         return await send(rpc, payer, instructions, extraSigners, opts);
@@ -251,17 +263,29 @@ export { key };
  * Returns `{ signature, attempts, price }`; `signature` is null when
  * `settled()` said so first.
  */
-export async function sendEscalating(rpc, payer, instructions, { computeUnits = 50_000, price = 0, floor = 0, cap = 1_000_000, rpcs = [], attemptMs = 6_000, rebroadcastMs = 400, pollMs = 400, deadlineMs = 90_000, settled = async () => false, onAttempt = () => {}, onFallback = () => {} } = {}) {
+export async function sendEscalating(rpc, payer, instructions, { computeUnits = 50_000, price = 0, floor = 0, cap = 1_000_000, rpcs = [], attemptMs = 6_000, rebroadcastMs = 400, pollMs = 400, deadlineMs = 90_000, retryPauseMs = 1_000, settled = async () => false, precheck = null, onAttempt = () => {}, onFallback = () => {} } = {}) {
   const started = Date.now();
   let p = Math.min(cap, Math.max(floor, price));
   let units = computeUnits;
   const sent = [];
+  // A refusal no price can change (no SOL for the fee, a key that is not a
+  // guardian), found by a simulation run alongside the first attempt. Without
+  // a preflight it looked like congestion for the whole deadline (finding 84).
+  let refused = null;
+  if (precheck) Promise.resolve().then(precheck).then((e) => { if (e) refused = e; }, () => {});
   for (let attempt = 1; ; attempt++) {
+    const attemptStarted = Date.now();
     try {
-      const signature = await send(rpc, payer, instructions, [], { skipPreflight: true, computeUnits: units, microLamports: units > 0 ? p : 0, rpcs, rebroadcastMs, pollMs, confirmMs: attemptMs });
+      const signature = await send(rpc, payer, instructions, [], { skipPreflight: true, computeUnits: units, microLamports: units > 0 ? p : 0, rpcs, rebroadcastMs, pollMs, confirmMs: attemptMs, alsoWatch: sent });
       return { signature, attempts: attempt, price: p };
     } catch (e) {
-      if (e.signature) sent.push(e.signature);
+      // A copy that went out and was not confirmed in its window is what a
+      // higher price answers. One that failed at once (an endpoint that
+      // refused it, no blockhash) is not: it waits and goes again at the same
+      // price. Doubling there ran up to the cap in a few round trips, and
+      // spun (docs/09, finding 84).
+      const timedOut = Boolean(e.signature) && /not confirmed|expired/.test(e.message);
+      if (e.signature && timedOut) sent.push(e.signature);
       const ie = e.onChainErr?.InstructionError;
       if (e.onChainErr) {
         // It ran and failed: only a refused budget is worth another try.
@@ -270,11 +294,13 @@ export async function sendEscalating(rpc, payer, instructions, { computeUnits = 
         onFallback(e);
       }
       const landed = sent.length ? await rpc.call("getSignatureStatuses", [sent, { searchTransactionHistory: false }]).catch(() => null) : null;
-      const ok = landed?.value?.findIndex((st) => st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized"));
-      if (ok != null && ok >= 0) return { signature: sent[ok], attempts: attempt, price: p };
+      const okAt = landed?.value?.findIndex((st) => st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized"));
+      if (okAt != null && okAt >= 0) return { signature: sent[okAt], attempts: attempt, price: p };
       if (await settled().catch(() => false)) return { signature: null, attempts: attempt, price: p };
+      if (refused) throw refused;
       if (Date.now() - started >= deadlineMs) throw e;
-      p = Math.min(cap, Math.max(p * 2, floor, 1));
+      if (timedOut) p = Math.min(cap, Math.max(p * 2, floor, 1));
+      else await new Promise((r) => setTimeout(r, Math.max(0, retryPauseMs - (Date.now() - attemptStarted))));
       onAttempt({ attempt, error: e, nextPrice: p });
     }
   }

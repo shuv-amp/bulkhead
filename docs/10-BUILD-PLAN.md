@@ -15,9 +15,9 @@ Built, and passing (`09` has every number):
 | Part | State |
 |---|---|
 | `bulkhead-core` | Limiter (dual GCRA), EMA, value, prices, ledger, classification, governance rules, Floor helpers (loader-v3 parsers, snapshot identity, restore and eject rules, the abort binaries). Zero dependencies, `no_std`. |
-| Verification of the core | An independent Python reference and differential runner, 119 golden outputs, 36 regression fixtures, 25 property tests, 6 exhaustive tests, 15 Kani harnesses (all verified on 6 Oct; three strengthened on 8 Oct and not rerun since), and mutation testing |
+| Verification of the core | An independent Python reference and differential runner, 119 golden outputs, 36 regression fixtures, 26 property tests, 6 exhaustive tests, 15 Kani harnesses (15/15 verified on 8 Oct, 354 s), and mutation testing |
 | Programs (Pinocchio 0.11.2, sBPF v3, Agave 4.3.0 toolchain) | Floor (64 KB), Vault (189 KB), Harbor, the demo protocol (9 KB), on a macOS build of 8 Oct. Each binary passes our SIMD-0500 check (`e_flags == 3`). |
-| Program tests (LiteSVM, the real agave runtime and loader, mainnet features) | 103 tests (36 Floor, 67 Vault: every scenario S1, S4, S7, S8, S9, S10; negative tests; compute; the account-substitution sweep) and the program-vs-model differentials (`09 §7`) |
+| Program tests (LiteSVM, the real agave runtime and loader, mainnet features) | 105 tests (37 Floor, 68 Vault: every scenario S1, S4, S7, S8, S9, S10; negative tests; compute; the account-substitution sweep) and the program-vs-model differentials (`09 §7`) |
 | Bulkhead Cloud | Zero-dependency JavaScript client, guardian bot, status page |
 | End to end | A local validator, the programs, the guardian and an attacker. The attacker ordered 1.2M USDC and received 100k (the burst is 2% of what is in the vault at each payout since the 29 Sep fix; 200k before). The guardian froze the protocol on its own and cancelled every queued payout. |
 | Tools | `tools/floor_check.py`: who can upgrade a program, and whether it is ready for SIMD-0500 |
@@ -37,7 +37,7 @@ Daily rhythm (NPT):
 - 09:00–13:00 deep build.
 - 13:30–15:00 B block (US evenings overlap).
 - 15:00–20:00 build.
-- 20:00 three lines in `docs/LOG.md` (done / blocked / tomorrow).
+- 20:00 three lines in the daily log, kept outside the repository (done / blocked / tomorrow).
 
 Commit at least daily. The repository's first commit date is our prior-code disclosure.
 

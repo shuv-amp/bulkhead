@@ -10,7 +10,8 @@
 //     buffer and the current snapshot pin (anyone may re-pin; finding 66);
 //   - sizes the compute budget to the program (a stop of a 10 MiB program
 //     costs ~93k CU, above the guardian's usual 50k) and takes its priority
-//     price from recent fees on the program's accounts, doubling it after each
+//     price from recent fees on the program's accounts (never below 10,000
+//     µL/CU), doubling it after each
 //     attempt that lost its slot, up to --max-micro-lamports;
 //   - sends to every endpoint without preflight and re-sends every slot.
 //     Anyone may extend the program, and loader-v3 refuses an upgrade (a stop
