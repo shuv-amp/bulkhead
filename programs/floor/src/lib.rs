@@ -13,7 +13,9 @@
 //!    of the abort, to be byte-identical to the code that was running. A new
 //!    fix instead needs quorum approval of that exact buffer, or the full delay.
 //! 4. **The only fast path to new code goes through a visible stop.**
-//! 5. `Close` (which destroys a program) is never reachable.
+//! 5. `Close` of the program (which destroys it) is never reachable. Floor
+//!    closes only buffers it holds that nothing refers to any more, to return
+//!    their rent (`close_buffer`).
 //!
 //! All rules live in `bulkhead-core` (proved with Kani, tested three ways);
 //! this program loads accounts, checks them, calls the core and performs the
@@ -32,9 +34,9 @@ pub use state::{
 };
 
 use bulkhead_core::floor::{
-    buffer_authority, can_restore, deployable_after_simd0500, elf_info, is_canonical_abort,
-    program_programdata, programdata_header, upgrade_eta, RestoreSource, BUFFER_DATA_OFFSET,
-    PROGRAMDATA_DATA_OFFSET,
+    buffer_authority, buffer_closable, can_restore, deployable_after_simd0500, elf_info,
+    is_canonical_abort, program_programdata, programdata_header, upgrade_eta, RestoreSource,
+    BUFFER_DATA_OFFSET, PROGRAMDATA_DATA_OFFSET,
 };
 use bulkhead_core::governance::{
     can_eject, can_execute, quorum, GovError, Schedule, CHANGE_EXPIRY_S, MAX_HEARTBEAT_INTERVAL_S,
@@ -89,6 +91,7 @@ pub mod ix {
     pub const EJECT: u8 = 10;
     pub const CANCEL: u8 = 11;
     pub const REPLACE_RECOVERY: u8 = 12;
+    pub const CLOSE_BUFFER: u8 = 13;
 }
 
 /// Event tags (first field of every `Program data:` event).
@@ -107,6 +110,7 @@ pub mod ev {
     pub const CANCELLED: &[u8] = b"floor:cancelled";
     pub const DELAY_RAISED: &[u8] = b"floor:delay_raised";
     pub const RECOVERY_REPLACED: &[u8] = b"floor:recovery_replaced";
+    pub const BUFFER_CLOSED: &[u8] = b"floor:buffer_closed";
 }
 
 pub fn process_instruction(
@@ -129,6 +133,7 @@ pub fn process_instruction(
         ix::EJECT => eject(program_id, accounts, args),
         ix::CANCEL => cancel(program_id, accounts),
         ix::REPLACE_RECOVERY => replace_recovery(program_id, accounts, args),
+        ix::CLOSE_BUFFER => close_buffer(program_id, accounts),
         _ => Err(FloorError::InvalidInstruction.into()),
     }
 }
@@ -289,6 +294,39 @@ fn cpi_upgrade(
     invoke_signed(
         &ix,
         &[programdata, program, buffer, spill, rent, clock, authority],
+        &[Signer::from(&seeds)],
+    )
+}
+
+/// Loader-v3 `Close` of a buffer Floor holds, signed by Floor's authority PDA;
+/// its rent goes to `recipient`. Only ever a buffer: `check_frozen_buffer`
+/// accepts nothing else, and a buffer's `Close` takes no program account.
+fn cpi_close_buffer(
+    c: &Config,
+    buffer: &AccountView,
+    recipient: &AccountView,
+    authority: &AccountView,
+) -> ProgramResult {
+    let metas = [
+        InstructionAccount::writable(buffer.address()),
+        InstructionAccount::writable(recipient.address()),
+        InstructionAccount::readonly_signer(authority.address()),
+    ];
+    let data = 5u32.to_le_bytes(); // UpgradeableLoaderInstruction::Close
+    let ix = InstructionView {
+        program_id: &LOADER_V3,
+        data: &data,
+        accounts: &metas,
+    };
+    let bump = [c.authority_bump];
+    let seeds = [
+        Seed::from(AUTHORITY_SEED),
+        Seed::from(&c.program),
+        Seed::from(&bump),
+    ];
+    invoke_signed(
+        &ix,
+        &[buffer, recipient, authority],
         &[Signer::from(&seeds)],
     )
 }
@@ -939,8 +977,13 @@ fn approve(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
 //   3 buffer [w], 4 spill [w] (the owner: the buffer's rent returns to it),
 //   5 rent, 6 clock, 7 authority PDA, 8 loader-v3.
 // ReleaseAuthority: 0 config [w], 1 programdata [w], 2 authority PDA,
-//   3 loader-v3, 4 owner [w] (receives the config's rent),
-//   5 new authority (omitted when the target is zero: program becomes immutable).
+//   3 loader-v3, 4 owner [w] (receives the config's and the buffers' rent),
+//   5 new authority [s] (omitted when the target is zero: program becomes
+//   immutable), then the staged abort buffer [w] and the pinned snapshot [w],
+//   each required while set: nothing could close them once the config is gone.
+//   The new authority signs (`SetAuthorityChecked`): a mistyped key nobody
+//   holds fails here, while the config still exists, instead of leaving the
+//   program with no one able to upgrade it (issue #39).
 // SetGuardians / SetOwner / SetDelay: 0 config [w].
 fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
@@ -1027,14 +1070,27 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
             if key(acc(accounts, 4)?) != c.owner {
                 return Err(FloorError::NotOwner.into());
             }
+            // Close what Floor still holds: after this nothing can (issue #37).
+            let rest = accounts.get(5..).unwrap_or(&[]);
+            for held in [c.abort_buffer, c.snapshot_buffer] {
+                if held == [0; 32] {
+                    continue;
+                }
+                let buffer = rest
+                    .iter()
+                    .find(|a| key(a) == held)
+                    .ok_or(FloorError::WrongBuffer)?;
+                check_frozen_buffer(program_id, &c, buffer)?;
+                cpi_close_buffer(&c, buffer, &accounts[4], authority)?;
+            }
             let bump = [c.authority_bump];
             let seeds = [
                 Seed::from(AUTHORITY_SEED),
                 Seed::from(&c.program),
                 Seed::from(&bump),
             ];
-            let data = 4u32.to_le_bytes(); // SetAuthority
             if c.pending_target == [0; 32] {
+                let data = 4u32.to_le_bytes(); // SetAuthority, to none
                 let metas = [
                     InstructionAccount::writable(programdata.address()),
                     InstructionAccount::readonly_signer(authority.address()),
@@ -1050,10 +1106,12 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
                 if key(new_authority) != c.pending_target {
                     return Err(FloorError::WrongBuffer.into());
                 }
+                require_signer(new_authority)?;
+                let data = 7u32.to_le_bytes(); // SetAuthorityChecked
                 let metas = [
                     InstructionAccount::writable(programdata.address()),
                     InstructionAccount::readonly_signer(authority.address()),
-                    InstructionAccount::readonly(new_authority.address()),
+                    InstructionAccount::readonly_signer(new_authority.address()),
                 ];
                 let ix = InstructionView {
                     program_id: &LOADER_V3,
@@ -1323,5 +1381,48 @@ fn replace_recovery(
         &recovery,
         &[signers & alive],
     ]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 13. Close a buffer Floor holds that nothing refers to (owner)
+// ---------------------------------------------------------------------------
+//
+// Accounts: 0 config, 1 owner [s][w] (receives the rent), 2 buffer [w],
+//           3 authority PDA, 4 loader-v3.
+//
+// A pin that is replaced (`pin_snapshot`, the re-pin in `abort`) or cleared by
+// an upgrade, and a proposal's buffer orphaned by a cancel or a stop, are
+// still buffers whose authority is Floor's PDA; without this their rent was
+// locked for good (issue #37). Closing them is left to the owner, rather than
+// done where they are orphaned, so that a stop never depends on it (finding
+// 66). The abort buffer, the pin and the pending proposal's buffer are never
+// closed (`buffer_closable`). Only the owner may, so nobody can close a buffer
+// someone has just frozen to propose or pin in their next transaction.
+fn close_buffer(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+    let c = load_config(program_id, acc(accounts, 0)?)?;
+    let owner = acc(accounts, 1)?;
+    require_signer(owner)?;
+    if key(owner) != c.owner {
+        return Err(FloorError::NotOwner.into());
+    }
+    let (buffer, authority) = (acc(accounts, 2)?, acc(accounts, 3)?);
+    check_authority(program_id, &c, authority)?;
+    check_frozen_buffer(program_id, &c, buffer)?;
+    let pending_buffer = match c.pending_kind {
+        kind::UPGRADE | kind::RESTORE => c.pending_target,
+        _ => [0; 32],
+    };
+    if !buffer_closable(
+        &key(buffer),
+        &c.abort_buffer,
+        &c.snapshot_buffer,
+        &pending_buffer,
+    ) {
+        return Err(FloorError::BufferInUse.into());
+    }
+    let closed = key(buffer);
+    cpi_close_buffer(&c, buffer, owner, authority)?;
+    sys::event(&[ev::BUFFER_CLOSED, &c.program, &closed]);
     Ok(())
 }

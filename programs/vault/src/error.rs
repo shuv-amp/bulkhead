@@ -65,6 +65,9 @@ pub enum VaultError {
     /// The ticket at this address is not the one the instruction names: a
     /// closed ticket's address is reused by its payer's next one.
     WrongTicket,
+    /// A lifeboat exit to a destination this program owns, which could never
+    /// move the tokens on (issue #38).
+    StrandedDestination,
 }
 
 impl From<VaultError> for ProgramError {

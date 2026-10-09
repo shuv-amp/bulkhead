@@ -56,6 +56,7 @@ pub mod err {
     pub const EXPIRED: u32 = 7030;
     pub const CANNOT_EJECT: u32 = 7031;
     pub const ABORT_DOES_NOT_FIT: u32 = 7035;
+    pub const BUFFER_IN_USE: u32 = 7036;
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +509,9 @@ impl Floor {
         self.ix(vec![7], vec![AccountMeta::new(self.config, false)])
     }
 
-    pub fn execute_release(&self, owner: &Address, new_authority: Option<&Address>) -> Instruction {
+    /// The new authority signs (issue #39); `held` are the staged abort buffer
+    /// and the pinned snapshot, which the release closes (issue #37).
+    pub fn execute_release(&self, owner: &Address, new_authority: Option<&Address>, held: &[Address]) -> Instruction {
         let mut a = vec![
             AccountMeta::new(self.config, false),
             AccountMeta::new(self.programdata, false),
@@ -517,9 +520,24 @@ impl Floor {
             AccountMeta::new(*owner, false),
         ];
         if let Some(n) = new_authority {
-            a.push(AccountMeta::new_readonly(*n, false));
+            a.push(AccountMeta::new_readonly(*n, true));
         }
+        a.extend(held.iter().map(|b| AccountMeta::new(*b, false)));
         self.ix(vec![7], a)
+    }
+
+    /// The owner closes a buffer Floor holds that nothing refers to (issue #37).
+    pub fn close_buffer(&self, owner: &Address, buffer: &Address) -> Instruction {
+        self.ix(
+            vec![13],
+            vec![
+                AccountMeta::new_readonly(self.config, false),
+                AccountMeta::new(*owner, true),
+                AccountMeta::new(*buffer, false),
+                AccountMeta::new_readonly(self.authority, false),
+                AccountMeta::new_readonly(LOADER_V3, false),
+            ],
+        )
     }
 
     pub fn restore_snapshot(

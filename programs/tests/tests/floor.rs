@@ -505,15 +505,28 @@ fn release_authority_hands_the_key_back_after_the_delay() {
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let f = &p.f;
-    let new_auth = Keypair::new().pubkey();
+    let new_key = Keypair::new();
+    let new_auth = new_key.pubkey();
     env.ok(
         &[f.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &new_auth, &[], None)],
         &[&p.owner],
     );
     env.advance(3 * DAY);
+    let held = [p.abort_buffer, p.snapshot];
+    // The new authority signs (issue #39): a key nobody holds fails here,
+    // while the config and every stop still exist.
+    let mut unsigned = f.execute_release(&p.owner.pubkey(), Some(&new_auth), &held);
+    unsigned.accounts[5].is_signer = false;
+    assert_eq!(env.fails(&[unsigned], &[]), err::MISSING_SIGNATURE);
+    // The abort buffer and the pin are closed with it (issue #37): both required.
+    let partial = f.execute_release(&p.owner.pubkey(), Some(&new_auth), &held[..1]);
+    assert_eq!(env.fails(&[partial], &[&new_key]), err::WRONG_BUFFER);
+    let rent = env.account(&p.abort_buffer).lamports + env.account(&p.snapshot).lamports;
+    let config_rent = env.account(&f.config).lamports;
+    let before = env.account(&p.owner.pubkey()).lamports;
     env.ok(
-        &[f.execute_release(&p.owner.pubkey(), Some(&new_auth))],
-        &[],
+        &[f.execute_release(&p.owner.pubkey(), Some(&new_auth), &held)],
+        &[&new_key],
     );
     assert_eq!(
         env.upgrade_authority(&f.programdata),
@@ -526,6 +539,72 @@ fn release_authority_hands_the_key_back_after_the_delay() {
             .unwrap_or(true),
         "config closed"
     );
+    for b in held {
+        assert!(env.svm.get_account(&b).map(|a| a.lamports == 0).unwrap_or(true), "buffer closed");
+    }
+    assert_eq!(env.account(&p.owner.pubkey()).lamports, before + rent + config_rent);
+}
+
+/// Issue #37: a pin replaced or cleared, and a proposal's buffer orphaned by a
+/// cancel, kept their rent locked under Floor's authority for good. The owner
+/// now closes them; the stop, the pin and the pending proposal's buffer never.
+#[test]
+fn orphaned_buffers_return_their_rent_to_the_owner() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let owner = p.owner.pubkey();
+    let gone = |env: &Env, b: &solana_address::Address| env.svm.get_account(b).map(|a| a.lamports == 0).unwrap_or(true);
+
+    // What Floor relies on is never closed.
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    for b in [p.abort_buffer, p.snapshot, v2] {
+        assert_eq!(env.fails(&[f.close_buffer(&owner, &b)], &[&p.owner]), err::BUFFER_IN_USE);
+    }
+    // Nor the program itself: only a buffer can pass, so `Close` of the
+    // programdata stays unreachable.
+    for not_a_buffer in [f.programdata, f.program] {
+        assert!(env.send(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]).is_err());
+    }
+    // A buffer someone still holds is not Floor's to close.
+    let theirs = env.write_buffer(&honest_fix(), &p.owner);
+    assert_eq!(env.fails(&[f.close_buffer(&owner, &theirs)], &[&p.owner]), err::BUFFER_NOT_FROZEN);
+
+    // A cancel orphans the proposal's buffer: only the owner closes it, and
+    // the rent goes to the owner.
+    env.ok(&[f.cancel(&owner)], &[&p.owner]);
+    assert_eq!(env.fails(&[f.close_buffer(&gs[0], &v2)], &[&p.g[0]]), err::NOT_OWNER);
+    let mut unsigned = f.close_buffer(&owner, &v2);
+    unsigned.accounts[1].is_signer = false;
+    assert_eq!(env.fails(&[unsigned], &[]), err::MISSING_SIGNATURE);
+    let (rent, before) = (env.account(&v2).lamports, env.account(&owner).lamports);
+    env.ok(&[f.close_buffer(&owner, &v2)], &[&p.owner]);
+    assert!(gone(&env, &v2));
+    assert_eq!(env.account(&owner).lamports, before + rent);
+
+    // A re-pin orphans the old pin.
+    let pin2 = env.write_buffer(&honest_v1(), &p.owner);
+    env.set_buffer_authority(&pin2, &p.owner, &f.authority);
+    env.ok(&[f.pin_snapshot(&pin2)], &[]);
+    env.ok(&[f.close_buffer(&owner, &p.snapshot)], &[&p.owner]);
+    assert!(gone(&env, &p.snapshot));
+
+    // An upgrade orphans the pin it replaced.
+    let v3 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v3, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, UPGRADE, &v3, &[], Some(&v3))], &[&p.owner]);
+    env.advance(3 * DAY);
+    env.ok(&[f.execute_code(&v3, &owner)], &[]);
+    env.ok(&[f.close_buffer(&owner, &pin2)], &[&p.owner]);
+    assert!(gone(&env, &pin2));
+
+    // The stop still works after all of it.
+    env.next_slot();
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, None)], &[&p.g[0]]);
+    env.next_slot();
+    assert!(env.call(&f.program).is_err());
 }
 
 #[test]
@@ -806,6 +885,8 @@ fn every_floor_account_substitution_is_refused() {
     heartbeat_all(&mut env);
     s.run(&mut env, "execute upgrade", f.execute_code(&v2, &p.owner.pubkey()), &[], &[]);
     env.next_slot();
+    // The upgrade left the old pin orphaned: the owner takes its rent back.
+    s.run(&mut env, "close orphaned buffer", f.close_buffer(&p.owner.pubkey(), &p.snapshot), &[], &[]);
 
     // The snapshot no longer matches: pin one of the new code; stage a fresh abort buffer.
     let snap2 = env.write_buffer(&honest_fix(), &stranger);
@@ -864,10 +945,11 @@ fn every_floor_account_substitution_is_refused() {
     let gs3: Vec<_> = p.g.iter().map(|k| k.pubkey()).collect();
     let reg = f3.register(&payer, &team3.pubkey(), &p.owner.pubkey(), &gs3, 2, 7 * DAY, 3 * DAY);
     s.run(&mut env, "register", reg, &[], &[any(0, "rent payer: any funded signer")]);
-    let new_auth = Keypair::new().pubkey();
+    let new_key = Keypair::new();
+    let new_auth = new_key.pubkey();
     env.ok(&[f.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &new_auth, &[], None)], &[&p.owner]);
     env.advance(7 * DAY);
-    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth)), &[], &[]);
+    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[]);
 
     println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds", s.attempts, s.runs, s.unsignable);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));

@@ -198,7 +198,14 @@ pub fn propose_exit(
 // 27. execute_lifeboat_exit (anyone, once executable)
 // ---------------------------------------------------------------------------
 // Accounts: 0 protocol, 1 vault [w], 2 lifeboat token PDA [w], 3 mint,
-//           4 destination token account [w], 5 token program.
+//           4 destination token account [w], 5 token program,
+//           6 the destination (the token account's owner).
+//
+// A destination this program owns (a vault, the protocol, a backing: any of
+// its PDAs) can never send the tokens on, so an exit there would strand them;
+// the exit is refused and they stay in the lifeboat, from which the admin or a
+// guardian quorum can move them back (issue #38). Off-curve alone is not the
+// test: a multisig vault is a PDA too, and a proper destination.
 pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
@@ -229,6 +236,13 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
     let (dmint, downer, _) = token::account_info(dest)?;
     if dmint != v.mint || downer != p.lifeboat_destination {
         return Err(VaultError::RecipientOwnerMismatch.into());
+    }
+    let destination = acc(accounts, 6)?;
+    if key(destination) != downer {
+        return Err(VaultError::RecipientOwnerMismatch.into());
+    }
+    if destination.owned_by(program_id) {
+        return Err(VaultError::StrandedDestination.into());
     }
     let amount = v.exit_amount;
     let signer = VaultSigner::new(&v);

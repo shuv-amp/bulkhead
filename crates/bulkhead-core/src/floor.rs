@@ -189,6 +189,25 @@ pub fn can_restore(
     }
 }
 
+/// Whether Floor may close a buffer it holds (issue #37). A buffer stops being
+/// the pin when it is replaced or the live code changes, and a proposal's
+/// buffer is orphaned by a cancel or a stop; nothing else ever closes them, so
+/// their rent would be locked for good. Three buffers are never closed: the
+/// staged abort buffer (the stop), the pinned snapshot (the quorum's restore),
+/// and the buffer the pending proposal names (`pending_buffer`, zero when the
+/// proposal is not an upgrade or restore).
+pub fn buffer_closable(
+    buffer: &[u8; 32],
+    abort_buffer: &[u8; 32],
+    snapshot_buffer: &[u8; 32],
+    pending_buffer: &[u8; 32],
+) -> bool {
+    *buffer != [0; 32]
+        && buffer != abort_buffer
+        && buffer != snapshot_buffer
+        && buffer != pending_buffer
+}
+
 // ---------------------------------------------------------------------------
 // The abort binary, assembled here from source
 // ---------------------------------------------------------------------------

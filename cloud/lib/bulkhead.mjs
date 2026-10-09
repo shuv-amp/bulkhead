@@ -164,6 +164,20 @@ export class FloorClient {
       r(IDS.rent), r(IDS.clock), r(this.authority), r(IDS.loaderV3),
     ]);
   }
+  /**
+   * Execute a pending ReleaseAuthority (anyone, once due). A release to a key
+   * needs that key's signature (SetAuthorityChecked); `held` are the staged
+   * abort buffer and the pinned snapshot, which it closes (docs/09, 78 and 80).
+   */
+  executeRelease(owner, newAuthority, held = []) {
+    const a = [w(this.config), w(this.programdata), r(this.authority), r(IDS.loaderV3), w(owner)];
+    if (newAuthority) a.push(s(newAuthority));
+    return this.ix(7, new Uint8Array(0), [...a, ...held.map((b) => w(b))]);
+  }
+  /** The owner closes a buffer Floor holds that nothing refers to; its rent goes to the owner (docs/09, 78). */
+  closeBuffer(owner, buffer) {
+    return this.ix(13, new Uint8Array(0), [r(this.config), s(owner, true), w(buffer), r(this.authority), r(IDS.loaderV3)]);
+  }
   cancel(owner) {
     return this.ix(11, new Uint8Array(0), [w(this.config), s(owner)]);
   }
