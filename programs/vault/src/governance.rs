@@ -286,8 +286,36 @@ pub fn propose_change(
         return Err(VaultError::Abdicated.into());
     }
     let t = now()?;
-    if class == Class::Loosen {
+    // An abdicated kind can never be loosened again, so tightening it is
+    // final: a stolen admin key alone used to close a vault for good (bps 0,
+    // a queue delay of 136 years) and nothing could reopen it (docs/09,
+    // finding 88). Tightening an abdicated kind takes a live guardian quorum
+    // too, signing anywhere after account 4.
+    if abdicated && class == Class::Tighten {
+        let mut bits = 0u8;
+        for a in accounts.get(5..).unwrap_or(&[]) {
+            if a.is_signer() {
+                if let Some(i) = p.guardian_index(&key(a)) {
+                    bits |= 1 << i;
+                }
+            }
+        }
+        let alive = p.alive_mask(t);
+        if !quorum(bits & alive, alive, p.threshold) {
+            return Err(VaultError::NoQuorum.into());
+        }
+    }
+    // The recovery key replaces the admin even while a seal is under review,
+    // and that ends the review: a stolen admin key used to swap the guardians,
+    // propose the seal, and so lock the recovery key out until its own seal
+    // had executed (docs/09, finding 88).
+    let recovery_rotation =
+        kind == change::SET_ADMIN && p.recovery != [0; 32] && key(acc(accounts, 1)?) == p.recovery;
+    if class == Class::Loosen && !recovery_rotation {
         crate::genesis::require_no_seal_review(&p, t)?;
+    }
+    if recovery_rotation && crate::genesis::require_no_seal_review(&p, t).is_err() {
+        p.seal_vetoed = true;
     }
 
     if class == Class::Tighten || !p.sealed {
@@ -431,6 +459,15 @@ pub fn execute_change(program_id: &Address, accounts: &mut [AccountView]) -> Pro
             _ => VaultError::ChangeNotExecutable,
         })
     })?;
+    // Only the keys that hold the roles now may have their changes executed.
+    // A recovery rotation replaced a stolen admin, yet the thief's queued
+    // loosenings (a lifeboat destination, guardians, limits) still executed
+    // after the delay, and nobody could cancel them: only a guardian veto
+    // stood in the way (docs/09, finding 87). A rotation the admin made
+    // itself voids its own pending changes the same way: propose them again.
+    if c.proposer != p.admin && (p.recovery == [0; 32] || c.proposer != p.recovery) {
+        return Err(VaultError::ChangeStale.into());
+    }
     // The target must be what the review saw: a tightening, another change or
     // an ejection since the proposal makes this change stale. It must be
     // proposed again, and waits again.

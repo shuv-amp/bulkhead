@@ -211,6 +211,9 @@ pub struct Protocol {
     /// the admin cannot cancel it (docs/15, A4). The admin with a live guardian
     /// quorum replaces it at once (`replace_recovery`). In the old padding.
     pub recovery: [u8; 32],
+    /// When the seal executed (0: before finding 88, or not sealed). The
+    /// lifeboat opens a loosen delay after it. In the old padding.
+    pub sealed_at: i64,
 }
 
 impl Protocol {
@@ -265,6 +268,7 @@ impl Protocol {
             seal_vetoed: r.bool()?,
             versions: [r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?],
             recovery: r.key()?,
+            sealed_at: r.i64()?,
         };
         if p.guardian_count as usize > MAX_GUARDIANS {
             return Err(VaultError::WrongAccountType.into());
@@ -303,6 +307,7 @@ impl Protocol {
             w.u32(v);
         }
         w.key(&self.recovery);
+        w.i64(self.sealed_at);
         Ok(())
     }
 
@@ -788,6 +793,7 @@ mod tests {
             seal_vetoed: true,
             versions: [7, 8, 9, u32::MAX, 11],
             recovery: [12; 32],
+            sealed_at: 16,
         };
         p.guardians[2] = [9; 32];
         let mut buf = [0u8; Protocol::LEN];

@@ -120,10 +120,14 @@ export class FloorClient {
   ix(tag, args, accounts) {
     return { programId: this.program, accounts, data: concat(Uint8Array.of(tag), args) };
   }
-  /** Stops the program. `snapshot`: the pinned snapshot buffer, required while one is pinned (docs/09, finding 53). */
+  /**
+   * Stops the program. `snapshot`: the pinned snapshot buffer, required while
+   * one is pinned (docs/09, finding 53). The spill is the config itself
+   * (finding 88).
+   */
   abort(signer, abortBuffer, snapshot = null) {
     const a = [
-      w(this.config), s(signer), w(this.programdata), w(this.protected), w(abortBuffer), w(signer),
+      w(this.config), s(signer), w(this.programdata), w(this.protected), w(abortBuffer), w(this.config),
       r(IDS.rent), r(IDS.clock), r(this.authority), r(IDS.loaderV3),
     ];
     if (snapshot) a.push(r(snapshot));
@@ -145,8 +149,9 @@ export class FloorClient {
     ]);
   }
   /** A frozen buffer (authority = Floor's PDA) holding a canonical abort binary. */
-  stageAbort(buffer) {
-    return this.ix(1, new Uint8Array(0), [w(this.config), r(buffer), r(this.programdata)]);
+  /** Anyone stages the first; replacing a staged one takes a live guardian quorum (`guardians`, finding 88). */
+  stageAbort(buffer, guardians = []) {
+    return this.ix(1, new Uint8Array(0), [w(this.config), r(buffer), r(this.programdata), ...guardians.map((g) => s(g))]);
   }
   /** A frozen buffer holding a copy of the live code, verified byte for byte. */
   pinSnapshot(buffer) {

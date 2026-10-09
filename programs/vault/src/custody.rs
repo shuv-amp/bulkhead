@@ -292,11 +292,15 @@ pub fn release(
         return Err(VaultError::DuplicateAccount.into());
     }
     let (rmint, owner, _) = token::account_info(recipient)?;
-    if owner == key(acc(accounts, 2)?) {
+    if owner == key(acc(accounts, 2)?) || owner == pk {
         // A token account the vault PDA owns: the lifeboat (entered only by
         // lifeboat_move, which records the balance), or any other account
         // someone opened for the vault PDA, which no instruction can move
         // tokens out of. Either way a payout there is lost to the ledger.
+        // Nor one the protocol PDA owns (finding 89). Another mint's vault
+        // PDA, or a backing or ticket PDA, cannot be told from a user without
+        // more accounts: a payout there is lost too, so integrators must pay
+        // only accounts their user controls (docs/07 §2).
         return Err(VaultError::DuplicateAccount.into());
     }
     if rmint != v.mint {
@@ -486,7 +490,8 @@ pub fn settle_ticket(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     }
     // The owner as it is now: a token account's owner can be changed after the
     // ticket was created. Same rule as `release`.
-    if token::account_info(recipient)?.1 == key(acc(accounts, 1)?) {
+    let recipient_owner = token::account_info(recipient)?.1;
+    if recipient_owner == key(acc(accounts, 1)?) || recipient_owner == key(protocol) {
         return Err(VaultError::DuplicateAccount.into());
     }
     let t = now()?;

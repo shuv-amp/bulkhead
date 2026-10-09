@@ -15,6 +15,9 @@ const LOADER_V3: Address = Address::new_from_array([
     193, 36, 210, 192, 83, 122, 16, 4, 128, 0, 0,
 ]);
 
+/// Vaults a protocol may have before its seal (finding 87).
+pub const MAX_SEAL_VAULTS: u32 = 10;
+
 /// Before the seal, configuration applies at once. Once a seal is proposed, a
 /// loosening would change what the public is reviewing, so until the seal
 /// executes, is vetoed or expires, only tightenings apply (T19). A minute
@@ -28,10 +31,19 @@ pub(crate) fn require_no_seal_review(p: &Protocol, now_s: i64) -> ProgramResult 
 }
 
 pub(crate) fn valid_asset(c: &AssetConfig) -> bool {
-    c.haircut_bps <= 10_000
+    use bulkhead_core::consts::{MAX_CONF_BPS_CAP, MAX_PRICE_AGE_S, MIN_CONF_MULT_BPS};
+    let base = c.haircut_bps <= 10_000
         && c.liability_bps >= 10_000
         && c.max_conf_bps <= 10_000
-        && c.max_age_s > 0
+        && c.max_age_s > 0;
+    // A priced asset's oracle settings are bounded (finding 88): an update at
+    // most an hour old, a confidence margin of at least one sigma, a
+    // confidence at most 10% of the price, and a real feed id.
+    base && (!c.allowlisted
+        || (c.max_age_s <= MAX_PRICE_AGE_S
+            && c.conf_mult_bps >= MIN_CONF_MULT_BPS
+            && c.max_conf_bps <= MAX_CONF_BPS_CAP
+            && c.feed_id != [0; 32]))
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +149,7 @@ pub fn register_protocol(
         seal_vetoed: false,
         versions: [0; 5],
         recovery,
+        sealed_at: 0,
     };
     save(&mut accounts[1], |d| p.store(d))?;
     sys::event(&key(&accounts[1]), &[b"vault:registered", &pk, &p.admin]);
@@ -249,6 +262,13 @@ pub fn create_vault(
         limits_version: 0,
     };
     save(&mut accounts[3], |d| v.store(d))?;
+    // The seal names every vault (three accounts each) in one transaction:
+    // past 10 it no longer fits a legacy transaction, past 20 not even the
+    // account-lock limit, and a protocol that cannot seal locks its pre-seal
+    // deposits for good (docs/09, finding 87). Vaults after the seal are free.
+    if !p.sealed && p.vault_count >= MAX_SEAL_VAULTS {
+        return Err(VaultError::TooManyVaults.into());
+    }
     p.vault_count = p.vault_count.checked_add(1).ok_or(VaultError::Overflow)?;
     save(&mut accounts[2], |d| p.store(d))?;
     sys::event(&key(&accounts[2]), &[b"vault:vault_created", &pk, &mk]);
@@ -445,7 +465,8 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
         executable_s: p.seal_executable_s,
         expires_s: p.seal_expires_s,
     };
-    can_execute(&s, now()?, p.seal_vetoed, p.sealed, false)
+    let sealed_at = now()?;
+    can_execute(&s, sealed_at, p.seal_vetoed, p.sealed, false)
         .map_err(|_| VaultError::SealNotExecutable)?;
     let pairs = &accounts[1..];
     if pairs.len() != 3 * p.vault_count as usize {
@@ -503,6 +524,7 @@ pub fn execute_seal(program_id: &Address, accounts: &mut [AccountView]) -> Progr
         }
     }
     p.sealed = true;
+    p.sealed_at = sealed_at;
     save(&mut accounts[0], |d| p.store(d))?;
     sys::event(&key(&accounts[0]), &[b"vault:sealed", &p.protocol_program]);
     Ok(())

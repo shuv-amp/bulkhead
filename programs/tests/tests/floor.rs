@@ -895,7 +895,6 @@ fn every_floor_account_substitution_is_refused() {
     keys.extend(q.g.iter());
     let mut s = Sweep::new(&env, decoys, &keys);
     let guardians = gs.clone();
-    let spill = |at| any(at, "the stop's spill: whoever stops (a stop never fails on it); execute and restore pay the owner");
     let heartbeat_all = |env: &mut Env| {
         for g in &p.g {
             env.ok(&[f.heartbeat(&g.pubkey())], &[g]);
@@ -927,7 +926,6 @@ fn every_floor_account_substitution_is_refused() {
     // Stop, then restore the snapshot with a quorum.
     s.run(&mut env, "abort (stop)", f.abort(&gs[0], &p.abort_buffer, Some(&snap2)), &[], &[
         role(1, guardians.clone(), "any live guardian"),
-        spill(5),
     ]);
     env.next_slot();
     s.run(&mut env, "restore snapshot", f.restore_snapshot(&snap2, &p.owner.pubkey(), &gs[0..2]), &[], &[
@@ -1289,4 +1287,83 @@ fn registration_refuses_a_cut_off_recovery_key() {
     assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_INSTRUCTION);
     let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
     env.ok(&[ix], &[&team]);
+}
+
+/// A real pre-v3 (sBPF v0) mainnet binary, as most protected programs are
+/// today: SPL Memo 4.0.0, shipped inside the LiteSVM crate.
+fn real_v0_program() -> Vec<u8> {
+    let home = std::env::var("HOME").unwrap();
+    std::fs::read_dir(format!("{home}/.cargo/registry/src"))
+        .unwrap()
+        .filter_map(|d| std::fs::read(d.ok()?.path().join("litesvm-0.16.0/src/programs/elf/spl_memo-4.0.0.so")).ok())
+        .next()
+        .expect("litesvm 0.16.0 sources in the cargo registry")
+}
+
+/// Finding 88: a copy of the live code cut before its trailing zeros matched
+/// it byte for byte, but the loader cannot redeploy it. Pinned by anyone, a
+/// stop marked it valid and the quorum's restore then failed: the fast undo
+/// was gone. A snapshot must now be at least as long as the ELF says it is.
+#[test]
+fn a_snapshot_shorter_than_its_elf_is_never_pinned() {
+    let mut env = Env::new();
+    let elf = real_v0_program();
+    let tz = elf.len() - elf.iter().rposition(|&b| b != 0).unwrap() - 1;
+    assert!(tz > 0, "the binary ends in zeros");
+    let p = protect(&mut env, &elf);
+    let (f, gs) = (&p.f, p.guardians());
+    let attacker = Keypair::new();
+    env.fund(&attacker);
+    let cut = env.write_buffer(&elf[..elf.len() - tz], &attacker);
+    env.set_buffer_authority(&cut, &attacker, &f.authority);
+    assert_eq!(env.fails(&[f.pin_snapshot(&cut)], &[]), err::SNAPSHOT_MISMATCH);
+    // Nor does a stop take it as the pin.
+    env.next_slot();
+    assert_eq!(env.fails(&[f.abort(&gs[0], &p.abort_buffer, Some(&cut))], &[&p.g[0]]), err::SNAPSHOT_MISMATCH);
+    // The full-length copy still pins, stops valid, and restores the code.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    assert_eq!(read_config(&env, f).snapshot_valid, 1);
+    env.next_slot();
+    env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
+    assert_eq!(env.programdata_bytes(&f.programdata), p.original);
+}
+
+/// Finding 88: the staged abort binary could never be replaced, so if a
+/// runtime change made it undeployable every stop would fail. A live guardian
+/// quorum now replaces it (with the minimal fallback, say); one key cannot.
+#[test]
+fn a_guardian_quorum_can_replace_the_abort_binary() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let k = Keypair::new();
+    env.fund(&k);
+    let minimal = env.write_buffer(&bulkhead_core::floor::ABORT_ELF_MINIMAL, &k);
+    env.set_buffer_authority(&minimal, &k, &f.authority);
+    assert_eq!(env.fails(&[f.stage_abort(&minimal)], &[]), err::ABORT_ALREADY_STAGED);
+    assert_eq!(env.fails(&[f.stage_abort_by(&minimal, &gs[..1])], &[&p.g[0]]), err::ABORT_ALREADY_STAGED);
+    env.ok(&[f.stage_abort_by(&minimal, &gs[..2])], &[&p.g[0], &p.g[1]]);
+    assert_eq!(read_config(&env, f).abort_buffer, minimal.to_bytes());
+    // The old one is an orphan the owner may close; the stop uses the new one.
+    env.ok(&[f.close_buffer(&p.owner.pubkey(), &p.abort_buffer)], &[&p.owner]);
+    env.next_slot();
+    env.ok(&[f.abort(&gs[0], &minimal, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    assert!(env.call(&f.program).is_err());
+}
+
+/// Finding 88: the stop's spill is the config. With SIMD-0433 an upgrade
+/// refunds the programdata beyond the binary to the spill, ~73 SOL for a
+/// program pre-extended to 10 MiB: whoever stopped used to choose it.
+#[test]
+fn a_stop_refunds_to_the_config_not_to_whoever_stops() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let mut mine = f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot));
+    mine.accounts[5].pubkey = gs[0];
+    assert_eq!(env.fails(&[mine], &[&p.g[0]]), err::WRONG_ACCOUNT);
+    let before = env.account(&f.config).lamports;
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    assert!(env.account(&f.config).lamports > before, "the abort buffer's rent went to the config");
 }

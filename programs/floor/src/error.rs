@@ -45,6 +45,9 @@ pub enum FloorError {
     /// `close_buffer` of the staged abort buffer, the pinned snapshot or the
     /// pending proposal's buffer (issue #37).
     BufferInUse,
+    /// An account other than the one an instruction requires in that place
+    /// (the stop's spill is the config; finding 88).
+    WrongAccount,
 }
 
 impl From<FloorError> for ProgramError {

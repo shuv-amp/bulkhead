@@ -11,7 +11,7 @@ Notation:
 
 | Parameter | Default | Why this value |
 |---|---|---|
-| Burst bucket `C_s / W_s` | 2% of reference / 1 hour | A bot freeze in 2 min bounds loss at 2.07% of a vault. It must be calibrated so ordinary unbacked flow (yield, bonuses) never queues. |
+| Burst bucket `C_s / W_s` | 2% of reference / 1 hour | A freeze in 2 min (assumed; 5–20 s measured on a local validator, not yet on mainnet) bounds loss at 2.07% of a vault. It must be calibrated so ordinary unbacked flow (yield, bonuses) never queues. |
 | Daily bucket `C_l / W_l` | 5% of reference / 24 hours | Caps the patient attacker: 24h of total silence costs 10%, not 50% (Drift model $55M vs $275M) |
 | Minimum queue delay `D` | 6 hours | A ticket can't settle before a human in any timezone has had time to look |
 | Queue horizon | 7 days | Tickets further out are meaningless; reject instead of queueing forever |

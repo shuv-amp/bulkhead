@@ -253,3 +253,190 @@ fn an_empty_buffer_is_never_a_snapshot() {
     assert!(!snapshot_matches(&[], &[]));
     assert!(!snapshot_matches(&[], &[0, 0, 0, 0]));
 }
+
+/// Finding 88: a snapshot is at least as long as the live ELF says it is.
+#[test]
+fn elf_extent_is_the_declared_length_and_bounds_a_snapshot() {
+    use bulkhead_core::floor::{elf_extent, snapshot_restorable, ABORT_ELF, ABORT_ELF_MINIMAL};
+    for elf in [&ABORT_ELF[..], &ABORT_ELF_MINIMAL[..]] {
+        assert_eq!(
+            elf_extent(elf),
+            Some(elf.len()),
+            "the abort binaries end where they say"
+        );
+        // Live in a larger programdata (zero tail): the full copy restores...
+        let mut live = elf.to_vec();
+        live.resize(elf.len() + 4096, 0);
+        assert!(snapshot_restorable(elf, &live));
+        // ...so does the copy with some of the zero tail...
+        assert!(snapshot_restorable(&live[..elf.len() + 100], &live));
+        // ...but a copy shorter than the ELF, however identical, does not.
+        assert!(!snapshot_restorable(&elf[..elf.len() - 1], &live));
+        // A header whose tables run past the bytes is no ELF.
+        assert_eq!(elf_extent(&elf[..elf.len() - 1]), None);
+    }
+    assert_eq!(
+        elf_extent(b"not an elf, just bytes long enough to be read as a header.........."),
+        None
+    );
+    assert_eq!(elf_extent(&[]), None);
+}
+
+/// A synthetic 64-bit little-endian ELF of `len` bytes with the given program
+/// headers `(offset, filesz)` and section headers `(type, offset, size)`.
+fn synth_elf(
+    len: usize,
+    phoff: usize,
+    phentsize: usize,
+    phs: &[(u64, u64)],
+    shoff: usize,
+    shentsize: usize,
+    shs: &[(u32, u64, u64)],
+) -> Vec<u8> {
+    let mut e = vec![0u8; len];
+    e[..4].copy_from_slice(b"\x7fELF");
+    e[4] = 2;
+    e[5] = 1;
+    e[0x20..0x28].copy_from_slice(&(phoff as u64).to_le_bytes());
+    e[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+    e[0x36..0x38].copy_from_slice(&(phentsize as u16).to_le_bytes());
+    e[0x38..0x3a].copy_from_slice(&(phs.len() as u16).to_le_bytes());
+    e[0x3a..0x3c].copy_from_slice(&(shentsize as u16).to_le_bytes());
+    e[0x3c..0x3e].copy_from_slice(&(shs.len() as u16).to_le_bytes());
+    for (i, (off, size)) in phs.iter().enumerate() {
+        let h = phoff + i * phentsize;
+        if h + 40 <= len {
+            e[h + 8..h + 16].copy_from_slice(&off.to_le_bytes());
+            e[h + 32..h + 40].copy_from_slice(&size.to_le_bytes());
+        }
+    }
+    for (i, (ty, off, size)) in shs.iter().enumerate() {
+        let h = shoff + i * shentsize;
+        if h + 40 <= len {
+            e[h + 4..h + 8].copy_from_slice(&ty.to_le_bytes());
+            e[h + 24..h + 32].copy_from_slice(&off.to_le_bytes());
+            e[h + 32..h + 40].copy_from_slice(&size.to_le_bytes());
+        }
+    }
+    e
+}
+
+/// Finding 88, every rule of `elf_extent` at its edge (the mutation run).
+#[test]
+fn elf_extent_rules_at_their_edges() {
+    use bulkhead_core::floor::elf_extent;
+    const NOBITS: u32 = 8;
+    // Only the header: 64 bytes.
+    assert_eq!(elf_extent(&synth_elf(64, 0, 0, &[], 0, 0, &[])), Some(64));
+    assert_eq!(
+        elf_extent(&synth_elf(100, 0, 0, &[], 0, 0, &[])),
+        Some(64),
+        "no tables: the header"
+    );
+    // The program header table counts, and each segment's data.
+    let e = synth_elf(400, 64, 56, &[(200, 50)], 0, 0, &[]);
+    assert_eq!(elf_extent(&e), Some(250), "segment end beyond the table");
+    let e = synth_elf(400, 64, 56, &[(70, 10)], 0, 0, &[]);
+    assert_eq!(elf_extent(&e), Some(120), "the table's end (64 + 56)");
+    // The section header table counts, and each section's data, except NOBITS.
+    let e = synth_elf(
+        1000,
+        64,
+        56,
+        &[(0, 64)],
+        300,
+        64,
+        &[(1, 120, 80), (NOBITS, 150, 5000), (1, 200, 30)],
+    );
+    assert_eq!(
+        elf_extent(&e),
+        Some(492),
+        "the section table's end (300 + 3 × 64)"
+    );
+    let e = synth_elf(
+        1000,
+        64,
+        56,
+        &[(0, 64)],
+        120,
+        64,
+        &[(1, 700, 100), (NOBITS, 150, 5000)],
+    );
+    assert_eq!(
+        elf_extent(&e),
+        Some(800),
+        "a section's data; the NOBITS size never counts"
+    );
+    let e = synth_elf(1000, 64, 56, &[(0, 64)], 120, 64, &[(NOBITS, 900, 50)]);
+    assert_eq!(
+        elf_extent(&e),
+        Some(184),
+        "a NOBITS section alone adds nothing"
+    );
+    // Anything past the bytes: not an ELF to trust.
+    assert_eq!(
+        elf_extent(&synth_elf(249, 64, 56, &[(200, 50)], 0, 0, &[])),
+        None
+    );
+    assert_eq!(
+        elf_extent(&synth_elf(
+            799,
+            64,
+            56,
+            &[(0, 64)],
+            120,
+            64,
+            &[(1, 700, 100)]
+        )),
+        None
+    );
+    // Entry sizes below the structures are refused; exactly the size is fine.
+    assert_eq!(
+        elf_extent(&synth_elf(400, 64, 55, &[(0, 64)], 0, 0, &[])),
+        None
+    );
+    assert!(elf_extent(&synth_elf(400, 64, 56, &[(0, 64)], 0, 0, &[])).is_some());
+    assert_eq!(
+        elf_extent(&synth_elf(400, 0, 0, &[], 64, 63, &[(1, 0, 64)])),
+        None
+    );
+    assert!(elf_extent(&synth_elf(400, 0, 0, &[], 64, 64, &[(1, 0, 64)])).is_some());
+    // No tables: their entry sizes and offsets do not matter.
+    assert_eq!(elf_extent(&synth_elf(100, 0, 1, &[], 0, 1, &[])), Some(64));
+    assert_eq!(
+        elf_extent(&synth_elf(100, 90, 56, &[], 0, 0, &[])),
+        Some(64),
+        "an empty program header table at 90"
+    );
+    assert_eq!(
+        elf_extent(&synth_elf(100, 0, 0, &[], 80, 64, &[])),
+        Some(64),
+        "an empty section header table at 80"
+    );
+    // At most 64 segments and 1,024 sections.
+    let phs64 = vec![(0u64, 64u64); 64];
+    assert!(elf_extent(&synth_elf(64 + 64 * 56, 64, 56, &phs64, 0, 0, &[])).is_some());
+    let phs65 = vec![(0u64, 64u64); 65];
+    assert_eq!(
+        elf_extent(&synth_elf(64 + 65 * 56, 64, 56, &phs65, 0, 0, &[])),
+        None
+    );
+    let shs1024 = vec![(1u32, 0u64, 64u64); 1024];
+    assert!(elf_extent(&synth_elf(64 + 1024 * 64, 0, 0, &[], 64, 64, &shs1024)).is_some());
+    let shs1025 = vec![(1u32, 0u64, 64u64); 1025];
+    assert_eq!(
+        elf_extent(&synth_elf(64 + 1025 * 64, 0, 0, &[], 64, 64, &shs1025)),
+        None
+    );
+    // Not 64-bit little-endian, or not an ELF.
+    let mut e = synth_elf(100, 0, 0, &[], 0, 0, &[]);
+    e[4] = 1;
+    assert_eq!(elf_extent(&e), None);
+    let mut e = synth_elf(100, 0, 0, &[], 0, 0, &[]);
+    e[5] = 2;
+    assert_eq!(elf_extent(&e), None);
+    let mut e = synth_elf(100, 0, 0, &[], 0, 0, &[]);
+    e[0] = 0;
+    assert_eq!(elf_extent(&e), None);
+    assert_eq!(elf_extent(&synth_elf(64, 0, 0, &[], 0, 0, &[])[..63]), None);
+}
