@@ -36,7 +36,7 @@ Floor separates stopping from upgrading. Any guardian stops, new code waits 72h,
 > - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
 > - the Cloud guardian and the status page.
 >
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #52, 9 Oct), and S1 has run there. **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #57, 9 Oct), and S1 has run there. **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
 
 ## Why the brake must sit in the path of the money
 
@@ -106,12 +106,12 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 107/107: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (5,946 swaps refused) |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
-| On devnet | All three programs run this tree's build (PR #52, 9 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
+| On devnet | All three programs run this tree's build (PR #57, 9 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
 | What this process found in our own code and docs | 85 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
-Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 9 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #52 (Harbor unchanged since PR #35): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
+Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 9 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #57 (Harbor unchanged since PR #35): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
 
 ```bash
 scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet
@@ -119,8 +119,8 @@ scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewher
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
-| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `e06a86e7…43a0b9c9` |
-| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `ecf2c226…8555c177` |
+| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `58159d04…07bd9cbe` |
+| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `8cf8d163…12a33f24` |
 | Harbor (demo protocol) | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `543be60b…10adeb40` |
 
 All three share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
