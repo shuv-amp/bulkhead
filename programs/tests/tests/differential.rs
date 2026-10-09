@@ -256,6 +256,11 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 if signer.is_none() {
                     backed = backed.min(ledger.net(&um).clamp(0, u64::MAX as i128) as u64);
                 }
+                // While frozen, no loan is backed either: only the owner's own
+                // USDC (finding 90).
+                if now < md.frozen_until {
+                    backed = backed.min(ledger.net(&um).clamp(0, u64::MAX as i128) as u64);
+                }
                 let unbacked = amount - backed;
                 let reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                 let low = md.low.touch(md.balance, now, md.ref_init);

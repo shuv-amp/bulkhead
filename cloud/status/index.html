@@ -182,6 +182,13 @@ async function render() {
       <div class="row"><span>Frozen</span><span class="${frozen ? "warn" : "ok"}">${until(a.frozenUntil, now)}</span></div>
       <div class="row"><span>Pending tickets</span><span>${a.pendingTickets} (${fmt(a.queued, d)})</span></div>
       <div class="row"><span>Limits</span><span>${v.limits.shortBps / 100}% / ${v.limits.shortWindowS / 3600}h · ${v.limits.longBps / 100}% / ${v.limits.longWindowS / 3600}h</span></div>
+      <div class="row"><span>Absolute caps</span>${
+        // Without caps, capital an attacker parks in the vault first widens
+        // the base the percentages apply to (docs/15, A1b; docs/16 §4.5).
+        v.limits.shortCap > 0n && v.limits.longCap > 0n
+          ? `<span class="ok">${fmt(v.limits.shortCap, d)} / ${fmt(v.limits.longCap, d)}</span>`
+          : `<span class="bad">UNCAPPED: parked capital widens the bound (A1b)</span>`
+      }</div>
       <div class="row"><span>Paid out (backed / unbacked)</span><span>${fmt(v.backedOut, d)} / ${fmt(v.unbackedOut, d)}</span></div>
       ${exitRow(openExit(v, now), d)}
     </div>`;

@@ -7,7 +7,7 @@ On 1 April 2026, Drift lost $285M in about twelve minutes of withdrawals. Drift 
 Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once audited, nobody can change it.
 - **The protocol still decides who gets paid. Bulkhead decides how fast.**
 - **Taking back your own deposit is never throttled, frozen or priced.** No oracle, no limit, no freeze.
-- **Everything else leaves at most 2% of the vault per hour and 5% per day.** Two things are outside this bound: own-deposit returns (above), and loans against allowlisted, Pyth-priced collateral, which are bounded by haircuts and by Pyth's own security, not by the limiter, and which a freeze does not stop (`04`, T5; `09`, finding 89). The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes: a deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze. Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
+- **Everything else leaves at most 2% of the vault per hour and 5% per day.** The one exception is a loan against allowlisted, Pyth-priced collateral: it is bounded by haircuts and Pyth, not by the limiter, and a guardian's freeze stops new ones (`04`, T5; `09`, finding 90). The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes: a deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze. Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
 - **Tightening is instant. Loosening waits 72 hours**, a constant no admin can lower, and any guardian can veto it.
 - **Guardians can stop things. They can never move money.**
 
@@ -31,12 +31,12 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
 
-> **Status (28 Sep 2026):** built:
+> **Status (9 Oct 2026):** built:
 > - the core math;
 > - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
 > - the Cloud guardian and the status page.
 >
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #61, 9 Oct), and S1 has run there. **Unaudited. Not for real funds.** See [SECURITY.md](SECURITY.md).
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #61, 9 Oct), and S1 has run there. **Not independently audited; not for real funds.** An internal pre-audit by six reviewers is in [16](docs/16-AUDIT-REPORT.md); see [SECURITY.md](SECURITY.md).
 
 ## Why the brake must sit in the path of the money
 
@@ -107,7 +107,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
 | On devnet | All three programs run this tree's build (PR #61, 9 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
-| What this process found in our own code and docs | 89 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | 90 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 

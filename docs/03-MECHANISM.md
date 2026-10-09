@@ -59,7 +59,7 @@ Rules, each required by the proof in §2.5:
 - **Queued requests reserve capacity** (TAT moves exactly as for instant ones). Tickets are FIFO, and later requests can't jump ahead of reserved ones.
 - **Cancelling a ticket does not refund** its reservation.
 - **`reset_backlog(now)`** clamps each `TAT_k` to at most `now + W_k` ("just emptied", not full). It is **only legal when zero tickets are pending**. It exists so a cancelled attack doesn't block honest flows for days.
-- A freeze queues every unbacked request and blocks settlement. The backed lane is untouched.
+- A freeze queues every unbacked request and blocks settlement. In the backed lane it leaves the owner's own balance of the mint untouched (G2) and stops new loans: while frozen, a loan beyond that balance is unbacked, so it waits behind the freeze (`09`, finding 90).
 
 ### 2.3 Worked examples (golden)
 
