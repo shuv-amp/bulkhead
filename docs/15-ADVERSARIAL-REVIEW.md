@@ -127,7 +127,7 @@ This is the same "DoS only" as A3 but reachable without abdication. Options for 
 
 ### A5 — Floor re-arming (Low)
 
-`abort` consumes the abort buffer (`abort_buffer = 0`) and every executed upgrade clears the snapshot. Until someone stages a new canonical abort buffer and pins a new snapshot (both permissionless, but each needs a program-sized, Floor-frozen buffer), the program is live with no stop button or no fast restore. Recommend: the status page and the guardian bot alert while either is missing, and the guardian runbook re-stages both right after every abort, restore and upgrade.
+`abort` consumes the abort buffer (`abort_buffer = 0`) and every executed upgrade clears the snapshot. Until someone stages a new canonical abort buffer and pins a new snapshot (both permissionless, but each needs a program-sized, Floor-frozen buffer), the program is live with no stop button or no fast restore. Recommend: the status page and the guardian bot alert while either is missing, and the guardian runbook re-stages both right after every abort, restore and upgrade. Each re-pin leaves the previous pin orphaned: the owner returns its rent with `close_buffer` (`cloud/deploy/floor-buffers.mjs`; `09`, finding 78).
 
 **Re-pin race (8 Oct, `09`, finding 66).** `pin_snapshot` is permissionless, and since finding 53 `abort` refused any stop not naming the current pin. Anyone with two buffers identical to the live code could re-pin them in turn, so every guardian stop built against an earlier read failed with `SnapshotMismatch`, during an exploit. Now a stop accepts any frozen buffer byte-identical to the live code and makes it the pin; anything else must be the pin, and the abort buffer never is.
 

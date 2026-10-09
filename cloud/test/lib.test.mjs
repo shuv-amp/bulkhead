@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { b58decode, b58encode, key, onCurve, findPda, compileMessage, decodeVault } from "../lib/solana.mjs";
-import { FloorClient, VaultClient } from "../lib/bulkhead.mjs";
+import { FloorClient, VaultClient, floorBufferRole } from "../lib/bulkhead.mjs";
 
 const here = new URL(".", import.meta.url);
 
@@ -115,4 +115,21 @@ test("onCurve takes a y of p or more mod p, as Solana does", async () => {
   const one = new Uint8Array(32);
   one[0] = 1;
   assert.equal(onCurve(one), true);
+});
+
+test("a buffer's role matches what close_buffer refuses (docs/09, finding 78)", async () => {
+  const [A, S, P, X, O] = [1, 2, 3, 4, 5].map((i) => b58encode(new Uint8Array(32).fill(i)));
+  const c = { abortBuffer: A, snapshotBuffer: S, pendingKind: 1, pendingTarget: P };
+  assert.deepEqual([A, S, P, X].map((b) => floorBufferRole(c, b)), ["abort", "pin", "pending", "orphan"]);
+  // Only an upgrade (1) or a restore (2) names a buffer: another kind's target
+  // is a key, and a buffer at that address is an orphan.
+  assert.equal(floorBufferRole({ ...c, pendingKind: 4 }, P), "orphan");
+  assert.equal(floorBufferRole({ ...c, pendingKind: 2 }, P), "pending");
+  // Nothing staged or pinned (decodeFloor gives null): every buffer is an orphan.
+  assert.equal(floorBufferRole({ abortBuffer: null, snapshotBuffer: null, pendingKind: 0, pendingTarget: "1".repeat(32) }, X), "orphan");
+  // The close carries the owner as a writable signer, then the buffer, the PDA and the loader.
+  const fc = await new FloorClient("11111111111111111111111111111111", "11111111111111111111111111111112").init();
+  const ix = fc.closeBuffer(O, X);
+  assert.equal(ix.data[0], 13);
+  assert.deepEqual(ix.accounts.map((a) => [!!a.signer, !!a.writable]), [[false, false], [true, true], [false, true], [false, false], [false, false]]);
 });
