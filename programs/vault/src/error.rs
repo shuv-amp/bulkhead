@@ -68,6 +68,9 @@ pub enum VaultError {
     /// A lifeboat exit to a destination this program owns, which could never
     /// move the tokens on (issue #38).
     StrandedDestination,
+    /// An eleventh vault before the seal, which could then never execute
+    /// (finding 87).
+    TooManyVaults,
 }
 
 impl From<VaultError> for ProgramError {

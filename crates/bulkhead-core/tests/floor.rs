@@ -253,3 +253,31 @@ fn an_empty_buffer_is_never_a_snapshot() {
     assert!(!snapshot_matches(&[], &[]));
     assert!(!snapshot_matches(&[], &[0, 0, 0, 0]));
 }
+
+/// Finding 88: a snapshot is at least as long as the live ELF says it is.
+#[test]
+fn elf_extent_is_the_declared_length_and_bounds_a_snapshot() {
+    use bulkhead_core::floor::{elf_extent, snapshot_restorable, ABORT_ELF, ABORT_ELF_MINIMAL};
+    for elf in [&ABORT_ELF[..], &ABORT_ELF_MINIMAL[..]] {
+        assert_eq!(
+            elf_extent(elf),
+            Some(elf.len()),
+            "the abort binaries end where they say"
+        );
+        // Live in a larger programdata (zero tail): the full copy restores...
+        let mut live = elf.to_vec();
+        live.resize(elf.len() + 4096, 0);
+        assert!(snapshot_restorable(elf, &live));
+        // ...so does the copy with some of the zero tail...
+        assert!(snapshot_restorable(&live[..elf.len() + 100], &live));
+        // ...but a copy shorter than the ELF, however identical, does not.
+        assert!(!snapshot_restorable(&elf[..elf.len() - 1], &live));
+        // A header whose tables run past the bytes is no ELF.
+        assert_eq!(elf_extent(&elf[..elf.len() - 1]), None);
+    }
+    assert_eq!(
+        elf_extent(b"not an elf, just bytes long enough to be read as a header.........."),
+        None
+    );
+    assert_eq!(elf_extent(&[]), None);
+}

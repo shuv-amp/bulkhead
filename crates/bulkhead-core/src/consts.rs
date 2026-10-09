@@ -49,3 +49,12 @@ pub const VALUE_DECIMALS: i32 = 18;
 /// ELF machine ids accepted by the Solana loaders.
 pub const EM_BPF: u16 = 0xF7;
 pub const EM_SBPF: u16 = 0x107;
+
+/// Bounds on an allowlisted asset's oracle settings, whoever sets them
+/// (docs/09, finding 88). Without them a config could accept a Pyth update of
+/// any age (any genuine update ever signed, from a price spike), price at the
+/// spot with no confidence margin, or a confidence as wide as the price.
+/// Pyth's own guidance: a staleness bound, and collateral at μ − kσ.
+pub const MAX_PRICE_AGE_S: u32 = 3_600;
+pub const MIN_CONF_MULT_BPS: u32 = 10_000;
+pub const MAX_CONF_BPS_CAP: u32 = 1_000;

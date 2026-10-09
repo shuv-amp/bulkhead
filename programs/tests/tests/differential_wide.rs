@@ -155,7 +155,7 @@ fn program_matches_the_core_model_with_caps_freezes_and_the_lifeboat() {
     for k in [
         "deposit", "release", "backed", "instant", "queued", "refused", "quote", "settle", "cancel",
         "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_refused", "reset", "reset_refused",
-        "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "insufficient", "tighten", "loosen_waits",
+        "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "lifeboat_refused_window", "insufficient", "tighten", "loosen_waits",
         "loosen_executed", "loosen_stale", "loosen_early",
     ] {
         let n = totals.get(k).copied().unwrap_or(0);
@@ -224,6 +224,8 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
     env.ok(&[m.propose_seal_ix()], &[&m.admin]);
     env.advance(3 * DAY);
     env.ok(&[m.execute_seal_ix(&[&usdc])], &[]);
+    // The lifeboat opens a loosen delay after the seal (findings 86 and 88).
+    let lifeboat_opens = env.time + 3 * DAY;
 
     let mut last_heartbeat = env.time - 3 * DAY;
     for step in 0..steps {
@@ -478,7 +480,10 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                     AccountMeta::new_readonly(SYSTEM, false),
                 ]);
                 let r = env.send(&[mv], &[&m.admin]);
-                if now < md.frozen_until() {
+                if now < lifeboat_opens {
+                    assert!(r.is_err(), "{}", at("lifeboat move within the delay after the seal (finding 88)"));
+                    count("lifeboat_refused_window");
+                } else if now < md.frozen_until() {
                     assert!(r.is_err(), "{}", at("lifeboat move while frozen (finding 72)"));
                     count("lifeboat_refused_frozen");
                 } else if amount > md.balance {

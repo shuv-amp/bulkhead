@@ -149,6 +149,79 @@ pub fn snapshot_matches(buffer_program: &[u8], programdata_program: &[u8]) -> bo
         && programdata_program[n..].iter().all(|&b| b == 0)
 }
 
+/// How long an ELF says it is: the furthest byte that its file header, its
+/// program and section header tables, its segments and its sections (other
+/// than `NOBITS`) occupy. `None` if `elf` is not a 64-bit little-endian ELF
+/// whose tables lie inside it, or if it has more than 64 segments or 1,024
+/// sections.
+///
+/// A snapshot must be at least this long, not only identical. The loader
+/// deploys the buffer's own bytes, so a binary cut before its trailing zeros
+/// (the last section header's zero fields) matched the live code but could not
+/// be redeployed: pinned by anyone, it took the quorum's restore away
+/// (docs/09, finding 88).
+pub fn elf_extent(elf: &[u8]) -> Option<usize> {
+    if elf.len() < 64 || elf[..4] != *b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+        return None;
+    }
+    let u16_at = |at: usize| -> Option<usize> {
+        Some(u16::from_le_bytes(elf.get(at..at.checked_add(2)?)?.try_into().ok()?) as usize)
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            elf.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+    let u64_at = |at: usize| -> Option<usize> {
+        usize::try_from(u64::from_le_bytes(
+            elf.get(at..at.checked_add(8)?)?.try_into().ok()?,
+        ))
+        .ok()
+    };
+    let (phoff, shoff) = (u64_at(0x20)?, u64_at(0x28)?);
+    let (phentsize, phnum) = (u16_at(0x36)?, u16_at(0x38)?);
+    let (shentsize, shnum) = (u16_at(0x3a)?, u16_at(0x3c)?);
+    if phnum > 64 || shnum > 1024 || (phnum > 0 && phentsize < 56) || (shnum > 0 && shentsize < 64)
+    {
+        return None;
+    }
+    let mut end = 64usize;
+    let table = |off: usize, n: usize, size: usize| -> Option<usize> {
+        off.checked_add(n.checked_mul(size)?)
+    };
+    if phnum > 0 {
+        end = end.max(table(phoff, phnum, phentsize)?);
+    }
+    if shnum > 0 {
+        end = end.max(table(shoff, shnum, shentsize)?);
+    }
+    for i in 0..phnum {
+        let h = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        end = end.max(u64_at(h.checked_add(8)?)?.checked_add(u64_at(h.checked_add(32)?)?)?);
+    }
+    for i in 0..shnum {
+        let h = shoff.checked_add(i.checked_mul(shentsize)?)?;
+        if u32_at(h.checked_add(4)?)? != 8 {
+            end = end.max(u64_at(h.checked_add(24)?)?.checked_add(u64_at(h.checked_add(32)?)?)?);
+        }
+    }
+    if end > elf.len() {
+        return None;
+    }
+    Some(end)
+}
+
+/// A snapshot the loader can redeploy: `snapshot_matches`, and at least as
+/// long as the live ELF says it is (`elf_extent`; finding 88).
+pub fn snapshot_restorable(buffer_program: &[u8], programdata_program: &[u8]) -> bool {
+    match elf_extent(programdata_program) {
+        Some(extent) => {
+            buffer_program.len() >= extent && snapshot_matches(buffer_program, programdata_program)
+        }
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Restore rules
 // ---------------------------------------------------------------------------

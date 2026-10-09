@@ -7,7 +7,7 @@ On 1 April 2026, Drift lost $285M in about twelve minutes of withdrawals. Drift 
 Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once audited, nobody can change it.
 - **The protocol still decides who gets paid. Bulkhead decides how fast.**
 - **Taking back your own deposit is never throttled, frozen or priced.** No oracle, no limit, no freeze.
-- **Everything else leaves at most 2% of the vault per hour and 5% per day.** The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes: a deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze. Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
+- **Everything else leaves at most 2% of the vault per hour and 5% per day.** Two things are outside this bound: own-deposit returns (above), and loans against allowlisted, Pyth-priced collateral, which are bounded by haircuts and by Pyth's own security, not by the limiter, and which a freeze does not stop (`04`, T5; `09`, finding 89). The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes: a deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze. Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
 - **Tightening is instant. Loosening waits 72 hours**, a constant no admin can lower, and any guardian can veto it.
 - **Guardians can stop things. They can never move money.**
 
@@ -22,7 +22,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 **Who the guardians are.** A protocol names 2–8 guardian keys when it registers: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
 
-**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian (the bot that froze the end-to-end attack within seconds; a patient attacker who paces payouts under its thresholds is bounded by the on-chain limits, not by the bot, [15](docs/15-ADVERSARIAL-REVIEW.md) A2), limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day."
+**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian (the bot that froze the end-to-end attack within seconds; a patient attacker who paces payouts under its thresholds is bounded by the on-chain limits, not by the bot, [15](docs/15-ADVERSARIAL-REVIEW.md) A2), limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day" through the unbacked lane, with absolute caps set; it excludes oracle risk on backed loans.
 
 **Why not just an abort binary?** Dean Little's `sbpf-asm-abort` showed that a program can be stopped by upgrading it to a tiny binary that always fails. Floor builds on that pattern (credited in [DISCLOSURE.md](DISCLOSURE.md)). But a bare abort:
 - is pressed by whoever holds the upgrade key, the same key that can deploy anything;
@@ -65,7 +65,7 @@ On Solana, the one control an admin or upgrade key can't bypass is ownership of 
 
 | Nobody freezes for | Loss behind Bulkhead | Share of TVL |
 |---|---|---|
-| 2 minutes (guardian bot) | $11.4M | 2.1% |
+| 2 minutes (an assumed guardian freeze: 5–20 s on a local validator, not yet measured on mainnet) | $11.4M | 2.1% |
 | 1 hour | $22.0M | 4.0% |
 | 24 hours | $55.0M | 10.0% |
 | Actual, without Bulkhead | **$285M in ~12 minutes** | 52% |
@@ -103,11 +103,11 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Bounded proofs (Kani) and exhaustive checks | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
 | Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 392M executions in the 6 Oct deep CI run (25 min per target), no crash; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-6-oct-2026)) |
 | Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 107/107: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (5,946 swaps refused) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 115/115: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (5,946 swaps refused) |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
 | On devnet | All three programs run this tree's build (PR #59, 9 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
-| What this process found in our own code and docs | 86 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | 89 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
@@ -134,7 +134,7 @@ Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
 
 | | Guarantee |
 |---|---|
-| G1 | Unbacked outflow ≤ `min(C_s(W_s+T)/W_s, C_l(W_l+T)/W_l)` within any `T`, even with admin and upgrade keys stolen ([proof](docs/03-MECHANISM.md#25-proof-of-g1)) |
+| G1 | Unbacked outflow ≤ `min(C_s(W_s+T)/W_s, C_l(W_l+T)/W_l)` within any `T`, even with admin and upgrade keys stolen ([proof](docs/03-MECHANISM.md#25-proof-of-g1)). For a vault with absolute caps set: without them, capital parked in the vault first widens the base (A1b) |
 | G2 | An owner who owes nothing is never throttled, frozen or priced taking back their own deposit. (Whether the tokens are in the pool is the pool's liquidity; [`03 §4.6`](docs/03-MECHANISM.md#46-guarantees-of-the-ledger).) |
 | G3 | Backed payouts never leave an owner's ledger unsound at conservative prices |
 | G4 | Tighten instantly; loosen only after ≥ 72h, public, vetoable |
@@ -190,6 +190,7 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [13 Sources](docs/13-SOURCES.md) | Every URL and source path |
 | [14 State of the art](docs/14-STATE-OF-THE-ART.md) | Every mechanism compared with the best shipped systems (Wormhole NTT, CCIP, Kamino, Project 0, MetaMorpho, Lido, Aave, network calculus): what we took, what we rejected, why |
 | [15 Adversarial review](docs/15-ADVERSARIAL-REVIEW.md) | An internal red-team pass on the code and the idea: what an attacker who knows every rule gets, what was fixed, what is still open |
+| [16 Pre-audit report](docs/16-AUDIT-REPORT.md) | A six-reviewer engagement run like an audit (9 Oct 2026): scope, method, every finding and its status, external assumptions checked, and the design decisions left before a lending integration. Not a substitute for an independent audit |
 
 ## Credits and license
 

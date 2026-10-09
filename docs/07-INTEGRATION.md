@@ -23,7 +23,7 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay,
 ## 2. Vault (Tier 1) checklist
 
 1. **Derive your caller PDA:** `["bulkhead-caller"]` under your own program id. Only your program can sign as it, so only your program can deposit and release. **Check the Vault program id before signing.** The caller PDA is the signature the Vault trusts as "this protocol", and signer privileges carry into nested calls. Harbor refuses any program id other than the one it was built for (`BULKHEAD_VAULT_ID`). Copy that check. Do not forward the signature to a program id the caller supplied.
-2. **Register** (`register_protocol`), signed by your upgrade authority or by the caller PDA through a CPI:
+2. **Register** (`register_protocol`), signed by your upgrade authority or by the caller PDA through a CPI. Prefer the upgrade authority: registration is one-shot, and a CPI path anyone can call (like Harbor's REGISTER) lets whoever calls first choose the admin and guardians. If you register through a CPI, gate it on your upgrade authority or a compiled-in key (`09`, finding 87):
    - admin = your Squads vault;
    - 2–8 guardians (ops key, the Bulkhead Cloud bot, a security partner) and a threshold ≥ 2;
    - a heartbeat interval (7 days default);

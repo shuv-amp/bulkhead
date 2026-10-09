@@ -57,6 +57,7 @@ pub mod err {
     pub const CANNOT_EJECT: u32 = 7031;
     pub const ABORT_DOES_NOT_FIT: u32 = 7035;
     pub const BUFFER_IN_USE: u32 = 7036;
+    pub const WRONG_ACCOUNT: u32 = 7037;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,14 +397,18 @@ impl Floor {
     }
 
     pub fn stage_abort(&self, buffer: &Address) -> Instruction {
-        self.ix(
-            vec![1],
-            vec![
-                AccountMeta::new(self.config, false),
-                AccountMeta::new_readonly(*buffer, false),
-                AccountMeta::new_readonly(self.programdata, false),
-            ],
-        )
+        self.stage_abort_by(buffer, &[])
+    }
+
+    /// Replacing a staged abort buffer takes a live guardian quorum (finding 88).
+    pub fn stage_abort_by(&self, buffer: &Address, guardians: &[Address]) -> Instruction {
+        let mut a = vec![
+            AccountMeta::new(self.config, false),
+            AccountMeta::new_readonly(*buffer, false),
+            AccountMeta::new_readonly(self.programdata, false),
+        ];
+        a.extend(guardians.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        self.ix(vec![1], a)
     }
 
     pub fn pin_snapshot(&self, buffer: &Address) -> Instruction {
@@ -440,7 +445,8 @@ impl Floor {
             AccountMeta::new(self.config, false),
             AccountMeta::new_readonly(*signer, true),
         ];
-        a.extend(self.upgrade_accounts(abort_buffer, signer));
+        // The spill is the config itself (finding 88).
+        a.extend(self.upgrade_accounts(abort_buffer, &self.config));
         if let Some(s) = snapshot {
             a.push(AccountMeta::new_readonly(*s, false));
         }

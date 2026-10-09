@@ -42,6 +42,7 @@ pub mod verr {
     pub const INSUFFICIENT_BALANCE: u32 = 8049;
     pub const SEAL_UNDER_REVIEW: u32 = 8050;
     pub const CHANGE_STALE: u32 = 8051;
+    pub const TOO_MANY_VAULTS: u32 = 8054;
     pub const WRONG_TICKET: u32 = 8052;
     pub const STRANDED_DESTINATION: u32 = 8053;
     pub const LANE_CLOSED: u32 = 8025;

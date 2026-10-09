@@ -935,11 +935,17 @@ fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
         ],
     );
     w.env.ok(&[abdicate], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
-    // Tightening still applies at once: making things safer never waits.
+    // Tightening still applies at once: making things safer never waits. But
+    // it is final now, so the admin alone may not (a stolen key would close
+    // the vault for good); a live guardian quorum co-signs (finding 88).
     let mut tighter = Limits::default_limits();
     tighter.short_bps = 100;
     let ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
-    w.env.ok(&[ix], &[&w.m.admin]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NO_QUORUM);
+    let mut ix = w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    ix.accounts.push(AccountMeta::new_readonly(g0, true));
+    ix.accounts.push(AccountMeta::new_readonly(g1, true));
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
     assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 100_000 * USDC);
     // Loosening is refused forever.
     let mut looser = Limits::default_limits();
@@ -1007,6 +1013,8 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     let whale = w.user();
     w.deposit("usdc", &whale, 10_000_000 * USDC);
     w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
     let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
     let mv = w.m.vault_ix(
         24,
@@ -1075,6 +1083,8 @@ fn a_release_cannot_pay_the_lifeboat() {
     let whale = w.user();
     w.deposit("usdc", &whale, 10_000_000 * USDC);
     w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
     let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
     let mv = w.m.vault_ix(24, &(1 * USDC).to_le_bytes(), vec![
         AccountMeta::new_readonly(w.m.protocol, false),
@@ -1117,6 +1127,8 @@ fn a_quote_cannot_promise_more_than_the_vault_holds() {
     let whale = w.user();
     let to = w.deposit("usdc", &whale, 1_000_000 * USDC);
     w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
     let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
     let mv = w.m.vault_ix(24, &(900_000 * USDC).to_le_bytes(), vec![
         AccountMeta::new_readonly(w.m.protocol, false),
@@ -1182,6 +1194,8 @@ fn a_guardian_quorum_can_return_funds_from_the_lifeboat() {
     let whale = w.user();
     w.deposit("usdc", &whale, 10_000_000 * USDC);
     w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
     let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
     let mv = w.m.vault_ix(
         24,
@@ -3044,6 +3058,8 @@ fn the_admin_cannot_park_the_vault_while_it_is_frozen() {
     let alice = w.user();
     let acc = w.deposit("usdc", &alice, 1_000_000 * USDC);
     w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
     let g0 = w.m.g[0].pubkey();
     let freeze = w.m.freeze_ix(&g0, None, 86_400);
     w.env.ok(&[freeze], &[&w.m.g[0]]);
@@ -3075,12 +3091,19 @@ fn the_admin_never_becomes_the_lifeboat_destination() {
 fn the_lifeboat_stays_shut_until_the_seal() {
     let mut w = World::new();
     let alice = w.user();
-    w.deposit("usdc", &alice, 1_000_000 * USDC);
+    let alice_acc = w.deposit("usdc", &alice, 1_000_000 * USDC);
     w.env.advance(3 * DAY + 1); // the registration destination is now 72h old
     assert_eq!(w.env.fails(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]), verr::NOT_SEALED);
     assert_eq!(w.env.fails(&[r2_propose_exit(&w, 1)], &[&w.m.admin]), verr::NOT_SEALED);
     w.seal();
-    // Sealed: the lifeboat works as before.
+    // Not with the seal either: a thief holding the admin key could execute
+    // the seal and park the vault in one transaction (finding 88). For a
+    // loosen delay after the seal, every depositor can leave first.
+    assert_eq!(w.env.fails(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]), verr::NOT_SEALED);
+    w.refresh_prices();
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &alice.pubkey(), &alice_acc, 1_000 * USDC, &w.usdc_prices(false));
+    w.env.ok(&[ix], &[&alice]);
+    w.env.advance(3 * DAY + 1);
     w.env.ok(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]);
     w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
 }
@@ -3219,4 +3242,177 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, 10_000 * USDC, &both);
     let o = outcome(&w.env.ok(&[ix], &[&holder]));
     assert_eq!(o.backed, 10_000 * USDC, "signed: a backed loan against the SOL");
+}
+
+/// `propose_change` signed by `proposer` (the admin or the recovery key).
+fn propose_as(w: &World, proposer: &Address, kind: u8, target: &Address) -> (Instruction, u64) {
+    let d = w.env.account(&w.m.protocol).data;
+    let o = 8 + 96 + 256 + 64 + 4 + 24 + 8 + 8;
+    let id = u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+    let mut args = vec![kind];
+    args.extend_from_slice(target.as_ref());
+    let ix = w.m.vault_ix(18, &args, vec![
+        AccountMeta::new(w.env.payer.pubkey(), true),
+        AccountMeta::new_readonly(*proposer, true),
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    (ix, id)
+}
+
+/// Finding 87: a thief holding the admin key queues a loosening (here its own
+/// lifeboat destination). The recovery key replaces the admin; the thief's
+/// change used to execute anyway after the delay, and nobody could cancel it.
+/// Now only the keys that hold the roles can have changes executed.
+#[test]
+fn a_replaced_admin_s_queued_loosening_never_executes() {
+    let mut w = World::new();
+    w.seal();
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let admin = w.m.admin.pubkey();
+    let recovery = Keypair::new();
+    w.env.fund(&recovery);
+    w.env.ok(&[w.m.replace_recovery_ix(&admin, &recovery.pubkey(), &[g0, g1])], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    // The thief (the admin key) queues its own destination.
+    let thief = Keypair::new().pubkey();
+    let (ix, theirs) = propose_as(&w, &admin, 4, &thief);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    // Recovery: a new admin.
+    let new_admin = Keypair::new();
+    w.env.fund(&new_admin);
+    let (ix, rotation) = propose_as(&w, &recovery.pubkey(), 3, &new_admin.pubkey());
+    w.env.ok(&[ix], &[&recovery]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, rotation, &new_admin.pubkey())], &[]);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, theirs, &thief)], &[]), verr::CHANGE_STALE);
+    // The new admin's own changes still execute.
+    let mine = Keypair::new().pubkey();
+    let (ix, id) = propose_as(&w, &new_admin.pubkey(), 4, &mine);
+    w.env.ok(&[ix], &[&new_admin]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, id, &mine)], &[]);
+}
+
+/// Finding 87: the seal names every vault in one transaction, so more than 10
+/// vaults before the seal could never seal, and the pre-seal deposits stayed
+/// locked for good. The eleventh vault before the seal is refused.
+#[test]
+fn no_more_vaults_before_the_seal_than_the_seal_can_name() {
+    let mut env = Env::new();
+    let m = Market::new(&mut env);
+    for _ in 0..10 {
+        m.create_vault(&mut env, 6, Limits::default_limits(), USDC_FEED, None);
+    }
+    let (mint, _) = env.create_mint(6, &token_program());
+    let vault = pda(&[b"vault", m.protocol.as_ref(), mint.as_ref()], &m.vault_program);
+    let vault_tokens = pda(&[b"vault-tokens", m.protocol.as_ref(), mint.as_ref()], &m.vault_program);
+    let ix = m.vault_ix(1, &Limits::default_limits().bytes(), vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new_readonly(m.admin.pubkey(), true),
+        AccountMeta::new(m.protocol, false),
+        AccountMeta::new(vault, false),
+        AccountMeta::new(vault_tokens, false),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new_readonly(token_program(), false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    assert_eq!(env.fails(&[ix], &[&m.admin]), verr::TOO_MANY_VAULTS);
+}
+
+/// The guardian-set payload for `SetGuardians`.
+fn guardian_set(keys: &[Address], threshold: u8) -> Vec<u8> {
+    let mut d = vec![keys.len() as u8];
+    for k in keys {
+        d.extend_from_slice(k.as_ref());
+    }
+    d.push(threshold);
+    d.extend_from_slice(&(7 * DAY).to_le_bytes());
+    d
+}
+
+/// Finding 88: before the seal, a stolen admin key swaps in its own guardians,
+/// sets its own destination and proposes the seal. That review used to lock
+/// the recovery key out (`SealUnderReview`), and the thief then executed the
+/// seal and parked the vault in one transaction. Now (1) the recovery key
+/// replaces the admin during the review, which ends it, and (2) even without
+/// one, the lifeboat stays shut for a loosen delay after the seal, while every
+/// depositor can withdraw.
+#[test]
+fn a_pre_seal_thief_cannot_seal_and_park_the_vault() {
+    let zero = Address::default();
+    // (1) With a recovery key.
+    let mut w = World::new();
+    let alice = w.user();
+    w.deposit("usdc", &alice, 1_000_000 * USDC);
+    let recovery = Keypair::new();
+    w.env.fund(&recovery);
+    let (ix, _) = propose_as(&w, &w.m.admin.pubkey(), 6, &recovery.pubkey());
+    w.env.ok(&[ix], &[&w.m.admin]); // genesis: at once
+    let admin = w.m.admin.pubkey();
+    let puppets = [Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let thief = Keypair::new().pubkey();
+    w.env.ok(&[
+        w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&puppets, 2), None),
+    ], &[&w.m.admin]);
+    let (ix, _) = propose_as(&w, &admin, 4, &thief);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    // The recovery key's new admin applies during the review and ends it.
+    let new_admin = Keypair::new();
+    let (ix, _) = propose_as(&w, &recovery.pubkey(), 3, &new_admin.pubkey());
+    w.env.ok(&[ix], &[&recovery]);
+    w.env.advance(3 * DAY + 1);
+    w.refresh_prices();
+    assert!(w.env.send(&[w.m.execute_seal_ix(&[&w.usdc, &w.sol])], &[]).is_err(), "the thief's seal is gone");
+
+    // (2) Without one: the seal executes, but the vault cannot be parked in
+    // the same transaction, and the depositor leaves during the window.
+    let mut w = World::new();
+    let alice = w.user();
+    let alice_acc = w.deposit("usdc", &alice, 1_000_000 * USDC);
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&puppets, 2), None)], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.refresh_prices();
+    let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
+    assert_eq!(w.env.fails(&[seal, r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]), verr::NOT_SEALED);
+    w.env.ok(&[w.m.execute_seal_ix(&[&w.usdc, &w.sol])], &[]);
+    let out = w.m.withdraw_ix(&w.env, &w.usdc, &alice.pubkey(), &alice_acc, 1_000_000 * USDC, &w.usdc_prices(false));
+    w.env.ok(&[out], &[&alice]);
+    assert_eq!(w.env.balance(&alice_acc), 1_000_000 * USDC, "out before the lifeboat opens");
+}
+
+/// Finding 88: an allowlisted asset's oracle settings are bounded: a price at
+/// most an hour old, a margin of at least one sigma, a confidence at most 10%
+/// of the price, and a real feed. A delisted asset is not priced, so its
+/// settings are not checked.
+#[test]
+fn oracle_settings_of_a_priced_asset_are_bounded() {
+    let mut w = World::new();
+    for (cfg, what) in [
+        (asset_bytes(true, 8_500, 10_500, 20_000, 7_200, 100, SOL_FEED), "two-hour-old prices"),
+        (asset_bytes(true, 8_500, 10_500, 5_000, 60, 100, SOL_FEED), "half a sigma"),
+        (asset_bytes(true, 8_500, 10_500, 20_000, 60, 5_000, SOL_FEED), "confidence of half the price"),
+        (asset_bytes(true, 8_500, 10_500, 20_000, 60, 100, [0; 32]), "no feed"),
+    ] {
+        let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &cfg);
+        assert!(w.env.send(&[ix], &[&w.m.admin]).is_err(), "{what} must be refused");
+    }
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &asset_bytes(false, 8_500, 10_500, 20_000, 60, 100, [0; 32]));
+    w.env.ok(&[ix], &[&w.m.admin]);
+}
+
+/// Finding 89: a payout to a token account the protocol PDA owns is refused,
+/// like one the vault PDA owns: no instruction can move tokens out of it.
+#[test]
+fn a_release_cannot_pay_an_account_the_protocol_owns() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (mint, protocol, program) = (w.usdc.mint, w.m.protocol, w.usdc.token_program);
+    let stray = w.env.token_account(&mint, &protocol, &program);
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &protocol, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
 }

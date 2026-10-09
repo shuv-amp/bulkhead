@@ -34,9 +34,9 @@ pub use state::{
 };
 
 use bulkhead_core::floor::{
-    buffer_authority, buffer_closable, can_restore, deployable_after_simd0500, elf_info,
-    is_canonical_abort, program_programdata, programdata_header, upgrade_eta, RestoreSource,
-    BUFFER_DATA_OFFSET, PROGRAMDATA_DATA_OFFSET,
+    buffer_authority, buffer_closable, can_restore, deployable_after_simd0500, elf_extent,
+    elf_info, is_canonical_abort, program_programdata, programdata_header, upgrade_eta,
+    RestoreSource, BUFFER_DATA_OFFSET, PROGRAMDATA_DATA_OFFSET,
 };
 use bulkhead_core::governance::{
     can_eject, can_execute, quorum, GovError, Schedule, CHANGE_EXPIRY_S, MAX_HEARTBEAT_INTERVAL_S,
@@ -230,8 +230,9 @@ fn check_frozen_buffer(program_id: &Address, c: &Config, buffer: &AccountView) -
     Ok(())
 }
 
-/// Byte identity of a buffer with the live programdata, exactly as
-/// `bulkhead_core::floor::snapshot_matches` defines it, using `sol_memcmp_`.
+/// A buffer that restores the live code, exactly as
+/// `bulkhead_core::floor::snapshot_restorable` defines it (byte identity, and
+/// at least the ELF's declared length), using `sol_memcmp_`.
 fn snapshot_identical(
     buffer: &AccountView,
     programdata: &AccountView,
@@ -246,7 +247,16 @@ fn snapshot_identical(
         _ => return Ok(false),
     };
     let n = bp.len();
-    Ok(n > 0 && n <= pp.len() && sys::bytes_equal(bp, &pp[..n]) && sys::all_zero(&pp[n..]))
+    // At least as long as the live ELF says it is: a copy cut before its
+    // trailing zeros matched, but the loader cannot redeploy it (finding 88).
+    let Some(extent) = elf_extent(pp) else {
+        return Ok(false);
+    };
+    Ok(n > 0
+        && n >= extent
+        && n <= pp.len()
+        && sys::bytes_equal(bp, &pp[..n])
+        && sys::all_zero(&pp[n..]))
 }
 
 fn live_code_is_v3(programdata: &AccountView) -> Result<u8, ProgramError> {
@@ -619,16 +629,30 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
 // ---------------------------------------------------------------------------
 // 1. Stage the abort buffer
 // ---------------------------------------------------------------------------
-// Accounts: 0 config [w], 1 buffer, 2 programdata. Anyone.
+// Accounts: 0 config [w], 1 buffer, 2 programdata, 3.. guardians [s] (only
+// to replace a staged one). Anyone stages the first.
 // The buffer must hold exactly a canonical abort binary, be frozen (Floor is
 // its authority), and fit in the programdata account; a staged abort that the
 // loader would reject is worse than none.
+//
+// A staged abort buffer is replaced only by a live guardian quorum: if a
+// runtime change ever made the staged binary undeployable, every stop would
+// fail, and the minimal fallback could not be swapped in (docs/09, finding
+// 88). One key alone may not, or it could swap the buffer under every stop in
+// flight. The replaced buffer is then an orphan the owner may close.
 fn stage_abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let mut c = load_config(program_id, acc(accounts, 0)?)?;
     let buffer = acc(accounts, 1)?;
     let programdata = acc(accounts, 2)?;
     if c.abort_buffer != [0; 32] {
-        return Err(FloorError::AbortAlreadyStaged.into());
+        let bits = guardian_signers(&c, accounts.get(3..).unwrap_or(&[]))?;
+        let alive = c.alive_mask(now()?);
+        if bits == 0 || !quorum(bits & alive, alive, c.threshold) {
+            return Err(FloorError::AbortAlreadyStaged.into());
+        }
+        if key(buffer) == c.abort_buffer {
+            return Err(FloorError::WrongBuffer.into());
+        }
     }
     if key(programdata) != c.programdata {
         return Err(FloorError::ProgramMismatch.into());
@@ -682,7 +706,8 @@ fn pin_snapshot(program_id: &Address, accounts: &mut [AccountView]) -> ProgramRe
 // ---------------------------------------------------------------------------
 //
 // Accounts: 0 config [w], 1 guardian or owner [s], 2 programdata [w],
-//           3 program [w], 4 abort buffer [w], 5 spill [w], 6 rent, 7 clock,
+//           3 program [w], 4 abort buffer [w], 5 spill [w] (the config itself:
+//           finding 88), 6 rent, 7 clock,
 //           8 authority PDA, 9 loader-v3, 10 snapshot buffer (required while
 //           one is pinned).
 //
@@ -724,6 +749,14 @@ fn abort(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     }
     let authority = acc(accounts, 8)?;
     check_authority(program_id, &c, authority)?;
+    // The spill (what the loader refunds when it installs the abort binary)
+    // is Floor's config, not whoever stops: with SIMD-0433, an `Upgrade`
+    // shrinks programdata to the binary and refunds the rest to the spill,
+    // ~73 SOL for a program pre-extended to 10 MiB, a reward for a single
+    // guardian's stop (docs/09, finding 88). The owner receives it at release.
+    if key(acc(accounts, 5)?) != key(acc(accounts, 0)?) {
+        return Err(FloorError::WrongAccount.into());
+    }
 
     // Decide, against the exact live bytes, whether the snapshot restores them.
     c.snapshot_valid = 0;
