@@ -31,6 +31,7 @@ pub mod verr {
     pub const INVALID_GUARDIANS: u32 = 8023;
     pub const WRONG_CALLER: u32 = 8009;
     pub const EXTENSION_NOT_ALLOWED: u32 = 8013;
+    pub const RECIPIENT_OWNER_MISMATCH: u32 = 8014;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;
     pub const NOT_SEALED: u32 = 8016;
     pub const SEAL_NOT_EXECUTABLE: u32 = 8018;
@@ -41,6 +42,7 @@ pub mod verr {
     pub const SEAL_UNDER_REVIEW: u32 = 8050;
     pub const CHANGE_STALE: u32 = 8051;
     pub const WRONG_TICKET: u32 = 8052;
+    pub const STRANDED_DESTINATION: u32 = 8053;
     pub const LANE_CLOSED: u32 = 8025;
     pub const QUEUE_FULL: u32 = 8026;
     pub const FROZEN: u32 = 8027;

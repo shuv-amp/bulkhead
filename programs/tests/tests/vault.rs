@@ -1051,6 +1051,7 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
                 AccountMeta::new_readonly(w.usdc.mint, false),
                 AccountMeta::new(to, false),
                 AccountMeta::new_readonly(w.usdc.token_program, false),
+                AccountMeta::new_readonly(dest_owner, false),
             ],
         )
     };
@@ -2334,6 +2335,7 @@ fn every_account_substitution_is_refused() {
             AccountMeta::new_readonly(w.usdc.mint, false),
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(w.usdc.token_program, false),
+            AccountMeta::new_readonly(dest_owner, false),
         ],
     );
     s.run(&mut w.env, "execute lifeboat exit", ix, &[], &[]);
@@ -3070,6 +3072,43 @@ fn the_seal_does_not_count_tokens_a_pending_exit_will_take() {
     w.refresh_prices();
     let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
     assert_eq!(w.env.fails(&[ix], &[]), verr::IMPORT_EXCEEDS_BALANCE);
+}
+
+/// Issue #38: a lifeboat destination this program owns (here the SOL vault,
+/// which can own a USDC token account) could never send the tokens on. The
+/// exit is refused, and the tokens stay in the lifeboat.
+#[test]
+fn a_lifeboat_exit_never_strands_tokens_with_a_vault() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let stranded = w.sol.vault;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 4, &stranded, &[], None)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 0, &stranded)], &[]);
+    w.env.advance(3 * DAY + 1); // the new destination is now 72h old
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let dest = w.account("usdc", &stranded);
+    let exit = |owner: Address| {
+        w.m.vault_ix(27, &[], vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(lifeboat, false),
+            AccountMeta::new_readonly(w.usdc.mint, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new_readonly(w.usdc.token_program, false),
+            AccountMeta::new_readonly(owner, false),
+        ])
+    };
+    // Account 6 must be the destination itself, so the check cannot be dodged.
+    assert_eq!(w.env.fails(&[exit(Keypair::new().pubkey())], &[]), verr::RECIPIENT_OWNER_MISMATCH);
+    assert_eq!(w.env.fails(&[exit(stranded)], &[]), verr::STRANDED_DESTINATION);
+    assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
+    assert_eq!(w.env.balance(&dest), 0);
 }
 
 /// Finding 72: an abdicated recovery key can still be removed (it only takes

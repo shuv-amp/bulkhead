@@ -10,7 +10,8 @@ use bulkhead_core::consts::MIN_LOOSEN_DELAY_S;
 use bulkhead_core::consts::{MAX_SLOTS, MIN_UPGRADE_DELAY_S, TAU_S};
 use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::floor::{
-    can_restore, deployable_after_simd0500, elf_info, snapshot_matches, upgrade_eta, RestoreSource,
+    buffer_closable, can_restore, deployable_after_simd0500, elf_info, snapshot_matches,
+    upgrade_eta, RestoreSource,
 };
 use bulkhead_core::governance::{self, Abdications, GovError, Schedule, CHANGE_EXPIRY_S};
 use bulkhead_core::ledger::{contribution, Ledger, LedgerError, Mint, PricedAsset, Pricing};
@@ -1009,6 +1010,24 @@ fn simd0500_gate() {
     assert!(!deployable_after_simd0500(elf_info(&header(0x107, 2))));
     assert!(elf_info(&header(0x3E, 3)).is_none()); // x86-64 is not a Solana program
     assert!(elf_info(&header(0xF7, 3)[..40]).is_none());
+}
+
+/// Issue #37, exhaustively over a four-key alphabet (key 0 is "none"): a
+/// buffer Floor relies on (the stop, the quorum's restore, the pending
+/// proposal) is never closable, and every other buffer is.
+#[test]
+fn only_orphaned_buffers_are_closable() {
+    let k = |i: u8| [i; 32];
+    for (b, a, s, p) in (0..4u8).flat_map(|b| {
+        (0..4u8).flat_map(move |a| (0..4u8).flat_map(move |s| (0..4u8).map(move |p| (b, a, s, p))))
+    }) {
+        let relied_on = (a != 0 && b == a) || (s != 0 && b == s) || (p != 0 && b == p);
+        assert_eq!(
+            buffer_closable(&k(b), &k(a), &k(s), &k(p)),
+            b != 0 && !relied_on,
+            "buffer {b}, abort {a}, snapshot {s}, pending {p}"
+        );
+    }
 }
 
 #[test]

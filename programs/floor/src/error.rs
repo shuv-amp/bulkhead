@@ -42,6 +42,9 @@ pub enum FloorError {
     WrongProgram,
     Overflow,
     AbortDoesNotFit,
+    /// `close_buffer` of the staged abort buffer, the pinned snapshot or the
+    /// pending proposal's buffer (issue #37).
+    BufferInUse,
 }
 
 impl From<FloorError> for ProgramError {

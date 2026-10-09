@@ -6,7 +6,7 @@ Floor is a small program (`programs/floor`, Pinocchio, one dependency: `bulkhead
 2. **Stopping is fast.** Any single live guardian, or the owner, stops the program in one instruction by swapping in a pre-staged abort binary. The binary logs why it fails and returns `Custom(0x464C4F52)` ("FLOR").
 3. **Undoing a stop is cheap and can't smuggle in code.** A live guardian quorum restores the *snapshot*: a buffer verified on-chain, at the moment of the abort, to be byte-identical to the code that was running. New code (a fix) needs a quorum's approval of that exact buffer, or the full delay.
 4. **The only fast path to new code goes through a visible stop.**
-5. `Close` (which destroys a program forever) is never reachable.
+5. `Close` of the program (which destroys it forever) is never reachable. Floor closes only buffers it holds that nothing refers to, to give their rent back (`close_buffer`).
 
 It is a separate program from the Vault so each has a small audit surface and its own blast radius.
 
@@ -96,12 +96,13 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 4 | `propose(kind, target, payload)` | owner; the recovery key for SetOwner/SetRecovery only | Upgrade (while live), Restore (while aborted), ReleaseAuthority, SetGuardians, SetOwner, SetDelay, SetRecovery. The recovery key is never a guardian: SetGuardians and SetRecovery refuse a set where one key holds both roles. Raising the delay is instant, even while a recovery proposal holds the slot (which stays); everything else waits the delay and expires 7 days after it becomes executable. A recovery proposal takes the place of a pending owner proposal and is not cleared by a stop; once vetoed or expired it no longer holds the slot. |
 | 5 | `veto` | any live guardian | Blocks the pending proposal. Data may be empty, or the proposal id (u64). A named id that is not the one pending is refused, so a retried veto cannot hit a proposal that replaced it. |
 | 6 | `approve` | live guardians | Approves the pending Restore (its exact buffer) |
-| 7 | `execute` | anyone | Runs the pending proposal once allowed. A Restore runs at once with a quorum's approval. |
+| 7 | `execute` | anyone (a release to a key: that key signs too) | Runs the pending proposal once allowed. A Restore runs at once with a quorum's approval. A ReleaseAuthority to a key uses `SetAuthorityChecked`, so the new authority must sign: a mistyped key nobody holds fails here, while the config and the stop still exist (`09`, finding 80). A release also closes the staged abort buffer and the pin, returning their rent to the owner. |
 | 8 | `restore_snapshot` | a live guardian quorum | Reinstalls the verified snapshot |
 | 9 | `heartbeat` | a live guardian | Keeps it alive; a dead guardian can't revive itself |
 | 10 | `eject(target)` | a live quorum of the *other* guardians | Removes a guardian at once; never below the threshold |
 | 11 | `cancel` | whoever proposed it (owner or recovery key) | Withdraws the pending proposal |
 | 12 | `replace_recovery(key)` | the owner + a live guardian quorum | Replaces the recovery key at once (all zero: none; never the owner or a guardian) and voids its pending proposal (`09`, finding 62). No key is both a guardian and the recovery key, at registration, in a guardian set, or through SetRecovery |
+| 13 | `close_buffer` | the owner | Closes a buffer whose authority is Floor's PDA and returns its rent to the owner: a replaced or cleared pin, or a proposal's buffer after a cancel or a stop. Never the staged abort buffer, the pin or the pending proposal's buffer (`BufferInUse`), and only a loader-v3 buffer, never the program (`09`, finding 78). |
 
 ## 7. Measured
 
@@ -112,7 +113,7 @@ Real agave loader, LiteSVM with the mainnet feature set (`programs/tests/tests/f
 | Stop a ~200 KB program, including byte-for-byte snapshot verification | 10,312 |
 | Restore the ~200 KB snapshot (guardian quorum) | 8,149 |
 
-A snapshot buffer costs rent for a copy of the program (about 5,080 lamports per byte at current rent, the same on mainnet and devnet on 28 Sep 2026; about 1.04 SOL for 200 KB). The rent is returned when a restore consumes the buffer. That is the price of a one-instruction, trustless undo.
+A snapshot buffer costs rent for a copy of the program (about 5,080 lamports per byte at current rent, the same on mainnet and devnet on 28 Sep 2026; about 1.04 SOL for 200 KB). The rent is returned when a restore consumes the buffer. A pin that is replaced or cleared by an upgrade, and a proposal's buffer after a cancel or a stop, return theirs through `close_buffer` (the owner), and a release closes the abort buffer and the pin. That is the price of a one-instruction, trustless undo.
 
 **On a real program** (`scripts/floor-demo.sh <program-id>`, 27 Sep 2026): the script runs a mainnet program's actual bytes on a local validator, with mainnet's feature set and a local team key as the upgrade authority. Run on SPL Stake Pool (`SPoo1Ku8…`, 1,080,464 bytes of sBPF v0 code), it went like this:
 1. `register` moved the upgrade key to Floor in one transaction, and the code was unchanged.
