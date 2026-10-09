@@ -60,7 +60,10 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   const what = action ? `${action}${line.signature ? " sent" : " failed"}` : level === "info" ? "notice" : level;
   const detail = [line.reason, message, line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
     .filter(Boolean).join(" | ");
-  return { severity: level === "error" || action === "freeze" ? "critical" : "warning", title: `Bulkhead guardian: ${what}`, detail, at: line.t };
+  const alert = { severity: level === "error" || action === "freeze" ? "critical" : "warning", title: `Bulkhead guardian: ${what}`, detail, at: line.t };
+  // Not part of the message: lets the sender un-mute an alert it could not deliver.
+  Object.defineProperty(alert, "kind", { value: kind });
+  return alert;
 }
 
 /**
@@ -138,23 +141,39 @@ export function webhookBody(alert, format = "json", protocol = "") {
  * be a function: the guardian creates its alerter before it knows the
  * protocol, so a failed startup alerts too.
  */
-export function alerter({ url, format = "json", protocol = "", windowMs, timeoutMs = 5_000 } = {}, { fetchFn = globalThis.fetch, onError = () => {}, now = () => Date.now() } = {}) {
+/**
+ * Posts alerts to the webhook. A delivery that fails (a timeout, a 5xx, a 429)
+ * is tried again after each of `retryDelaysMs`; one never delivered is
+ * un-muted, so its next occurrence is tried again rather than suppressed for
+ * the window. One failed post used to drop even a freeze's alert and mute it
+ * for 10 minutes (docs/09, finding 83).
+ */
+export function alerter({ url, format = "json", protocol = "", windowMs, timeoutMs = 5_000, retryDelaysMs = [1_000, 3_000, 9_000] } = {}, { fetchFn = globalThis.fetch, onError = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const seen = new Map();
   const inflight = new Set();
   function send(line) {
     if (!url) return;
     const alert = alertFor(line, seen, now(), { windowMs });
     if (!alert) return;
-    const p = Promise.resolve()
-      .then(() => fetchFn(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(webhookBody(alert, format, typeof protocol === "function" ? protocol() : protocol)),
-        signal: AbortSignal.timeout(timeoutMs),
-      }))
-      .then((r) => { if (!r.ok) throw new Error(`webhook answered ${r.status}`); })
-      .catch((e) => onError(e))
-      .finally(() => inflight.delete(p));
+    const body = JSON.stringify(webhookBody(alert, format, typeof protocol === "function" ? protocol() : protocol));
+    const post = async () => {
+      const r = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
+      if (!r.ok) throw new Error(`webhook answered ${r.status}`);
+    };
+    const p = (async () => {
+      for (let i = 0; ; i++) {
+        try {
+          return await post();
+        } catch (e) {
+          if (i >= retryDelaysMs.length) {
+            seen.delete(alert.kind);
+            onError(e);
+            return;
+          }
+          await sleep(retryDelaysMs[i]);
+        }
+      }
+    })().finally(() => inflight.delete(p));
     inflight.add(p);
   }
   /** Wait for alerts in flight (tests, and a clean exit). */

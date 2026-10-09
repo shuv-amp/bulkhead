@@ -7,11 +7,44 @@ export const SIG_PAGE = 1000;
 /** Emit a progress callback every this many pages during a long recovery. */
 export const PAGE_LOG_INTERVAL = 40;
 
-export function pageQuery({ before, until, limit = SIG_PAGE } = {}) {
+export function pageQuery({ before, until, limit = SIG_PAGE, minSlot = null } = {}) {
   const q = { limit, commitment: "confirmed" };
   if (before) q.before = before;
   if (until) q.until = until;
+  // A node behind the cursor's slot answers -32016 (failed over), instead of
+  // ignoring an `until` it does not have.
+  if (minSlot) q.minContextSlot = minSlot;
   return q;
+}
+
+/**
+ * Rows a walk after a cursor still needs: past the cursor's slot, or in it
+ * and not read yet. Agave treats an `until` signature it does not have as no
+ * bound and lists back to its oldest block (blockstore
+ * `get_confirmed_signatures_for_address2`): a node behind the cursor, or one
+ * missing it, returned history the guardian had already counted, and counted
+ * it again (docs/09, finding 81).
+ */
+export function afterCursor(rows, minSlot, seen) {
+  if (minSlot == null) return { rows, reachedBack: false };
+  // Newest-first: from the first row already read, everything is older.
+  const at = seen ? rows.findIndex((s) => seen.has(s.signature)) : -1;
+  const upto = at >= 0 ? rows.slice(0, at) : rows;
+  const keep = upto.filter((s) => s.slot > minSlot || (s.slot === minSlot && !seen?.has(s.signature)));
+  return { rows: keep, reachedBack: at >= 0 || rows.some((s) => s.slot < minSlot) };
+}
+
+/**
+ * An empty page after a full one ends a walk only if the node has the `before`
+ * signature: then nothing is older (the last page was exactly full). A node
+ * that lacks it (a failover mid-walk) also answers `[]`, and ending the walk
+ * there skipped what lay between it and the cursor (docs/09, finding 81).
+ * `knows(signature)` asks the node; without it the page is taken as the end.
+ */
+async function endOfWalk(before, knows) {
+  if (!before || !knows) return;
+  if (await knows(before)) return;
+  throw new Error(`the node returned nothing before ${before}, the oldest signature of a full page, and does not have it: walking again`);
 }
 
 /**
@@ -28,17 +61,32 @@ export function morePages(page, limit, oldestWanted) {
   return oldest >= oldestWanted;
 }
 
-/** Walk every page, newest-first, until the live cursor or startup time bound. */
-export async function signatureWalk(fetchPage, { until, oldestWanted, limit = SIG_PAGE, onPage = () => {} } = {}) {
+/**
+ * Walk every page, newest-first, until the live cursor or startup time bound.
+ * A live walk passes the cursor's slot (`minSlot`) and the signatures already
+ * read in it (`seen`): rows at or before the cursor are dropped, and a page
+ * that reaches back past it ends the walk.
+ */
+export async function signatureWalk(fetchPage, { until, oldestWanted, limit = SIG_PAGE, onPage = () => {}, minSlot = null, seen = null, knows = null, maxRows = Infinity } = {}) {
   const out = [];
   let before;
   for (let page = 0; ; page++) {
-    const query = pageQuery({ before, until, limit });
+    // A bound on a startup walk: spam can put millions of signatures in the
+    // window, and nothing is watched until the walk is read (docs/09, finding 83).
+    if (out.length >= maxRows) {
+      out.truncated = true;
+      break;
+    }
+    const query = pageQuery({ before, until, limit, minSlot });
     const signatures = await fetchPage(query);
-    if (!signatures?.length) break;
-    out.push(...signatures);
+    if (!signatures?.length) {
+      await endOfWalk(before, knows);
+      break;
+    }
+    const { rows, reachedBack } = afterCursor(signatures, minSlot, seen);
+    out.push(...rows);
     onPage(page + 1, signatures.length);
-    if (!morePages(signatures, limit, oldestWanted)) break;
+    if (reachedBack || !morePages(signatures, limit, oldestWanted)) break;
     const nextBefore = signatures.at(-1).signature;
     if (nextBefore === before) throw new Error(`signature walk made no progress before ${nextBefore}`);
     before = nextBefore;
@@ -95,7 +143,7 @@ export async function signatureWalkSinceSlot(fetchPage, { slot, seen = new Set()
  *               and nothing in between was read
  * (docs/09, finding 71).
  */
-export async function followAccount(fetchPage, { cursor = null, oldestWanted = null, limit = SIG_PAGE } = {}) {
+export async function followAccount(fetchPage, { cursor = null, oldestWanted = null, limit = SIG_PAGE, knows = null } = {}) {
   const anchor = async (status) => {
     const newest = (await fetchPage({ limit: 1, commitment: "confirmed" }))?.[0];
     if (!newest) return { sigs: [], cursor: null, status: status === "gone" ? "gone" : "empty" };
@@ -106,10 +154,15 @@ export async function followAccount(fetchPage, { cursor = null, oldestWanted = n
   let before;
   try {
     for (;;) {
-      const page = await fetchPage(pageQuery({ before, until: cursor.signature, limit }));
-      if (!page?.length) break;
-      out.push(...page);
-      if (page.length < limit) break;
+      const page = await fetchPage(pageQuery({ before, until: cursor.signature, limit, minSlot: cursor.slot || null }));
+      if (!page?.length) {
+        await endOfWalk(before, knows);
+        break;
+      }
+      // The cursor's own signature is the one row of its slot already read.
+      const { rows, reachedBack } = afterCursor(page, cursor.slot || null, new Set([cursor.signature]));
+      out.push(...rows);
+      if (reachedBack || page.length < limit) break;
       const oldest = page.at(-1).blockTime;
       if (oldestWanted != null && oldest != null && oldest < oldestWanted) return { sigs: out, cursor, status: "gap" };
       const next = page.at(-1).signature;
@@ -184,6 +237,27 @@ export function ingestLagS(backlog, chainTimeS) {
 }
 
 /** A missing transaction is not an empty transaction: leave its cursor uncommitted and retry. */
+/**
+ * At startup only: a transaction the node will not return after `tries` is
+ * skipped (`{ skipped: true }`) and reported through `onSkip`. One missing
+ * old transaction used to end the process, and systemd restarted it into the
+ * same replay: blind for good (docs/09, finding 83). Live, it still throws,
+ * and the step retries it: nothing new is skipped.
+ */
+export async function transactionOrSkip(rpc, signature, { tries = 3, waitMs = 1_000, onSkip = () => {} } = {}) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await requireTransaction(rpc, signature);
+    } catch (e) {
+      last = e;
+      if (i + 1 < tries) await new Promise((r) => setTimeout(r, waitMs * (i + 1)));
+    }
+  }
+  onSkip(signature, last);
+  return { skipped: true };
+}
+
 export async function requireTransaction(rpc, signature) {
   const tx = await rpc.call("getTransaction", [signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
   if (!tx?.meta) throw new Error(`getTransaction returned no transaction metadata for ${signature}; retrying`);

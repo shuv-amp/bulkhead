@@ -8,8 +8,10 @@
 # survives restarts, and keep the guardian key readable by this user only.
 [Unit]
 Description=Bulkhead guardian (%i)
-After=network-online.target
-Wants=network-online.target
+# Heartbeat standing, the incident hold's renewal and approval expiry read the
+# wall clock: start only once it is synchronized (docs/09, finding 83).
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 # Never give up restarting: a guardian that stays down cannot freeze.
 StartLimitIntervalSec=0
 

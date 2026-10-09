@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Keypair, send, sendWithFallback, computeBudget, priorityPrice, COMPUTE_BUDGET, PREFLIGHT_REFUSED } from "../lib/signer.mjs";
+import { Keypair, send, sendWithFallback, sendEscalating, refusalCause, computeBudget, priorityPrice, COMPUTE_BUDGET, PREFLIGHT_REFUSED } from "../lib/signer.mjs";
 import { b58encode, Rpc } from "../lib/solana.mjs";
 
 test("compute budget: a unit limit, and a price only when one is set", () => {
@@ -344,4 +344,95 @@ test("a key file the group or others can read is refused; an owner-only one load
   // Saving again tightens an existing file, not only a new one.
   kp.save(path);
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+// --- finding 82: the freeze's own sending loop ------------------------------
+
+/** A node on which only the `landsAt`-th distinct signed transaction lands (rebroadcasts are not new). */
+function congested({ landsAt = Infinity, failPollsFirst = 0 } = {}) {
+  const log = { sends: 0, distinct: [] };
+  const landed = new Set();
+  let polls = 0;
+  return {
+    log,
+    latestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: null }),
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        log.sends++;
+        if (!log.distinct.includes(params[0])) log.distinct.push(params[0]);
+        const sig = `sig${log.distinct.indexOf(params[0])}`;
+        if (log.distinct.indexOf(params[0]) + 1 >= landsAt) landed.add(sig);
+        return sig;
+      }
+      if (method === "getSignatureStatuses") {
+        if (polls++ < failPollsFirst) throw new Error("timeout");
+        return { value: params[0].map((s) => (landed.has(s) ? { confirmationStatus: "confirmed" } : null)) };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+}
+
+test("a freeze is signed again at twice the price until it lands (finding 82)", async () => {
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  const prices = [];
+  const node = congested({ landsAt: 3 });
+  const r = await sendEscalating(node, payer, [ix], { price: 0, floor: 100_000, cap: 1_000_000, attemptMs: 40, rebroadcastMs: 10, pollMs: 5, onAttempt: ({ nextPrice }) => prices.push(nextPrice) });
+  assert.deepEqual([r.attempts, r.price, prices], [3, 400_000, [200_000, 400_000]], "from the floor (a quiet account shows 0), doubling");
+  assert.equal(node.log.distinct.length, 3, "a fresh signature each attempt");
+  assert.ok(node.log.sends > 3, "and rebroadcast within each");
+  // Never above the cap; the deadline ends it.
+  const capped = [];
+  await assert.rejects(sendEscalating(congested(), payer, [ix], { floor: 100_000, cap: 300_000, attemptMs: 20, rebroadcastMs: 10, pollMs: 5, deadlineMs: 150, onAttempt: ({ nextPrice }) => capped.push(nextPrice) }), /not confirmed/);
+  assert.equal(Math.max(...capped), 300_000);
+  // An outcome reached meanwhile (another guardian froze) ends it too.
+  const r2 = await sendEscalating(congested(), payer, [ix], { floor: 100_000, attemptMs: 20, rebroadcastMs: 10, pollMs: 5, settled: async () => true });
+  assert.deepEqual([r2.signature, r2.attempts], [null, 1]);
+});
+
+test("one failed status poll does not abandon a transaction in flight (finding 82)", async () => {
+  const node = congested({ landsAt: 1, failPollsFirst: 2 });
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  assert.ok(await send(node, payer, [ix], [], { pollMs: 5 }));
+  assert.equal(node.log.distinct.length, 1, "no second transaction");
+});
+
+test("a blockhash a node lacks is not a refused budget; an instruction's own failure is not either (finding 82)", () => {
+  const refused = (err) => Object.assign(new Error("x"), { rpcError: { code: PREFLIGHT_REFUSED, data: { err } } });
+  assert.equal(refusalCause(refused("BlockhashNotFound")), "blockhash");
+  assert.equal(refusalCause(refused({ InstructionError: [2, { Custom: 8006 }] })), "instructions");
+  assert.equal(refusalCause(refused({ InstructionError: [2, "ComputationalBudgetExceeded"] })), "budget");
+  assert.equal(refusalCause(refused({ InstructionError: [0, "InvalidInstructionData"] })), "budget");
+  assert.equal(refusalCause(refused("ProgramAccountNotFound")), "budget", "finding 47's mistyped id");
+});
+
+test("a malformed key file's error never quotes its bytes (finding 82)", async () => {
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const p = `${mkdtempSync(`${tmpdir()}/k`)}/bad.json`;
+  writeFileSync(p, "[4,176,210,99,", { mode: 0o600 });
+  assert.throws(() => Keypair.load(p), (e) => !/176|210/.test(e.message) && /not a keypair file/.test(e.message));
+});
+
+test("a primary's preflight that finds the transaction already processed is a success, not a refusal (finding 82)", async () => {
+  // The backup lands it first; the slower primary simulates it afterwards.
+  let sends = 0;
+  const primary = {
+    latestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: null }),
+    call: async (method, params) => {
+      if (method === "sendTransaction") {
+        sends++;
+        throw Object.assign(new Error("sendTransaction: already processed"), { rpcError: { code: PREFLIGHT_REFUSED, data: { err: "AlreadyProcessed" } } });
+      }
+      if (method === "getSignatureStatuses") return { value: params[0].map(() => ({ confirmationStatus: "confirmed" })) };
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  const sig = await sendWithFallback(primary, payer, [ix], [], { computeUnits: 50_000, microLamports: 10_000, pollMs: 5 });
+  assert.ok(sig);
+  assert.equal(sends, 1, "not sent again without its budget");
 });

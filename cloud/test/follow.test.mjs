@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cursorGone, ingestSignatures, morePages, pageQuery, requireTransaction, signatureWalk, signatureWalkSinceSlot } from "../guardian/follow.mjs";
+import { afterCursor, cursorGone, followAccount, ingestSignatures, morePages, pageQuery, requireTransaction, signatureWalk, signatureWalkSinceSlot } from "../guardian/follow.mjs";
 
 test("a full page is not the end of a live walk", () => {
   const page = Array.from({ length: 100 }, (_, i) => ({ signature: `s${i}`, blockTime: 1_000 - i }));
@@ -114,4 +114,56 @@ test("checkpoints carry the signature's slot", async () => {
   const seen = [];
   await ingestSignatures([{ signature: "B", slot: 5 }, { signature: "A", slot: 4 }], async () => {}, (sig, s) => seen.push([sig, s.slot]));
   assert.deepEqual(seen, [["A", 4], ["B", 5]]);
+});
+
+// A node that ignores an `until` it does not have, as Agave does: it lists
+// back to its oldest block. `history` is newest-first, one signature a slot.
+function lenientNode(history, { has = () => true, lacks = new Set() } = {}) {
+  return async (q) => {
+    let rows = history.filter((s) => !lacks.has(s.signature));
+    if (q.before) {
+      const i = rows.findIndex((s) => s.signature === q.before);
+      if (i < 0) return []; // a `before` it lacks: an empty page, not an error
+      rows = rows.slice(i + 1);
+    }
+    if (q.until && has(q.until)) {
+      const j = rows.findIndex((s) => s.signature === q.until);
+      if (j >= 0) rows = rows.slice(0, j);
+    }
+    return rows.slice(0, q.limit);
+  };
+}
+const chain = (n) => Array.from({ length: n }, (_, i) => ({ signature: `s${n - i}`, slot: n - i, blockTime: n - i }));
+
+test("a node without the cursor returns old history: none of it is read again (finding 81)", async () => {
+  // The cursor is s95 (slot 95); this node lacks it and ignores `until`.
+  const history = chain(100);
+  const node = lenientNode(history, { has: (s) => s !== "s95" });
+  const got = await signatureWalk(node, { until: "s95", limit: 10, minSlot: 95, seen: new Set(["s95"]) });
+  assert.deepEqual(got.map((s) => s.signature), ["s100", "s99", "s98", "s97", "s96"]);
+  // The query carries the cursor's slot, so a node behind it refuses (-32016).
+  assert.equal(pageQuery({ until: "s95", minSlot: 95 }).minContextSlot, 95);
+  // Rows of the cursor's slot already read are dropped; unread ones kept.
+  const same = [{ signature: "b", slot: 7 }, { signature: "a", slot: 7 }, { signature: "z", slot: 6 }];
+  assert.deepEqual(afterCursor(same, 7, new Set(["a"])).rows.map((s) => s.signature), ["b"]);
+  // The Floor walk too.
+  const floor = await followAccount(node, { cursor: { signature: "s95", slot: 95 }, limit: 3 });
+  assert.deepEqual([floor.status, floor.sigs.map((s) => s.signature)], ["ok", ["s100", "s99", "s98", "s97", "s96"]]);
+});
+
+test("an empty page after a full one ends the walk only if the node has its `before` (finding 81)", async () => {
+  // 25 new signatures after the cursor, pages of 10: a failover to a node that
+  // lacks s91 (the oldest of the first page) answers [] for the second page.
+  const history = chain(100);
+  const lacking = lenientNode(history, { lacks: new Set(["s91"]) });
+  let calls = 0;
+  const flaky = async (q) => (++calls === 1 ? lenientNode(history)(q) : lacking(q));
+  await assert.rejects(
+    signatureWalk(flaky, { until: "s75", limit: 10, minSlot: 75, seen: new Set(["s75"]), knows: async (s) => s !== "s91" }),
+    /does not have it/,
+  );
+  // Exactly full pages are a real end: the node has the signature.
+  const exact = chain(20);
+  const got = await signatureWalk(lenientNode(exact), { limit: 10, knows: async () => true });
+  assert.equal(got.length, 20);
 });

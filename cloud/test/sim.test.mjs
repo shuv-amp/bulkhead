@@ -219,6 +219,25 @@ test("the freshness cross-check leaves a primary that answers but is stale (find
   }
 });
 
+test("on a busy protocol, a signature the primary has but no longer lists in its newest 100 is not missing (finding 81)", async () => {
+  // The backup's newest is "b1", which the primary has but which 100 newer
+  // transactions have pushed out of its newest-100 list.
+  const newest100 = Array.from({ length: 100 }, (_, i) => ({ signature: `p${i}` }));
+  const f = stubFetch({
+    "a.invalid": (m, params) => ({
+      result: m === "getSlot" ? 1_000 : m === "getSignatureStatuses" ? { value: params[0].map((s) => (s === "b1" ? { confirmationStatus: "confirmed" } : null)) } : newest100,
+    }),
+    "b.invalid": (m) => ({ result: m === "getSlot" ? 1_000 : [{ signature: "b1" }] }),
+  });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"]);
+    for (const t of [0, 31_000, 61_000, 120_000]) assert.equal((await rpc.crossCheck(PROTOCOL, { nowMs: t })).switched, false, `${t}`);
+    assert.equal(rpc.url, "http://a.invalid");
+  } finally {
+    f.restore();
+  }
+});
+
 // --- 4. a truncated transaction runs the ticket scan at once ---------------
 
 test("a truncated transaction runs the ticket scan out of its cadence (finding 76, 4)", () => {

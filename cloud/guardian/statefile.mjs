@@ -12,7 +12,8 @@
 // sustained drip spans days, longer than a restart's replay (docs/09,
 // finding 76).
 
-import { writeFileSync, renameSync, chmodSync } from "node:fs";
+import { writeFileSync, renameSync, chmodSync, openSync, fsyncSync, closeSync } from "node:fs";
+import { dirname } from "node:path";
 
 /** The state to save, as JSON text. Equal text: nothing to write. */
 export function stateJson({ protocol, incidentSince, frozenUntil, state, floorCursors = new Map(), floorPendingSeen = new Map(), changeChecks = new Map() }) {
@@ -39,14 +40,21 @@ export function stateJson({ protocol, incidentSince, frozenUntil, state, floorCu
  * one and spends nothing (docs/09, finding 71).
  */
 export function restoreState(text, protocol, state) {
-  const out = { incidentSince: null, frozenUntil: null, floorCursors: new Map(), floorPendingSeen: new Map(), changeChecks: new Map() };
+  // `problem`: why a file that exists restored nothing. The guardian says so,
+  // urgently: it forgets an open incident, Floor cursors and spent approvals
+  // (docs/09, finding 83). It used to be silent.
+  const out = { incidentSince: null, frozenUntil: null, floorCursors: new Map(), floorPendingSeen: new Map(), changeChecks: new Map(), problem: null };
   let s;
   try {
     s = JSON.parse(text);
   } catch {
+    out.problem = "the state file is not valid JSON (damaged, or cut short by a crash)";
     return out;
   }
-  if (s?.protocol !== protocol) return out;
+  if (s?.protocol !== protocol) {
+    out.problem = `the state file is for another protocol (${s?.protocol ?? "none named"})`;
+    return out;
+  }
   if (Number.isFinite(s.incidentSince)) out.incidentSince = s.incidentSince;
   if (Number.isFinite(s.frozenUntil)) out.frozenUntil = s.frozenUntil;
   for (const [a, by] of Object.entries(s.consumed ?? {})) if (typeof by === "string") state.consumed.set(a, by);
@@ -85,5 +93,23 @@ export function writeStateFile(path, text) {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600 });
   chmodSync(tmp, 0o600);
+  // On disk before the rename, so a power loss leaves the old file or the
+  // new one, never an empty one (docs/09, finding 83).
+  const fd = openSync(tmp, "r+");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, path);
+  try {
+    const dir = openSync(dirname(path), "r");
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
+  } catch {
+    // a directory that cannot be opened for sync (some platforms): the rename stands
+  }
 }
