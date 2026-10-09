@@ -318,7 +318,7 @@ Examples (golden G-12):
 | `reset_backlog` | admin or guardian | §2.2 | Only with zero pending tickets |
 | `lifeboat_move` | admin | Vault → lifeboat, instant, any amount | Destination is the lifeboat PDA only; refused while the protocol or the vault is frozen (`Frozen`) |
 | `lifeboat_return` | admin, or a live guardian quorum | Lifeboat → vault, instant | |
-| `lifeboat_exit` | admin proposes; anyone executes after delay | Lifeboat → committed destination | ≥ 72h; guardian veto; destination committed ≥ 72h earlier; the destination is never the admin (`SetAdmin` refuses it, `SetLifeboatDestination` refuses the admin); the seal does not count tokens a live exit will take |
+| `lifeboat_exit` | admin proposes; executed after the delay with the destination's signature (`09` finding 85) | Lifeboat → committed destination | ≥ 72h; guardian veto; destination committed ≥ 72h earlier; the destination is never the admin (`SetAdmin` refuses it, `SetLifeboatDestination` refuses the admin); the seal does not count tokens a live exit will take |
 
 ## 7. The worst-case attestation
 

@@ -11,8 +11,9 @@
 //   6. has TWO guardians restore the snapshot, calls it again, and checks the
 //      code is byte-identical to before;
 //   7. re-arms: a new abort buffer and a new snapshot, so a stop is ready again;
-//   8. has the owner close the buffer step 4's withdrawn upgrade left behind
-//      (cloud/deploy/floor-buffers.mjs), which returns its rent.
+//   8. has the owner close an orphaned buffer with cloud/deploy/floor-buffers.mjs
+//      (its rent returns), while step 4's withdrawn upgrade, identical to the
+//      live code, stays as a spare snapshot a stop may name.
 // Along the way every forbidden action (a stranger stopping, one guardian
 // restoring, an early upgrade, ...) is simulated and must fail with its exact
 // Floor error. Simulations change nothing on chain.
@@ -207,26 +208,31 @@ const c = await config();
 const armed = c.status === "live" && c.abortStaged && c.snapshotPinned && c.pendingKind === 0;
 say(`   status ${c.status}, abort staged ${c.abortStaged}, snapshot pinned ${c.snapshotPinned}, nothing pending ${c.pendingKind === 0}; guardians ${c.guardians.length} (quorum ${c.threshold}), upgrade delay ${c.upgradeDelayS / 3600}h`);
 
-say("\n7. the owner takes back the rent of a buffer nothing refers to (docs/09, finding 78)");
-// Step 3's upgrade buffer was cancelled: still frozen under Floor, an orphan.
-// The operator's tool (cloud/deploy/floor-buffers.mjs) finds it and closes it;
-// the stop button and the pin stay, and only the owner may close.
+say("\n7. the owner takes back the rent of a buffer nothing refers to (docs/09, findings 78 and 85)");
+// Step 3's withdrawn upgrade buffer holds the live code, so it is a spare
+// snapshot: a stop may name it, and it stays while the program runs. A
+// second abort binary, frozen but never staged, is an orphan. The operator's
+// tool (cloud/deploy/floor-buffers.mjs) keeps the first and closes the
+// second; the stop button and the pin stay, and only the owner may close.
+const extra = buffer(`${dir}/abort.so`);
 await refused("closing the staged abort buffer", [f.closeBuffer(owner.publicKey, abort2)], "BufferInUse");
 await refused("closing the pinned snapshot", [f.closeBuffer(owner.publicKey, snapshot2)], "BufferInUse");
+await refused("closing a spare snapshot a stop may name", [f.closeBuffer(owner.publicKey, upgrade)], "BufferInUse");
 await refused("closing the program's own data", [f.closeBuffer(owner.publicKey, b58encode(f.programdata))], "WrongBuffer");
-await refused("a stranger closing the orphan", [f.closeBuffer(stranger.publicKey, upgrade)], "NotOwner");
-const orphanRent = (await rpc.account(upgrade))?.lamports ?? 0;
+await refused("a stranger closing the orphan", [f.closeBuffer(stranger.publicKey, extra)], "NotOwner");
+const orphanRent = (await rpc.account(extra))?.lamports ?? 0;
 const ownerBefore = (await rpc.account(owner.publicKey)).lamports;
 const buffersOut = execFileSync("node", ["cloud/deploy/floor-buffers.mjs", url, floorProgram, program, "--close", `${dir}/keys/owner.json`], { encoding: "utf8" });
 const ownerGot = (await rpc.account(owner.publicKey)).lamports - ownerBefore;
 const leftover = (await f.heldBuffers(rpc)).map((b) => b.address).sort();
 const reclaimed =
   orphanRent > 0 &&
-  !(await rpc.account(upgrade)) &&
+  !(await rpc.account(extra)) &&
   ownerGot > orphanRent - 100_000 && ownerGot <= orphanRent && // the rent, less the close's fee
-  JSON.stringify(leftover) === JSON.stringify([abort2, snapshot2].sort());
-say(`   floor-buffers: ${buffersOut.trim().split("\n").filter((l) => /orphan|closed/.test(l)).join("; ")}`);
-say(`   the owner got ${ownerGot} of the orphan's ${orphanRent} lamports back (the rest paid the fee); Floor now holds only the stop button and the pin: ${reclaimed}`);
+  JSON.stringify(leftover) === JSON.stringify([abort2, snapshot2, upgrade].sort()) &&
+  /spare snapshot/.test(buffersOut);
+say(`   floor-buffers: ${buffersOut.trim().split("\n").filter((l) => /orphan|spare|closed/.test(l)).join("; ")}`);
+say(`   the owner got ${ownerGot} of the orphan's ${orphanRent} lamports back (the rest paid the fee); Floor keeps the stop button, the pin and the spare: ${reclaimed}`);
 
 const ok =
   afterRegister.sha256 === before.sha256 &&

@@ -26,6 +26,7 @@ pub mod verr {
     pub const WRONG_ADDRESS: u32 = 8002;
     pub const INVALID_INSTRUCTION: u32 = 8000;
     pub const NOT_ADMIN: u32 = 8005;
+    pub const MISSING_SIGNATURE: u32 = 8008;
     pub const NOT_GUARDIAN: u32 = 8006;
     pub const NO_QUORUM: u32 = 8007;
     pub const INVALID_GUARDIANS: u32 = 8023;

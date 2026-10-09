@@ -102,7 +102,7 @@ Account lists and data layouts are documented above each handler in `programs/fl
 | 10 | `eject(target)` | a live quorum of the *other* guardians | Removes a guardian at once; never below the threshold |
 | 11 | `cancel` | whoever proposed it (owner or recovery key) | Withdraws the pending proposal |
 | 12 | `replace_recovery(key)` | the owner + a live guardian quorum | Replaces the recovery key at once (all zero: none; never the owner or a guardian) and voids its pending proposal (`09`, finding 62). No key is both a guardian and the recovery key, at registration, in a guardian set, or through SetRecovery |
-| 13 | `close_buffer` | the owner | Closes a buffer whose authority is Floor's PDA and returns its rent to the owner: a replaced or cleared pin, or a proposal's buffer after a cancel or a stop. Never the staged abort buffer, the pin or the pending proposal's buffer (`BufferInUse`), and only a loader-v3 buffer, never the program (`09`, finding 78). |
+| 13 | `close_buffer` | the owner | Closes a buffer whose authority is Floor's PDA and returns its rent to the owner: a replaced or cleared pin, or a proposal's buffer after a cancel or a stop. Never the staged abort buffer, the pin or the pending proposal's buffer (`BufferInUse`), and only a loader-v3 buffer, never the program (`09`, finding 78). While the program is live, never a buffer byte-identical to the live code either: a stop accepts any such buffer as the snapshot, so a replaced pin is a spare a stop in flight may name (`09`, finding 85). |
 
 ## 7. Measured
 

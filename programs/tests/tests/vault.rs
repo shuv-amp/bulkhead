@@ -1051,17 +1051,21 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
                 AccountMeta::new_readonly(w.usdc.mint, false),
                 AccountMeta::new(to, false),
                 AccountMeta::new_readonly(w.usdc.token_program, false),
-                AccountMeta::new_readonly(dest_owner, false),
+                AccountMeta::new_readonly(dest_owner, true),
             ],
         )
     };
     let early = exit(dest);
-    assert_eq!(w.env.fails(&[early], &[]), verr::CHANGE_NOT_EXECUTABLE);
+    assert_eq!(w.env.fails(&[early], &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
     w.env.advance(3 * DAY);
     let wrong = exit(thief);
-    assert!(w.env.send(&[wrong], &[]).is_err(), "only the committed destination");
+    assert!(w.env.send(&[wrong], &[&w.m.destination]).is_err(), "only the committed destination");
+    // The destination signs (finding 85): nobody else can make the exit land.
+    let mut unsigned = exit(dest);
+    unsigned.accounts[6].is_signer = false;
+    assert_eq!(w.env.fails(&[unsigned], &[]), verr::MISSING_SIGNATURE);
     let right = exit(dest);
-    w.env.ok(&[right], &[]);
+    w.env.ok(&[right], &[&w.m.destination]);
     assert_eq!(w.env.balance(&dest), 4_000_000 * USDC);
 }
 
@@ -2335,10 +2339,11 @@ fn every_account_substitution_is_refused() {
             AccountMeta::new_readonly(w.usdc.mint, false),
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(w.usdc.token_program, false),
-            AccountMeta::new_readonly(dest_owner, false),
+            AccountMeta::new_readonly(dest_owner, true),
         ],
     );
-    s.run(&mut w.env, "execute lifeboat exit", ix, &[], &[]);
+    let destination = w.m.destination.insecure_clone();
+    s.run(&mut w.env, "execute lifeboat exit", ix, &[&destination], &[]);
 
     // --- guardians: eject, abdicate ------------------------------------------
     for g in [&w.m.g[0], &w.m.g[1], &w.m.g[2]] {
@@ -3108,6 +3113,41 @@ fn a_lifeboat_exit_never_strands_tokens_with_a_vault() {
     assert_eq!(w.env.fails(&[exit(Keypair::new().pubkey())], &[]), verr::RECIPIENT_OWNER_MISMATCH);
     assert_eq!(w.env.fails(&[exit(stranded)], &[]), verr::STRANDED_DESTINATION);
     assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
+}
+
+/// Finding 85: the issue #38 check refused only accounts this program owns. A
+/// token PDA of the Vault (owned by the token program) or a Vault PDA not yet
+/// created (owned by the system program) passed it, and the exit stranded the
+/// tokens. The destination now signs the exit: none of these ever can.
+#[test]
+fn a_lifeboat_exit_needs_the_destination_to_sign() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    // The SOL vault's token account PDA, owned by the token program.
+    let stranded = w.sol.vault_tokens;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 4, &stranded, &[], None)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 0, &stranded)], &[]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let dest = w.account("usdc", &stranded);
+    let ix = w.m.vault_ix(27, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(stranded, false),
+    ]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::MISSING_SIGNATURE);
+    assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
+    assert_eq!(w.env.balance(&dest), 0);
     assert_eq!(w.env.balance(&dest), 0);
 }
 

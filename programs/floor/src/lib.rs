@@ -1389,7 +1389,7 @@ fn replace_recovery(
 // ---------------------------------------------------------------------------
 //
 // Accounts: 0 config, 1 owner [s][w] (receives the rent), 2 buffer [w],
-//           3 authority PDA, 4 loader-v3.
+//           3 authority PDA, 4 loader-v3, 5 programdata.
 //
 // A pin that is replaced (`pin_snapshot`, the re-pin in `abort`) or cleared by
 // an upgrade, and a proposal's buffer orphaned by a cancel or a stop, are
@@ -1399,6 +1399,15 @@ fn replace_recovery(
 // 66). The abort buffer, the pin and the pending proposal's buffer are never
 // closed (`buffer_closable`). Only the owner may, so nobody can close a buffer
 // someone has just frozen to propose or pin in their next transaction.
+//
+// While the program is live, a buffer byte-identical to the live code is never
+// closed either: a stop accepts any such buffer as the snapshot (finding 66),
+// so a guardian's stop in flight may name a pin that was just replaced.
+// Closing it ahead of the stop made the stop fail; with a stolen owner key,
+// re-pin and close in one transaction held every stop off, slot by slot
+// (docs/09, finding 85). The two sets, what a stop accepts and what may be
+// closed, are now disjoint. Such a spare pin can be closed once the code
+// changes (an upgrade), or after a stop.
 fn close_buffer(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let c = load_config(program_id, acc(accounts, 0)?)?;
     let owner = acc(accounts, 1)?;
@@ -1406,9 +1415,16 @@ fn close_buffer(program_id: &Address, accounts: &mut [AccountView]) -> ProgramRe
     if key(owner) != c.owner {
         return Err(FloorError::NotOwner.into());
     }
-    let (buffer, authority) = (acc(accounts, 2)?, acc(accounts, 3)?);
+    let (buffer, authority, programdata) =
+        (acc(accounts, 2)?, acc(accounts, 3)?, acc(accounts, 5)?);
     check_authority(program_id, &c, authority)?;
     check_frozen_buffer(program_id, &c, buffer)?;
+    if key(programdata) != c.programdata {
+        return Err(FloorError::ProgramMismatch.into());
+    }
+    if c.status == STATUS_LIVE && snapshot_identical(buffer, programdata)? {
+        return Err(FloorError::BufferInUse.into());
+    }
     let pending_buffer = match c.pending_kind {
         kind::UPGRADE | kind::RESTORE => c.pending_target,
         _ => [0; 32],

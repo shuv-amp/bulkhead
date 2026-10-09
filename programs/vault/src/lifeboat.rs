@@ -195,17 +195,20 @@ pub fn propose_exit(
 }
 
 // ---------------------------------------------------------------------------
-// 27. execute_lifeboat_exit (anyone, once executable)
+// 27. execute_lifeboat_exit (once executable; the destination signs)
 // ---------------------------------------------------------------------------
 // Accounts: 0 protocol, 1 vault [w], 2 lifeboat token PDA [w], 3 mint,
 //           4 destination token account [w], 5 token program,
-//           6 the destination (the token account's owner).
+//           6 the destination (the token account's owner) [s].
 //
-// A destination this program owns (a vault, the protocol, a backing: any of
-// its PDAs) can never send the tokens on, so an exit there would strand them;
-// the exit is refused and they stay in the lifeboat, from which the admin or a
-// guardian quorum can move them back (issue #38). Off-curve alone is not the
-// test: a multisig vault is a PDA too, and a proper destination.
+// The destination signs: an address nobody can sign for (any PDA of this
+// program, created or not, or one owning a token account) would hold the
+// tokens for good. Refusing only accounts this program owns missed its token
+// PDAs and its PDAs not yet created (docs/09, finding 85); no list of
+// addresses can be complete, a signature is. A multisig vault, a PDA of
+// another program, still signs through that program. Unsigned, the exit is
+// refused and the tokens stay in the lifeboat, from which the admin or a
+// guardian quorum can move them back (issue #38).
 pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
@@ -243,6 +246,9 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
     }
     if destination.owned_by(program_id) {
         return Err(VaultError::StrandedDestination.into());
+    }
+    if !destination.is_signer() {
+        return Err(VaultError::MissingSignature.into());
     }
     let amount = v.exit_amount;
     let signer = VaultSigner::new(&v);
