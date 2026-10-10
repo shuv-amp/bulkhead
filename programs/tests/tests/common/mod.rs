@@ -523,7 +523,7 @@ impl Floor {
             AccountMeta::new(self.programdata, false),
             AccountMeta::new_readonly(self.authority, false),
             AccountMeta::new_readonly(LOADER_V3, false),
-            AccountMeta::new(*owner, false),
+            AccountMeta::new(*owner, new_authority.is_none()),
         ];
         if let Some(n) = new_authority {
             a.push(AccountMeta::new_readonly(*n, true));

@@ -1006,6 +1006,17 @@ fn every_floor_account_substitution_is_refused() {
     env.advance(7 * DAY);
     s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[]);
 
+    // Releasing the other program to none: the owner signs (finding 95).
+    env.ok(&[f3.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &zero, &[], None)], &[&p.owner]);
+    env.advance(7 * DAY);
+    let c3 = read_config(&env, &f3);
+    let held3: Vec<_> = [c3.abort_buffer, c3.snapshot_buffer]
+        .into_iter()
+        .filter(|b| *b != [0; 32])
+        .map(solana_address::Address::new_from_array)
+        .collect();
+    s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[]);
+
     println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds", s.attempts, s.runs, s.unsignable);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
@@ -1393,4 +1404,34 @@ fn a_stop_refunds_to_the_config_not_to_whoever_stops() {
     let before = env.account(&f.config).lamports;
     env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
     assert!(env.account(&f.config).lamports > before, "the abort buffer's rent went to the config");
+}
+
+/// Finding 95: a release to none needs the owner's signature. Unsigned, a
+/// stranger who executed it first could leave out the spare the owner meant to
+/// close (finding 93), and nothing could close it once the config was gone.
+#[test]
+fn a_release_to_none_needs_the_owner_so_no_stranger_strands_a_spare() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let owner = p.owner.pubkey();
+    let spare = env.write_buffer(&honest_v1(), &p.owner);
+    env.set_buffer_authority(&spare, &p.owner, &f.authority);
+    let none = solana_address::Address::new_from_array([0; 32]);
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &none, &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    // A stranger (the payer alone) passes only what is required: refused.
+    let mut unsigned = f.execute_release(&owner, None, &[p.abort_buffer, p.snapshot]);
+    unsigned.accounts[4].is_signer = false;
+    assert_eq!(env.fails(&[unsigned], &[]), err::MISSING_SIGNATURE);
+    assert!(env.svm.get_account(&f.config).map(|a| a.lamports > 0).unwrap_or(false), "config still there");
+    // The owner signs and passes the spare: the program becomes immutable and
+    // every buffer Floor held returns its rent.
+    let rent = env.account(&p.abort_buffer).lamports + env.account(&p.snapshot).lamports + env.account(&spare).lamports;
+    let config_rent = env.account(&f.config).lamports;
+    let before = env.account(&owner).lamports;
+    env.ok(&[f.execute_release(&owner, None, &[p.abort_buffer, p.snapshot, spare])], &[&p.owner]);
+    assert_eq!(env.upgrade_authority(&f.programdata), None, "immutable");
+    assert!(env.svm.get_account(&spare).map(|a| a.lamports == 0).unwrap_or(true), "spare closed");
+    assert_eq!(env.account(&owner).lamports, before + rent + config_rent);
 }

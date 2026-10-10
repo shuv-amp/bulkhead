@@ -1,9 +1,9 @@
 name: ci
 # Every pull request, and a deep run every Monday on main.
 #
-# Minutes. The repository is private, so GitHub-hosted minutes come from the
-# plan's monthly quota (Linux runners only, 1x rate). To spend them only where
-# they buy assurance:
+# Minutes. GitHub-hosted minutes are budgeted as if they came from a plan's
+# monthly quota (as they did while the repository was private). To spend them
+# only where they buy assurance:
 # - a new push to a pull request cancels the run it supersedes;
 # - draft pull requests run only `check`; the rest runs when marked ready;
 # - each job runs only when something it reads changed (scripts/ci-changes.sh);

@@ -4,11 +4,15 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.env*
 
 
 # The team's own pitch materials and local tooling: kept on disk, never committed
 pitch.md
 pitch_*.md
+PITCH*.md
+# Outreach drafts name the people being contacted
+outreach-*.md
 pitch.pdf
 deck/
 generate_pitch_deck.py

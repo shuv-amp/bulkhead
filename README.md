@@ -31,12 +31,12 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
 
-> **Status (9 Oct 2026):** built:
+> **Status (10 Oct 2026):** built:
 > - the core math;
 > - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
 > - the Cloud guardian and the status page.
 >
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #75, 10 Oct), and S1 has run there. **Not independently audited; not for real funds.** An internal pre-audit by six reviewers is in [16](docs/16-AUDIT-REPORT.md); see [SECURITY.md](SECURITY.md).
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs PR #75's build (10 Oct): the Vault and Harbor are this tree's, Floor is one fix behind (finding 95, upgrade pending). S1 has run there. **Not independently audited; not for real funds.** An internal pre-audit by six AI-agent reviewers, each finding reproduced as a test, is in [16](docs/16-AUDIT-REPORT.md); it is not an audit; see [SECURITY.md](SECURITY.md).
 
 ## Why the brake must sit in the path of the money
 
@@ -74,15 +74,33 @@ With nobody responding at all, half a vault takes **9 days** to leave instead of
 
 ## Verify it yourself
 
+**In seconds, with nothing to build** (Node 20+ or Python 3.9+): the live devnet market, as the status page shows it.
+
 ```bash
-scripts/check.sh                  # the core, the reference, the tools, Cloud: needs Rust (pinned), Python 3.9+, Node 20+
-scripts/check-programs.sh         # the programs on the real runtime: needs the Agave CLI v4.3.0
+node cloud/status/snapshot.mjs https://api.devnet.solana.com HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b \
+  6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB
+python3 tools/floor_check.py dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH   # any mainnet program; add --rpc https://api.devnet.solana.com for a devnet one
+```
+
+The status page itself is a static file that needs a local web server (browsers refuse its module imports from `file://`): run `python3 -m http.server -d cloud 8000` and open [this link on localhost](http://localhost:8000/status/?rpc=https%3A%2F%2Fapi.devnet.solana.com&vault=HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b&protocol=6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh&mints=CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB&floor=HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E&protected=CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs), which fills in the devnet market and the Floor-protected S10 program.
+
+**In about two minutes each** (on a machine with the toolchains; the first run downloads Rust 1.92.0, the tests' pinned nightly and Solana's platform-tools):
+
+```bash
+scripts/check.sh                  # the core, the reference, the tools, Cloud: needs rustup, Python 3.9+, Node 20+
+scripts/check-programs.sh         # the programs on the real runtime: needs the Agave CLI v4.3.0:
+                                  #   sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+```
+
+**Deeper, and slower:**
+
+```bash
 E2E=1 scripts/check-programs.sh   # ...plus the attacker-vs-guardian run and a deploy rehearsal, on local validators
 scripts/prove.sh                  # Kani bounded proofs (~6 min)
 scripts/mutants.sh                # mutation testing (~45 min)
 scripts/fuzz.sh                   # coverage-guided fuzzing, 8 targets (SECONDS_PER=600 for longer)
 scripts/deny.sh                   # supply chain: RustSec advisories, licences, crate sources
-python3 tools/floor_check.py <program-id>   # who can upgrade any mainnet program; is it ready for SIMD-0500?
+python3 tools/floor_check.py <program-id>   # who can upgrade any mainnet program; is it ready for SIMD-0500? (--rpc <url> for another cluster)
 scripts/floor-demo.sh <program-id>          # Floor on that program's real bytes, locally: register, stop, restore byte-identical
 scripts/deploy-dryrun.sh                    # the devnet deploy, rehearsed on a fresh local validator
 cloud/e2e/guardian-scenarios.sh             # the guardian on a validator: hold, restart, dead RPC, approvals, recovery key (cursor: ~10 min more)
@@ -95,23 +113,23 @@ node cloud/deploy/vault-check.mjs <url> <market> # a live market checked without
 
 These scripts install nothing. The core has zero dependencies, and Cloud and the Python code use only their standard libraries.
 
-| Check | Result (6 Oct 2026) |
+| Check | Result (latest run of each) |
 |---|---|
 | Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
 | Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 31 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 26/26, with coverage counters so a vacuous pass fails |
 | Bounded proofs (Kani) and exhaustive checks | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
-| Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 392M executions in the 6 Oct deep CI run (25 min per target), no crash; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-6-oct-2026)) |
+| Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
 | Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 121/121: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (5,946 swaps refused) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 123/123: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
-| On devnet | All three programs run this tree's build (PR #75, 10 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
-| What this process found in our own code and docs | 94 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| On devnet | All three programs run PR #75's build (10 Oct; Floor without finding 95, upgrade pending), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
+| What this process found in our own code and docs | 95 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
-Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 10 Oct (Floor and the Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #75 (Harbor unchanged since PR #35): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
+Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 10 Oct (Floor and the Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #75 (Harbor: the same bytes since 6 Oct; Floor has one later fix, finding 95, not yet deployed): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
 
 ```bash
 scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet
@@ -119,8 +137,8 @@ scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewher
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
-| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `505688c7…e98b12b0` |
-| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `69f2d6a1…cf4127e9` |
+| Floor | [`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`](https://explorer.solana.com/address/HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E?cluster=devnet) | `cb0992a7…7ce92d31` |
+| Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `b0cda14c…0af96097` |
 | Harbor (demo protocol) | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `543be60b…10adeb40` |
 
 All three share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
@@ -190,7 +208,7 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [13 Sources](docs/13-SOURCES.md) | Every URL and source path |
 | [14 State of the art](docs/14-STATE-OF-THE-ART.md) | Every mechanism compared with the best shipped systems (Wormhole NTT, CCIP, Kamino, Project 0, MetaMorpho, Lido, Aave, network calculus): what we took, what we rejected, why |
 | [15 Adversarial review](docs/15-ADVERSARIAL-REVIEW.md) | An internal red-team pass on the code and the idea: what an attacker who knows every rule gets, what was fixed, what is still open |
-| [16 Pre-audit report](docs/16-AUDIT-REPORT.md) | A six-reviewer engagement run like an audit (9 Oct 2026): scope, method, every finding and its status, external assumptions checked, and the design decisions left before a lending integration. Not a substitute for an independent audit |
+| [16 Pre-audit report](docs/16-AUDIT-REPORT.md) | A six-reviewer engagement run like an audit, by AI agents (9 Oct 2026): scope, method, every finding and its status, external assumptions checked, and the design decisions left before a lending integration. Not a substitute for an independent audit |
 
 ## Credits and license
 

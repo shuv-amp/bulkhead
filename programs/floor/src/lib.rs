@@ -1003,14 +1003,16 @@ fn approve(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
 }
 
 // ---------------------------------------------------------------------------
-// 7. Execute the pending proposal (anyone, once allowed)
+// 7. Execute the pending proposal (anyone, once allowed; a release to a key:
+//    that key signs; a release to none: the owner signs)
 // ---------------------------------------------------------------------------
 //
 // Upgrade / Restore accounts: 0 config [w], 1 programdata [w], 2 program [w],
 //   3 buffer [w], 4 spill [w] (the owner: the buffer's rent returns to it),
 //   5 rent, 6 clock, 7 authority PDA, 8 loader-v3.
 // ReleaseAuthority: 0 config [w], 1 programdata [w], 2 authority PDA,
-//   3 loader-v3, 4 owner [w] (receives the config's and the buffers' rent),
+//   3 loader-v3, 4 owner [w] (receives the config's and the buffers' rent;
+//   signs a release to none, finding 95),
 //   5 new authority [s] (omitted when the target is zero: program becomes
 //   immutable), then the staged abort buffer [w] and the pinned snapshot [w],
 //   each required while set: nothing could close them once the config is gone.
@@ -1105,6 +1107,13 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
             check_authority(program_id, &c, authority)?;
             if key(acc(accounts, 4)?) != c.owner {
                 return Err(FloorError::NotOwner.into());
+            }
+            // A release to none: the owner signs. Unsigned, a stranger who
+            // executed first could leave out the spares the owner meant to
+            // close, and nothing could close them afterwards (finding 95). A
+            // release to a key is signed by that key below.
+            if c.pending_target == [0; 32] {
+                require_signer(&accounts[4])?;
             }
             // Close what Floor still holds: after this nothing can (issue #37).
             let rest = accounts.get(5..).unwrap_or(&[]);

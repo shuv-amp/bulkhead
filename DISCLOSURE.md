@@ -17,7 +17,7 @@
 
 ## Third-party code
 
-No third-party code is copied into this repository. The dependencies are all Apache-2.0:
+No third-party code is copied into this repository. The direct dependencies are all Apache-2.0; the licences of their own dependencies are checked by `cargo-deny` (`deny.toml`, `scripts/deny.sh`):
 
 | Part | Dependencies |
 |---|---|

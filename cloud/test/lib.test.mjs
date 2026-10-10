@@ -142,4 +142,11 @@ test("a buffer's role matches what close_buffer refuses (docs/09, finding 78)", 
   assert.equal(ix.data[0], 13);
   assert.deepEqual(ix.accounts.map((a) => [!!a.signer, !!a.writable]), [[false, false], [true, true], [false, true], [false, false], [false, false], [false, false]]);
   assert.equal(b58encode(ix.accounts[5].pubkey), b58encode(fc.programdata));
+  // A release to none carries the owner as a writable signer (finding 95); a
+  // release to a key carries that key as the signer instead.
+  const none = fc.executeRelease(O, null, [A, S]);
+  assert.deepEqual([...none.data], [7], "execute, no args");
+  assert.deepEqual(none.accounts.map((a) => [!!a.signer, !!a.writable]), [[false, true], [false, true], [false, false], [false, false], [true, true], [false, true], [false, true]]);
+  const toKey = fc.executeRelease(O, P, [A]);
+  assert.deepEqual(toKey.accounts.map((a) => [!!a.signer, !!a.writable]), [[false, true], [false, true], [false, false], [false, false], [false, true], [true, false], [false, true]]);
 });
