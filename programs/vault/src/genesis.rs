@@ -260,6 +260,7 @@ pub fn create_vault(
         exit_expires_s: 0,
         exit_vetoed: false,
         limits_version: 0,
+        exit_proposer: [0; 32],
     };
     save(&mut accounts[3], |d| v.store(d))?;
     // The seal names every vault (three accounts each) in one transaction:
