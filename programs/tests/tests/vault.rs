@@ -3580,3 +3580,49 @@ fn a_release_cannot_pay_an_account_the_protocol_owns() {
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &protocol, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
 }
+
+/// Finding 91, stated: an exit records its proposer's key, not the admin
+/// version, so an admin rotated away and back (A -> B -> A) revives an exit
+/// that was stale in between, as `execute_change` does a change. Both
+/// rotations wait the loosen delay under veto, and the key that regains the
+/// role could propose the exit again anyway; the guardian vetoes every exit.
+#[test]
+fn an_exit_stale_after_a_rotation_revives_only_if_the_same_admin_returns() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let protocol = w.m.protocol;
+    w.env.advance(3 * DAY + 1); // the lifeboat opens
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let a = w.m.admin.pubkey();
+    // A proposes an exit, and a rotation to B.
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let b = w.user();
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 3, &b.pubkey(), &[], None)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), b.pubkey());
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let destination = w.m.destination.pubkey();
+    let dest = w.account("usdc", &destination);
+    let exit = w.m.vault_ix(27, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(destination, true),
+    ]);
+    assert_eq!(w.env.fails(&[exit.clone()], &[&w.m.destination]), verr::CHANGE_STALE);
+    // B rotates back to A; A's old exit, never re-proposed, executes.
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &a, &[], None);
+    ix.accounts[1].pubkey = b.pubkey();
+    w.env.ok(&[ix], &[&b]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 1, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), a);
+    w.env.ok(&[exit], &[&w.m.destination]);
+    assert_eq!(w.env.balance(&dest), 1_000_000 * USDC);
+}
