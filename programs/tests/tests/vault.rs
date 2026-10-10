@@ -3190,6 +3190,59 @@ fn a_lifeboat_exit_needs_the_destination_to_sign() {
     assert_eq!(w.env.balance(&dest), 0);
 }
 
+/// Issue #66: an exit executes only while its proposer is still the admin,
+/// like a change (finding 87). A thief who saw the recovery key's rotation
+/// coming used to queue an exit behind it, and the exit outlived the rotation.
+#[test]
+fn a_lifeboat_exit_proposed_by_a_replaced_admin_does_not_execute() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let recovery = w.user();
+    let protocol = w.m.protocol;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1); // also opens the lifeboat (finding 88)
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    // The recovery key proposes a new admin; the thief queues an exit behind it.
+    let fresh = w.user();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh.pubkey(), &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    w.env.advance(3_600);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, 1, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh.pubkey());
+    w.env.advance(3_600); // the thief's exit is now due
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let destination = w.m.destination.pubkey();
+    let dest = w.account("usdc", &destination);
+    let exit = w.m.vault_ix(27, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(destination, true),
+    ]);
+    assert_eq!(w.env.fails(&[exit.clone()], &[&w.m.destination]), verr::CHANGE_STALE);
+    assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
+    // The new admin's own exit executes: the rule refuses only a replaced proposer.
+    let propose = w.m.vault_ix(26, &(1_000_000 * USDC).to_le_bytes(), vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new_readonly(fresh.pubkey(), true),
+    ]);
+    w.env.ok(&[propose], &[&fresh]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[exit], &[&w.m.destination]);
+    assert_eq!(w.env.balance(&dest), 1_000_000 * USDC);
+    assert_eq!(w.env.balance(&lifeboat), 0);
+}
+
 /// Finding 72: an abdicated recovery key can still be removed (it only takes
 /// power away), or a stolen one would stale every admin rotation for good.
 #[test]
