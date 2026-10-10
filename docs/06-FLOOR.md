@@ -34,7 +34,7 @@ What Floor does **not** do: bound a Drift-style drain. Drift was drained with ad
 | What users and integrators see | `Custom(1)`, the same as an ordinary app error | A log line ("stopped by its Bulkhead Floor guardians…") and `Custom(0x464C4F52)` |
 | Destroying the program (`Close`) | Available to the key | Unreachable |
 | A malicious stopper | Is the key holder | A live quorum ejects the guardian instantly; restore in the same transaction |
-| SIMD-0500 | Not considered | The live binary's sBPF version is recorded at every install and shown |
+| SIMD-0500 | Not considered | The protected binary's sBPF version is recorded at every upgrade and restore, and shown |
 | Whether the stop can land | Unchecked | Staging refuses an abort buffer that wouldn't fit the program's data account |
 
 ## 3. Loader facts Floor is built on
@@ -62,7 +62,7 @@ Each was checked in agave's source (master `f771659`, 26 Sep 2026) or on-chain; 
 | `guardians[≤8]`, `last_heartbeat[≤8]`, `threshold` (≥ 2), `heartbeat_interval_s` (1–30 days) | Only guardians that heart-beat within the interval can act (Lido pattern) |
 | `upgrade_delay_s` | ≥ 72h (constant floor), ≤ 30 days (same cap as the Vault's loosen delay); **7 days recommended** (L2BEAT Stage-1 exit window) |
 | `status` | Live or Aborted |
-| `elf_is_v3` | Whether the live code is deployable after SIMD-0500 (updated at every install) |
+| `elf_is_v3` | Whether the protected code is deployable after SIMD-0500 (set at registration, upgrade and restore; a stop leaves it describing the stopped code, which a restore puts back) |
 | `abort_buffer` | The staged canonical abort binary (frozen buffer) |
 | `snapshot_buffer`, `snapshot_valid` | A frozen buffer pinned as a copy of the live code; "valid" is decided at the moment of an abort, which must name the pinned buffer or another frozen buffer byte-identical to the live code (otherwise whoever stops could leave it out and deny the quorum its restore; `09`, finding 53) |
 | `pending_*` | At most one proposal: kind, target, payload, ETA, expiry, veto flag, approval bitmap, id |
@@ -136,7 +136,7 @@ Between the steps, 17 forbidden actions were simulated, and each failed with its
 After SIMD-0500 activates, `Upgrade` accepts only sBPF v3. So:
 - **The abort binaries must be v3.** They are, and CI checks them.
 - **A pre-v3 program can still be stopped, but can't come back** until it ships a v3 build. Its snapshot is pre-v3 too.
-- Floor records `elf_is_v3` at registration and at every install, and the status page flags a pre-v3 program ("build and test a v3 binary"). A stop of such a program after SIMD-0500 can only be undone with a v3 build.
+- Floor records `elf_is_v3` at registration, upgrade and restore (a stop leaves it unchanged: it still describes the stopped code, the one a restore brings back), and the status page flags a pre-v3 program ("build and test a v3 binary"). A stop of such a program after SIMD-0500 can only be undone with a v3 build.
 - About 17,279 upgradeable programs were pre-v3 when SIMD-0500 was written. The same check runs, free, on any program: `python3 tools/floor_check.py <program-id>`, which also reports who holds the upgrade key (a single plain key, or a program-controlled address).
 
 ## 9. Threats specific to Floor

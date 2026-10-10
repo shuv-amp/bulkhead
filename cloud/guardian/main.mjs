@@ -33,7 +33,8 @@
 // ({ url, everyS: 60 }) is pinged every pass's minute: a dead-man's switch
 // for when this process or its host dies. `minBalanceSol` (default 0.05):
 // below it, an urgent alert. `startupMaxSignatures` (default 50,000): the
-// startup replay's bound. Every setting and policy value is checked at start;
+// startup replay's bound, checked between pages of 1,000, so the replay stops
+// at the first page boundary at or past it. Every setting and policy value is checked at start;
 // an unknown one (a typo) or an out-of-range value refuses to start.
 //
 // With `floorProtected`, the bot also follows each program's Floor config
