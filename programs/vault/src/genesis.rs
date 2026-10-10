@@ -6,7 +6,7 @@ use crate::*;
 use bulkhead_core::classify::{classify_asset, AssetConfig, Class, LimitConfig};
 use bulkhead_core::consts::{MAX_LOOSEN_DELAY_S, MIN_LOOSEN_DELAY_S};
 use bulkhead_core::floor::{program_programdata, programdata_header};
-use bulkhead_core::governance::{can_execute, schedule, Schedule};
+use bulkhead_core::governance::{can_execute, schedule, Abdications, Schedule};
 use bulkhead_core::limiter::{config_is_valid, lane_always_closed};
 
 /// `BPFLoaderUpgradeab1e11111111111111111111111`
@@ -293,6 +293,13 @@ pub fn upsert_asset(
     require_admin(&p, acc(accounts, 1)?)?;
     if p.sealed {
         return Err(VaultError::GenesisOnly.into());
+    }
+    // An abdicated kind is never loosened, and tightening it takes a live
+    // guardian quorum (finding 88). `propose_change` applies both before the
+    // seal too; this path applied neither (issue #67). Once abdicated, an
+    // asset changes only through `propose_change`.
+    if Abdications(p.abdications).is_abdicated(change::UPSERT_ASSET) {
+        return Err(VaultError::Abdicated.into());
     }
     let asset = acc(accounts, 3)?;
     let old = if asset.is_data_empty() {

@@ -926,6 +926,28 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
 }
 
+/// Issue #67: abdicating assets before the seal binds `upsert_asset` too.
+/// It applied a looser config at once, which the seal then made permanent.
+#[test]
+fn an_abdicated_asset_kind_cannot_be_upserted_before_the_seal() {
+    let mut w = World::new();
+    // Before the abdication the genesis path works (World::new listed both).
+    let ix = w.m.upsert_asset_ix(&w.env, &w.usdc, &usdc_cfg());
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let ix = w.m.vault_ix(17, &[1], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new_readonly(g0, true),
+        AccountMeta::new_readonly(g1, true),
+    ]);
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.usdc, &usdc_cfg());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &sol_cfg());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+}
+
 #[test]
 fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
     let mut w = World::new();
