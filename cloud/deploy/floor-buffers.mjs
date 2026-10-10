@@ -48,7 +48,7 @@ console.log(`Floor holds ${held.length} buffer(s) for ${protectedProgram} (autho
 for (const b of held) console.log(`  ${b.role.padEnd(7)} ${b.address}  ${sol(b.lamports)} SOL`);
 const orphans = held.filter((b) => b.role === "orphan");
 const spares = held.filter((b) => b.role === "spare").length;
-console.log(`${orphans.length} orphan(s), ${sol(orphans.reduce((t, b) => t + b.lamports, 0))} SOL the owner can take back${spares ? `; ${spares} spare snapshot(s) identical to the live code, kept until the code changes or the program is stopped` : ""}`);
+console.log(`${orphans.length} orphan(s), ${sol(orphans.reduce((t, b) => t + b.lamports, 0))} SOL the owner can take back${spares ? `; ${spares} spare snapshot(s) identical to the live code, kept until the code changes or the program is stopped; a release closes them if passed to it` : ""}`);
 if (!ownerPath || !orphans.length) process.exit(0);
 
 const owner = Keypair.load(ownerPath);

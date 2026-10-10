@@ -524,9 +524,11 @@ export function decodeVault(d) {
     if (d.length >= r.o + 4) v.limitsVersion = r.u32();
     // The low-water balance (finding 65; older builds: zero padding, which
     // the program's first touch replaces since its window is long past).
-    if (d.length >= r.o + 24) v.low = { prev: r.u64(), cur: r.u64(), window: r.i64() };
-    // Who proposed the pending exit (issue #66; older builds: zeros).
-    if (d.length >= r.o + 32) v.exitProposer = b58encode(r.key());
+    if (d.length >= r.o + 24) {
+      v.low = { prev: r.u64(), cur: r.u64(), window: r.i64() };
+      // Who proposed the pending exit (finding 91; older builds: zeros).
+      if (d.length >= r.o + 32) v.exitProposer = b58encode(r.key());
+    }
   }
   return v;
 }
