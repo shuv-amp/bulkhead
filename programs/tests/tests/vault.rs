@@ -971,6 +971,28 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
 }
 
+/// Issue #67: abdicating assets before the seal binds `upsert_asset` too.
+/// It applied a looser config at once, which the seal then made permanent.
+#[test]
+fn an_abdicated_asset_kind_cannot_be_upserted_before_the_seal() {
+    let mut w = World::new();
+    // Before the abdication the genesis path works (World::new listed both).
+    let ix = w.m.upsert_asset_ix(&w.env, &w.usdc, &usdc_cfg());
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let ix = w.m.vault_ix(17, &[1], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new_readonly(g0, true),
+        AccountMeta::new_readonly(g1, true),
+    ]);
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.usdc, &usdc_cfg());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &sol_cfg());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+}
+
 #[test]
 fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
     let mut w = World::new();
@@ -3327,15 +3349,24 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     let holder_sol = w.deposit("sol", &holder, 700 * SOL);
     w.seal();
     let both = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
-    let g0 = w.m.g[0].pubkey();
-    let freeze = w.m.freeze_ix(&g0, None, 86_400);
-    w.env.ok(&[freeze], &[&w.m.g[0]]);
-    // The admin pays the holder 50,000 USDC: no signature, so not a loan.
+    // The admin pays the holder 50,000 USDC: no signature, so not a loan,
+    // although the SOL would back one. Unfrozen, so only the signature rule
+    // can refuse it (a freeze refuses any loan too, finding 90).
     let holder_usdc = w.account("usdc", &holder.pubkey());
     let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
     let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(o.backed, 0, "unsigned: not a loan");
+    assert_eq!(o.instant + o.queued, 50_000 * USDC, "all of it unbacked");
+    let paid = w.env.balance(&holder_usdc);
+    assert_eq!(paid, o.instant);
+    let g0 = w.m.g[0].pubkey();
+    let freeze = w.m.freeze_ix(&g0, None, 86_400);
+    w.env.ok(&[freeze], &[&w.m.g[0]]);
+    // Frozen: the same payout waits behind the freeze.
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
+    let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
     assert_eq!((o.backed, o.instant, o.queued), (0, 0, 50_000 * USDC), "unbacked: queued behind the freeze");
-    assert_eq!(w.env.balance(&holder_usdc), 0);
+    assert_eq!(w.env.balance(&holder_usdc), paid);
     // The lender's own exit and the holder's own SOL, during the freeze.
     let ix = w.m.withdraw_ix(&w.env, &w.usdc, &lender.pubkey(), &lender_acc, 1_000_000 * USDC, &w.usdc_prices(false));
     w.env.ok(&[ix], &[&lender]);
