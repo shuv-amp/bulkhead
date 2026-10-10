@@ -3229,15 +3229,24 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     let holder_sol = w.deposit("sol", &holder, 700 * SOL);
     w.seal();
     let both = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
-    let g0 = w.m.g[0].pubkey();
-    let freeze = w.m.freeze_ix(&g0, None, 86_400);
-    w.env.ok(&[freeze], &[&w.m.g[0]]);
-    // The admin pays the holder 50,000 USDC: no signature, so not a loan.
+    // The admin pays the holder 50,000 USDC: no signature, so not a loan,
+    // although the SOL would back one. Unfrozen, so only the signature rule
+    // can refuse it (a freeze refuses any loan too, finding 90).
     let holder_usdc = w.account("usdc", &holder.pubkey());
     let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
     let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(o.backed, 0, "unsigned: not a loan");
+    assert_eq!(o.instant + o.queued, 50_000 * USDC, "all of it unbacked");
+    let paid = w.env.balance(&holder_usdc);
+    assert_eq!(paid, o.instant);
+    let g0 = w.m.g[0].pubkey();
+    let freeze = w.m.freeze_ix(&g0, None, 86_400);
+    w.env.ok(&[freeze], &[&w.m.g[0]]);
+    // Frozen: the same payout waits behind the freeze.
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
+    let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
     assert_eq!((o.backed, o.instant, o.queued), (0, 0, 50_000 * USDC), "unbacked: queued behind the freeze");
-    assert_eq!(w.env.balance(&holder_usdc), 0);
+    assert_eq!(w.env.balance(&holder_usdc), paid);
     // The lender's own exit and the holder's own SOL, during the freeze.
     let ix = w.m.withdraw_ix(&w.env, &w.usdc, &lender.pubkey(), &lender_acc, 1_000_000 * USDC, &w.usdc_prices(false));
     w.env.ok(&[ix], &[&lender]);
