@@ -545,6 +545,33 @@ fn release_authority_hands_the_key_back_after_the_delay() {
     assert_eq!(env.account(&p.owner.pubkey()).lamports, before + rent + config_rent);
 }
 
+/// Issue #68: a spare buffer identical to the live code cannot be closed
+/// while the program is live, and after a release nothing could close it. The
+/// release closes every buffer Floor holds that it is given.
+#[test]
+fn release_also_closes_a_spare_buffer_it_is_given() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let owner = p.owner.pubkey();
+    let spare = env.write_buffer(&honest_v1(), &p.owner);
+    env.set_buffer_authority(&spare, &p.owner, &f.authority);
+    assert_eq!(env.fails(&[f.close_buffer(&owner, &spare)], &[&p.owner]), err::BUFFER_IN_USE);
+    let new_key = Keypair::new();
+    let new_auth = new_key.pubkey();
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &new_auth, &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    // The spare twice: closed once, the second is skipped.
+    let held = [p.abort_buffer, p.snapshot, spare, spare];
+    let rent = env.account(&p.abort_buffer).lamports + env.account(&p.snapshot).lamports + env.account(&spare).lamports;
+    let config_rent = env.account(&f.config).lamports;
+    let before = env.account(&owner).lamports;
+    env.ok(&[f.execute_release(&owner, Some(&new_auth), &held)], &[&new_key]);
+    assert_eq!(env.upgrade_authority(&f.programdata), Some(new_auth.to_bytes()));
+    assert!(env.svm.get_account(&spare).map(|a| a.lamports == 0).unwrap_or(true), "spare closed");
+    assert_eq!(env.account(&owner).lamports, before + rent + config_rent);
+}
+
 /// Finding 85: a stolen owner key re-pins and closes the old pin in one
 /// transaction, ahead of a guardian's stop naming that pin. The close used to
 /// pass (the old pin was an "orphan"), the stop then failed with
