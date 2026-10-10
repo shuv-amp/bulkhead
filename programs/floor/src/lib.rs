@@ -1116,6 +1116,22 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
                 check_frozen_buffer(program_id, &c, buffer)?;
                 cpi_close_buffer(&c, buffer, &accounts[4], authority)?;
             }
+            // And any other buffer Floor holds that the caller passes. A spare
+            // identical to the live code cannot be closed while the program is
+            // live (`BufferInUse`), so this is its last chance (issue #68).
+            // Anything else (the new authority, a closed or foreign account)
+            // is skipped.
+            for (i, buffer) in rest.iter().enumerate() {
+                let k = key(buffer);
+                if k == c.abort_buffer
+                    || k == c.snapshot_buffer
+                    || rest[..i].iter().any(|a| key(a) == k)
+                    || check_frozen_buffer(program_id, &c, buffer).is_err()
+                {
+                    continue;
+                }
+                cpi_close_buffer(&c, buffer, &accounts[4], authority)?;
+            }
             let bump = [c.authority_bump];
             let seeds = [
                 Seed::from(AUTHORITY_SEED),
