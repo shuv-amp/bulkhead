@@ -102,6 +102,13 @@ test("a vault account decodes through its lifeboat exit, in the program's field 
   const v = decodeVault(new Uint8Array(Buffer.concat(parts)));
   assert.deepEqual([v.decimals, v.pendingTickets, v.cancelled], [6, 5, 13n]);
   assert.deepEqual([v.lifeboatAmount, v.exitAmount, v.exitProposedS, v.exitExecutableS, v.exitExpiresS, v.exitVetoed], [40n, 30n, 1000, 260_200, 865_000, true]);
+  // Then the limits version, the low-water balance and the exit's proposer
+  // (finding 91), the reserved tail padded to Vault::LEN (433).
+  n(4, 12); n(8, 50); n(8, 60); n(8, 70); parts.push(Buffer.alloc(32, 9));
+  const full = Buffer.concat(parts);
+  const w = decodeVault(new Uint8Array(Buffer.concat([full, Buffer.alloc(433 - full.length)])));
+  assert.deepEqual([w.limitsVersion, w.low.prev, w.low.window], [12, 50n, 70n]);
+  assert.equal(w.exitProposer, b58encode(new Uint8Array(32).fill(9)));
 });
 
 test("onCurve takes a y of p or more mod p, as Solana does", async () => {

@@ -191,6 +191,12 @@ pub fn create_vault(
     if p.sealed && !lane_always_closed(&limits) {
         return Err(VaultError::GenesisOnly.into());
     }
+    // Before the seal too once limits are abdicated: an open lane on a new
+    // vault is a loosening nothing could ever undo, as upsert_asset's was
+    // (docs/09, finding 92).
+    if Abdications(p.abdications).is_abdicated(change::SET_LIMITS) && !lane_always_closed(&limits) {
+        return Err(VaultError::Abdicated.into());
+    }
     let decimals = token::checked_mint_decimals(mint, token_program.address())?;
 
     let (pk, mk) = (key(protocol), key(mint));

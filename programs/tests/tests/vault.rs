@@ -993,6 +993,28 @@ fn an_abdicated_asset_kind_cannot_be_upserted_before_the_seal() {
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
 }
 
+/// Finding 92: once limits are abdicated, a new vault before the seal starts
+/// with its unbacked lane closed, as after the seal: an open lane is a
+/// loosening of the abdicated kind that the seal would make permanent.
+#[test]
+fn abdicated_limits_keep_a_new_vaults_lane_closed_before_the_seal() {
+    let mut w = World::new();
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let ix = w.m.vault_ix(17, &[0], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        AccountMeta::new_readonly(g0, true),
+        AccountMeta::new_readonly(g1, true),
+    ]);
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    let ix = create_vault_ix(&mut w, &Limits::default_limits());
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::ABDICATED);
+    let mut closed = Limits::default_limits();
+    closed.short_bps = 0;
+    let ix = create_vault_ix(&mut w, &closed);
+    w.env.ok(&[ix], &[&w.m.admin]);
+}
+
 #[test]
 fn an_abdicated_kind_can_still_be_tightened_but_never_loosened() {
     let mut w = World::new();

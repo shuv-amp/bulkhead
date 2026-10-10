@@ -79,7 +79,21 @@ The reviewers' verdict matches `README`'s caution. The unbacked-lane mathematics
 
 Lending integrators wait for §4.1 to §4.3.
 
-## 6. Sources
+## 6. For the independent audit: on-chain changes since this engagement
+
+The engagement reviewed `9aae0c4`. Every on-chain change since then is new code no reviewer has seen, and belongs in the independent audit's scope. Each change has its own tests, and each test fails with its rule deleted (`09`).
+
+| Finding | Program | What changed | Where |
+|---|---|---|---|
+| 87–89 | Vault, Floor | The fixes from this engagement (§2), made after the reviewed commit | `09` §4 |
+| 90 | Vault | A freeze caps what is backed at the owner's own balance: new loans wait behind it | `custody.rs` `release` |
+| 91 | Vault | A lifeboat exit records its proposer in the vault's reserved tail, and executes only while that key is still the admin (`ChangeStale`) | `lifeboat.rs` `propose_exit` / `execute_exit`, `state.rs` `Vault` |
+| 92 | Vault | Abdications bind genesis: `upsert_asset` is refused once `UpsertAsset` is abdicated, and `create_vault` must keep a new vault's lane closed once `SetLimits` is | `genesis.rs` |
+| 93 | Floor | A release closes any further frozen buffer it is passed, rent to the owner | `lib.rs` `execute`, `RELEASE_AUTHORITY` |
+
+Questions worth the auditors' time: whether any other state that a role holder sets up outlives that holder's replacement, as the exit did before 91; whether any other genesis path ignores an abdication, as `upsert_asset` and `create_vault` did before 92; and whether the accounts a release accepts after the fixed ones can do anything but close a buffer Floor holds.
+
+## 7. Sources
 
 - Solana and loader: github.com/anza-xyz/agave (`programs/bpf_loader`, `program-runtime/src/cpi.rs`, `feature-set`), the v4.3.0 release notes, solana.com/upgrades/sbpfv3-programs, SIMD discussion #588.
 - Pyth: docs.pyth.network (contract addresses, best practices, EMA aggregation), pyth-crosschain `price_update.rs`.

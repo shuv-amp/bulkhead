@@ -1014,6 +1014,9 @@ fn approve(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
 //   5 new authority [s] (omitted when the target is zero: program becomes
 //   immutable), then the staged abort buffer [w] and the pinned snapshot [w],
 //   each required while set: nothing could close them once the config is gone.
+//   Then, optionally, any other frozen buffer Floor holds [w], such as a spare
+//   pin identical to the live code that `close_buffer` refuses while live; each
+//   is closed to the owner, anything else is skipped (finding 93).
 //   The new authority signs (`SetAuthorityChecked`): a mistyped key nobody
 //   holds fails here, while the config still exists, instead of leaving the
 //   program with no one able to upgrade it (issue #39).
