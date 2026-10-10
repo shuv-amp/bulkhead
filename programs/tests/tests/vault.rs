@@ -455,6 +455,51 @@ fn a_ticket_settles_after_its_eta_to_its_stored_recipient_only() {
     assert!(w.env.svm.get_account(&ticket).map(|a| a.lamports == 0).unwrap_or(true), "ticket closed");
 }
 
+/// Finding 75: a ticket settled while the vault is short fails with the
+/// Vault's own error, not the token program's.
+#[test]
+fn a_ticket_settled_while_the_vault_is_short_fails_with_insufficient_balance() {
+    let mut w = World::new();
+    let whale = w.user();
+    let whale_acc = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 300_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(o.queued, 300_000 * USDC);
+    // The whale's own deposit leaves at once, ticket or not (G2).
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 10_000_000 * USDC, &w.usdc_prices(false));
+    w.env.ok(&[ix], &[&whale]);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
+    w.env.advance(o.eta_s - w.env.time);
+    let settle = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(&[settle], &[]), verr::INSUFFICIENT_BALANCE);
+}
+
+/// Finding 75: if the cluster clock steps back, the reference timestamp stays
+/// where it was, or the next update would count the gap twice.
+#[test]
+fn the_reference_timestamp_never_moves_back() {
+    let ref_updated_s = |w: &World| {
+        let d = w.env.account(&w.usdc.vault).data;
+        i64::from_le_bytes(d[208..216].try_into().unwrap())
+    };
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(3_600);
+    w.deposit("usdc", &whale, USDC);
+    let t = w.env.time;
+    assert_eq!(ref_updated_s(&w), t);
+    w.env.time -= 600;
+    w.env.next_slot();
+    w.deposit("usdc", &whale, USDC);
+    assert_eq!(ref_updated_s(&w), t, "not moved back to {}", t - 600);
+}
+
 #[test]
 fn reset_backlog_is_refused_while_tickets_are_pending() {
     let mut w = World::new();
