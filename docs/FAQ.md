@@ -36,7 +36,7 @@ Two to eight keys the protocol names at registration: for example its operations
 
 **What if a guardian key is stolen?**
 The attacker gets denial of service, not money:
-- **A Vault freeze** lasts at most 24 hours per call and can be repeated. It stops only the unbacked lane. Own-deposit returns and backed payouts continue (tested: S4 and `a_backed_borrow_is_paid_during_a_freeze_and_only_the_unbacked_rest_waits`). The unbacked part of a liquidation, its bonus, waits until the freeze ends.
+- **A Vault freeze** lasts at most 24 hours per call and can be repeated. It stops the unbacked lane, and with it new loans. Own-deposit returns continue; a new loan beyond the owner's own balance waits behind the freeze (`09`, finding 90; tested: S4 and `a_freeze_stops_new_loans_but_never_own_deposits`). The unbacked part of a liquidation, its bonus, waits until the freeze ends.
 - **A Floor stop** halts the whole program, liquidations included, like any pause.
 - **In both cases** a live quorum of the *other* guardians ejects the rogue guardian at once. Under Floor, the quorum restores the stopped code in the same transaction.
 
@@ -103,4 +103,4 @@ Measured on the real runtime, through a protocol's CPI:
 Measured 8 Oct 2026 on a macOS build. See `05 §10` and `06 §7`.
 
 **Is it live?**
-On devnet, since 28 Sep 2026, with test tokens only (ids in the README). Devnet runs this tree's build (PR #75, 10 Oct), checked byte for byte. Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.
+On devnet, since 28 Sep 2026, with test tokens only (ids in the README). Devnet runs PR #75's build (10 Oct), checked byte for byte; Floor is one fix behind this tree (finding 95, upgrade pending). Not on mainnet. The programs also pass their tests on the real Solana runtime (LiteSVM) and in an end-to-end run on a local validator. Nothing is audited; don't use it with real funds.

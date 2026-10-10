@@ -1003,7 +1003,8 @@ fn approve(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
 }
 
 // ---------------------------------------------------------------------------
-// 7. Execute the pending proposal (anyone, once allowed)
+// 7. Execute the pending proposal (anyone, once allowed; a release to a key:
+//    that key signs; a release to none: the owner signs)
 // ---------------------------------------------------------------------------
 //
 // Upgrade / Restore accounts: 0 config [w], 1 programdata [w], 2 program [w],

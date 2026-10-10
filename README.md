@@ -36,7 +36,7 @@ Floor separates stopping from upgrading. Any guardian stops, new code waits 72h,
 > - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
 > - the Cloud guardian and the status page.
 >
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #75, 10 Oct), and S1 has run there. **Not independently audited; not for real funds.** An internal pre-audit by six AI-agent reviewers, each finding reproduced as a test, is in [16](docs/16-AUDIT-REPORT.md); it is not an audit; see [SECURITY.md](SECURITY.md).
+> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs PR #75's build (10 Oct): the Vault and Harbor are this tree's, Floor is one fix behind (finding 95, upgrade pending). S1 has run there. **Not independently audited; not for real funds.** An internal pre-audit by six AI-agent reviewers, each finding reproduced as a test, is in [16](docs/16-AUDIT-REPORT.md); it is not an audit; see [SECURITY.md](SECURITY.md).
 
 ## Why the brake must sit in the path of the money
 
@@ -121,15 +121,15 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Bounded proofs (Kani) and exhaustive checks | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
 | Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
 | Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 123/123: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,057 swaps refused, 9 Oct) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 123/123: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | End to end | Above |
-| On devnet | All three programs run this tree's build (PR #75, 10 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
+| On devnet | All three programs run PR #75's build (10 Oct; Floor without finding 95, upgrade pending), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
 | What this process found in our own code and docs | 95 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## On devnet
 
-Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 10 Oct (Floor and the Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #75 (Harbor: the same bytes since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
+Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 10 Oct (Floor and the Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #75 (Harbor: the same bytes since 6 Oct; Floor has one later fix, finding 95, not yet deployed): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
 
 ```bash
 scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet

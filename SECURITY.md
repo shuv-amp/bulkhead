@@ -9,7 +9,7 @@
 | `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 15 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, a JavaScript-vs-Python differential, the end-to-end run |
-| Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep, 6 Oct, 7 Oct, twice on 8 Oct, six times on 9 Oct and once on 10 Oct (below) | All three programs run the canonical build (Linux x86_64; CI publishes it) of PR #75 (Harbor unchanged since PR #35), matched byte for byte with the upgrade authority checked |
+| Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep, 6 Oct, 7 Oct, twice on 8 Oct, six times on 9 Oct and once on 10 Oct (below) | All three programs run the canonical build (Linux x86_64; CI publishes it) of PR #75 (Harbor unchanged since PR #35), matched byte for byte with the upgrade authority checked. Floor is one fix behind the tree (finding 95, upgrade pending) |
 
 None of this is an audit. The mainnet path:
 1. two independent audits (a Solana specialist, and a formal-methods review of the core);

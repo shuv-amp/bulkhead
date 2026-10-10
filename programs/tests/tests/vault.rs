@@ -3583,7 +3583,8 @@ fn a_release_cannot_pay_an_account_the_protocol_owns() {
 
 /// Finding 91, stated: an exit records its proposer's key, not the admin
 /// version, so an admin rotated away and back (A -> B -> A) revives an exit
-/// that was stale in between, as `execute_change` does a change. Both
+/// that was stale in between, as `execute_change` does a change whose
+/// target version the rotations left alone. Both
 /// rotations wait the loosen delay under veto, and the key that regains the
 /// role could propose the exit again anyway; the guardian vetoes every exit.
 #[test]

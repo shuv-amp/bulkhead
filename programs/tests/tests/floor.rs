@@ -1006,6 +1006,17 @@ fn every_floor_account_substitution_is_refused() {
     env.advance(7 * DAY);
     s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[]);
 
+    // Releasing the other program to none: the owner signs (finding 95).
+    env.ok(&[f3.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &zero, &[], None)], &[&p.owner]);
+    env.advance(7 * DAY);
+    let c3 = read_config(&env, &f3);
+    let held3: Vec<_> = [c3.abort_buffer, c3.snapshot_buffer]
+        .into_iter()
+        .filter(|b| *b != [0; 32])
+        .map(solana_address::Address::new_from_array)
+        .collect();
+    s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[]);
+
     println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds", s.attempts, s.runs, s.unsignable);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
