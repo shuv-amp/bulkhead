@@ -75,7 +75,7 @@ Re-read the official rules on Sun 11 Oct.
 
 - **#1 (Sun 27 Sep):** the Drift insight + the census; the core, the three programs and the guardian built and tested; "our own checks found real bugs in our own code, including one the Rust and Python versions shared."
 - **#2 (Sun 4 Oct):** S8 GIF: one transaction beats a perfect stop button; Bulkhead holds it to 2%.
-- **#3 (Sun 11 Oct):** all three programs live on devnet, each byte-identical to CI's build; S1 there with signatures; the guardian freezes 2–3 s after the payout that crosses its limit, and a Floor stop lands in ~4 s; a six-reviewer pre-audit engagement (`16`) found and fixed one High and several Mediums, 90 findings in all, each with its test; LOIs.
+- **#3 (Sun 11 Oct):** all three programs live on devnet, each byte-identical to CI's build; S1 there with signatures; the guardian freezes 2–3 s after the payout that crosses its limit, and a Floor stop lands in ~4 s; a six-reviewer pre-audit engagement (`16`) found and fixed one High and several Mediums; 94 findings in all, each with its test; LOIs.
 
 ## 8. X thread (post Sun 4 Oct)
 
