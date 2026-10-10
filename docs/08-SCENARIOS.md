@@ -7,7 +7,7 @@ Environments:
 - **Local validator** (`cloud/e2e/run.sh`): `solana-test-validator` with the programs, a sealed market, the Cloud guardian and an attacker.
 - **Devnet**: public signatures ([below](#devnet-signatures)). Deployed 28 Sep 2026 by `scripts/deploy.sh`, rehearsed first by `scripts/deploy-dryrun.sh` on a fresh local validator. The demo market was sealed on 1 Oct, and S1 ran there that day (below) with `cloud/e2e/s1.sh`, the same script the local end-to-end run uses, on the market that `scripts/deploy.sh` wrote (`world.json`, `keys/`). Floor S10 needs no seal and has already run there.
 
-Status (28 Sep 2026):
+Status (10 Oct 2026):
 
 | Scenario | Where it runs | Status |
 |---|---|---|

@@ -8,6 +8,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH"
 TOOLS="${PLATFORM_TOOLS:-$HOME/.cache/solana/v1.57/platform-tools}"
+if ! command -v cargo-build-sbf >/dev/null; then
+  echo "cargo-build-sbf not found: install the Agave CLI v4.3.0 with" >&2
+  echo '  sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"' >&2
+  exit 127
+fi
 if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
   # First run: let cargo-build-sbf download platform-tools (the target check
   # after the download fails harmlessly because RUSTC is not set yet).

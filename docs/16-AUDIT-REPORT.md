@@ -90,6 +90,7 @@ The engagement reviewed `9aae0c4`. Every on-chain change since then is new code 
 | 91 | Vault | A lifeboat exit records its proposer in the vault's reserved tail, and executes only while that key is still the admin (`ChangeStale`) | `lifeboat.rs` `propose_exit` / `execute_exit`, `state.rs` `Vault` |
 | 92 | Vault | Abdications bind genesis: `upsert_asset` is refused once `UpsertAsset` is abdicated, and `create_vault` must keep a new vault's lane closed once `SetLimits` is | `genesis.rs` |
 | 93 | Floor | A release closes any further frozen buffer it is passed, rent to the owner | `lib.rs` `execute`, `RELEASE_AUTHORITY` |
+| 95 | Floor | A release to none needs the owner's signature | `lib.rs` `execute`, `RELEASE_AUTHORITY` |
 
 Questions worth the auditors' time: whether any other state that a role holder sets up outlives that holder's replacement, as the exit did before 91; whether any other genesis path ignores an abdication, as `upsert_asset` and `create_vault` did before 92; and whether the accounts a release accepts after the fixed ones can do anything but close a buffer Floor holds.
 

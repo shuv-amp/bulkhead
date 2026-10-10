@@ -10,6 +10,10 @@ import { readOpenChanges, openExit, duration } from "../lib/changes.mjs";
 import { Keypair } from "../lib/signer.mjs";
 
 const [url, vaultProgram, protocolProgram, mints, payerPath] = process.argv.slice(2);
+if (!mints) {
+  console.error("usage: node cloud/status/snapshot.mjs <rpc> <vaultProgram> <protocolProgram> <mint,...> [funded keypair]");
+  process.exit(2);
+}
 const rpc = new Rpc(url);
 const vc = await new VaultClient(vaultProgram, protocolProgram).init();
 const p = decodeProtocol((await rpc.account(vc.protocol)).bytes);
