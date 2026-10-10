@@ -201,6 +201,7 @@ pub fn propose_exit(
     v.exit_executable_s = s.executable_s;
     v.exit_expires_s = s.expires_s;
     v.exit_vetoed = false;
+    v.exit_proposer = key(acc(accounts, 2)?);
     save(&mut accounts[1], |d| v.store(d))?;
     sys::event(
         &key(&accounts[0]),
@@ -252,6 +253,12 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
         return Err(VaultError::NothingToExit.into());
     }
     can_execute(&s, t, v.exit_vetoed, false, false).map_err(|_| VaultError::ChangeNotExecutable)?;
+    // Only an exit the current admin proposed executes. A recovery rotation
+    // replaced a stolen admin, yet an exit it queued while the rotation waited
+    // still executed: finding 87's rule for changes, missed here (issue #66).
+    if v.exit_proposer != p.admin {
+        return Err(VaultError::ChangeStale.into());
+    }
     // The destination must have been committed ≥ 72h before this exit was proposed.
     if v.exit_proposed_s - p.destination_set_s < MIN_LOOSEN_DELAY_S {
         return Err(VaultError::DestinationNotSettled.into());

@@ -376,6 +376,11 @@ pub struct Vault {
     /// the reserved tail: an account written before reads zeros, which the
     /// first touch replaces (its window is long past).
     pub low: bulkhead_core::ema::WindowLow,
+    /// Who proposed the pending exit (the admin then). It executes only while
+    /// that key is still the admin, like a change (issue #66). In the reserved
+    /// tail: an exit proposed by an older build reads zeros and must be
+    /// proposed again.
+    pub exit_proposer: [u8; 32],
 }
 
 impl Vault {
@@ -420,6 +425,7 @@ impl Vault {
                 cur: r.u64()?,
                 window: r.i64()?,
             },
+            exit_proposer: r.key()?,
         })
     }
 
@@ -457,6 +463,7 @@ impl Vault {
         w.u64(self.low.prev);
         w.u64(self.low.cur);
         w.i64(self.low.window);
+        w.key(&self.exit_proposer);
         Ok(())
     }
 
@@ -835,6 +842,7 @@ mod tests {
             exit_expires_s: 21,
             exit_vetoed: true,
             limits_version: 41,
+            exit_proposer: [42; 32],
         };
         let mut buf = [0u8; Vault::LEN];
         v.store(&mut buf).unwrap();
