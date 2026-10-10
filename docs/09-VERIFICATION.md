@@ -371,4 +371,4 @@ One workflow (`.github/workflows/ci.yml`) runs on every pull request, and at ful
 
 ## 9. Road to mainnet (not claimed in the submission)
 
-Two independent audits (a Solana specialist; a formal-methods review of the core); CVLR rules on both programs; verifiable builds; a public bug bounty; a staged TVL cap with the first design partner; then burn the upgrade authorities of Floor and Vault.
+Two independent audits (a Solana specialist, whose scope includes every on-chain change since the internal engagement, listed in `16` §6; a formal-methods review of the core); CVLR rules on both programs; verifiable builds; a public bug bounty; a staged TVL cap with the first design partner; then burn the upgrade authorities of Floor and Vault.
