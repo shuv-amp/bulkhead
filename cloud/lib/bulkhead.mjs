@@ -183,12 +183,13 @@ export class FloorClient {
     ]);
   }
   /**
-   * Execute a pending ReleaseAuthority (anyone, once due). A release to a key
-   * needs that key's signature (SetAuthorityChecked); `held` are the staged
-   * abort buffer and the pinned snapshot, which it closes (docs/09, 78 and 80).
+   * Execute a pending ReleaseAuthority once due. A release to a key needs
+   * that key's signature (SetAuthorityChecked); a release to none needs the
+   * owner's (finding 95). `held` are the staged abort buffer, the pinned
+   * snapshot and any spare, which it closes (docs/09, 78, 80 and 93).
    */
   executeRelease(owner, newAuthority, held = []) {
-    const a = [w(this.config), w(this.programdata), r(this.authority), r(IDS.loaderV3), w(owner)];
+    const a = [w(this.config), w(this.programdata), r(this.authority), r(IDS.loaderV3), newAuthority ? w(owner) : s(owner, true)];
     if (newAuthority) a.push(s(newAuthority));
     return this.ix(7, new Uint8Array(0), [...a, ...held.map((b) => w(b))]);
   }
