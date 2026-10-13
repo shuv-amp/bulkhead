@@ -72,14 +72,7 @@ The model is SaaS margins. The cost is guardian operations (people and infrastru
 
    The Cloud evidence pack exports exactly these.
 
-**First names to ask (in order):**
-- Unwind (@0xsubal).
-- Hylo and Project 0 (via @princedotrs).
-- Loopscale and Save.
-- Pacifica, Exponent, Perena, Solstice.
-- One named guardian partner.
-
-**Goal by Thu 8 Oct:** at least 3 written statements.
+**First teams to approach:** new and relaunching lending, perps and yield protocols (for example Unwind, Hylo, Project 0, Loopscale, Save, Pacifica, Exponent, Perena, Solstice), and one security firm as a named guardian partner. The milestone is three design partners on devnet in November (§8).
 
 ## 6. Competition and position
 

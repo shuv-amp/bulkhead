@@ -502,17 +502,26 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         // ticket only known by id waits for the next scan to name it.
         const address = action.address ?? state.pendingTickets.get(action.ticketId)?.address;
         const ticket = address ? key(address) : null;
-        const acc = ticket ? await rpc.account(ticket) : null;
+        let acc = ticket ? await rpc.account(ticket) : null;
         if (!acc) {
           // A missing account with history is a ticket that was there and is
           // closed now (a peer cancelled it, or it settled): done, not an
-          // error (docs/09, finding 76).
+          // error (docs/09, finding 76). Behind a load balancer the two reads
+          // can reach different nodes, so the absence counts only when read
+          // at or after the ticket's newest transaction.
           const history = ticket ? await rpc.call("getSignaturesForAddress", [b58encode(ticket), { limit: 1, commitment: "confirmed" }]).catch(() => null) : null;
           if (history?.length) {
-            log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
-            return true;
+            const r = await rpc.call("getAccountInfo", [b58encode(ticket), { encoding: "base64", commitment: "confirmed", minContextSlot: history[0].slot }]).catch(() => undefined);
+            if (r && !r.value) {
+              log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
+              return true;
+            }
+            if (r?.value) acc = { ...r.value, bytes: Uint8Array.from(atob(r.value.data[0]), (c) => c.charCodeAt(0)) };
           }
-          // No history either: a lagging read is not proof the ticket settled.
+        }
+        if (!acc) {
+          // No history, or no node caught up to it yet: a lagging read is not
+          // proof the ticket settled.
           // Retry; leaving it marked cancelled would let it pay out when the
           // freeze ends.
           log({ action: "cancel", skipped: "ticket account missing; will retry", ticketId: action.ticketId });

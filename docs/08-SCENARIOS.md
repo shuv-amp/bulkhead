@@ -12,12 +12,12 @@ Status (10 Oct 2026):
 | Scenario | Where it runs | Status |
 |---|---|---|
 | S1 compromised admin | `tests/vault.rs::s1_…`, `cloud/e2e/run.sh`; devnet: `cloud/e2e/s1.sh` | **Runs**; **ran on devnet 1 Oct**: 100,000 of 1,200,000 left, 11 tickets cancelled by the guardian ([signatures](#devnet-signatures)) |
-| S1 with the full Drift asset mix (31 borrows) | model: `reference/drift_model.py` | Model; devnet run planned |
+| S1 with the full Drift asset mix (31 borrows) | model: `reference/drift_model.py` | Model only |
 | S4 bank run | `tests/vault.rs::s4_…` | **Runs** |
 | S7 slow loosening | `tests/vault.rs::s7_…`, `an_unvetoed_loosening…` | **Runs** |
 | S8 one-transaction attack | `tests/vault.rs::s8_…` | **Runs** |
 | S9 honest borrower | `tests/vault.rs::s9_…` | **Runs** |
-| S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle` (+ 35 more Floor tests); on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
+| S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle` (+ 42 more Floor tests); on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
 | S11 liquidation cascade | core only: `crates/bulkhead-core/tests/cascade.rs`; synthetic market | **Runs** (core); a program-level run and a replay of real Pyth history are not done |
 
 ## S1: a compromised admin (Drift class)
@@ -37,7 +37,7 @@ Status (10 Oct 2026):
 |---|---|
 | Ordered by the attacker (12 × 100,000 USDC, every 800 ms) | 1,200,000 USDC |
 | Received | **100,000 USDC**: after the first payout the vault holds 9.9M, and the second 100,000 no longer fits the burst (2% of what is in the vault at each payout; 200,000 before the 29 Sep fix, `15` A1) |
-| Guardian freeze | Automatic, 2–6 s after the block that reached the threshold, across runs (6 s in the latest, 29 Sep). Policy: freeze once unbacked payouts to non-allowlisted owners reach ½ of `worst_1h` within an hour. |
+| Guardian freeze | Automatic: 5.4–5.6 s after the first payout, 2–3 s after the payout that crosses the threshold (`09`, finding 82; 2–6 s before it). Policy: freeze once unbacked payouts to non-allowlisted owners reach ½ of `worst_1h` within an hour. |
 | Queued payouts | 11 tickets, all cancelled by the guardian within 2–10 s of their blocks (29 Sep) |
 | After | 0 pending, protocol frozen 24h, 9,900,000 USDC in the vault |
 | Status page figures | Equal to the program's own `attest` |

@@ -63,11 +63,11 @@
     <label>Protected program (optional) <input name="protected"></label>
     <button>Load</button>
   </form>
-  <div id="out"></div>
+  <div id="out" aria-live="polite"></div>
   <footer>Refreshes every 10 seconds. Guardians can stop, never steal; loosening waits at least 72 hours. <a href="https://github.com/shuv-amp/bulkhead">Source</a></footer>
 </main>
 <script type="module">
-import { Rpc, decodeProtocol, decodeVault, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, decodeProtocol, decodeVault, decodeFloor, b58encode, key } from "../lib/solana.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { readOpenChanges, openExit, duration, FLOOR_PROPOSAL_KINDS } from "../lib/changes.mjs";
 import { attestLocal } from "../lib/limits.mjs";
@@ -146,12 +146,21 @@ function floorPending(fl, now) {
 const KNOWN_VAULTS = { HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b: "the devnet deployment" };
 const KNOWN_FLOORS = { HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E: "the devnet deployment" };
 
+// A missing account is a wrong id or cluster, not a crash.
+async function need(rpc, k, what) {
+  const acc = await rpc.account(k);
+  if (!acc) throw new Error(`No ${what} account at ${b58encode(key(k))} on this RPC: check the ids and the cluster.`);
+  return acc;
+}
+
 async function render() {
   const f = Object.fromEntries(new FormData(form));
-  if (!f.rpc || !f.vault || !f.protocol || !f.mints) return;
+  if (!f.rpc || !f.vault || !f.protocol || !f.mints) {
+    return `<div class="card"><p>Enter an RPC, the Vault and protocol program ids and at least one mint, then press Load. <a href="?rpc=https%3A%2F%2Fapi.devnet.solana.com&vault=HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b&protocol=6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh&mints=CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB&floor=HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E&protected=CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs">Load the devnet deployment</a>.</p></div>`;
+  }
   const rpc = new Rpc(f.rpc);
   const vc = await new VaultClient(f.vault, f.protocol).init();
-  const protocol = decodeProtocol((await rpc.account(vc.protocol)).bytes);
+  const protocol = decodeProtocol((await need(rpc, vc.protocol, "protocol")).bytes);
   const slot = await rpc.call("getSlot", [{ commitment: "confirmed" }]);
   const now = await rpc.call("getBlockTime", [slot]);
   const live = protocol.guardians.filter((_, i) => now - protocol.lastHeartbeat[i] <= protocol.heartbeatIntervalS).length;
@@ -166,8 +175,8 @@ async function render() {
   if (mints.length < protocol.vaultCount) warnings.push(`This protocol has ${esc(protocol.vaultCount)} vaults; the link names ${mints.length}, so the worst case below leaves some out. Add every mint.`);
   for (const mint of mints) {
     const { vault, vaultTokens } = await vc.vault(mint);
-    const v = decodeVault((await rpc.account(vault)).bytes);
-    const tokens = await rpc.account(vaultTokens);
+    const v = decodeVault((await need(rpc, vault, "vault")).bytes);
+    const tokens = await need(rpc, vaultTokens, "vault token");
     const balance = new DataView(tokens.bytes.buffer, tokens.bytes.byteOffset).getBigUint64(64, true);
     const a = attestLocal(v, protocol, balance, now);
     const d = v.decimals;

@@ -24,3 +24,10 @@ mutants.out.old/
 *.key
 .humanlayer/
 humanlayer-skills/
+# Submission drafts and pitch videos: kept on disk, never committed
+pitch/
+colosseum-*.md
+script.md
+*.mp4
+*.mp3
+*.zip
