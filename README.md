@@ -1,44 +1,63 @@
-# Bulkhead
+<p align="center">
+  <img src="docs/assets/banner.png" alt="Bulkhead: the circuit breaker your Solana protocol's own admin can't turn off" width="100%">
+</p>
 
-**The circuit breaker your Solana protocol's own admin can't turn off.**
+<p align="center">
+  <a href="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="#live-on-devnet"><img alt="Live on devnet" src="https://img.shields.io/badge/devnet-live-2F5BFF?labelColor=07080b"></a>
+  <a href="docs/09-VERIFICATION.md"><img alt="15 Kani proofs" src="https://img.shields.io/badge/Kani_proofs-15%2F15-2F5BFF?labelColor=07080b"></a>
+  <a href="docs/09-VERIFICATION.md"><img alt="123 program tests" src="https://img.shields.io/badge/program_tests-123%2F123-2F5BFF?labelColor=07080b"></a>
+  <a href="SECURITY.md"><img alt="Not audited" src="https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-c2410c?labelColor=07080b"></a>
+  <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-8a8d96?labelColor=07080b"></a>
+</p>
 
-On 1 April 2026, Drift lost $285M in about twelve minutes of withdrawals. Drift had withdrawal limits. The attacker, holding admin power, raised them. Drift had removed its own timelock five days earlier.
+<p align="center">
+  <a href="#what-it-does-to-an-attack"><b>The attack</b></a> ·
+  <a href="#how-it-works"><b>How it works</b></a> ·
+  <a href="#verify-it-yourself"><b>Verify it</b></a> ·
+  <a href="#live-on-devnet"><b>Devnet</b></a> ·
+  <a href="docs/FAQ.md"><b>FAQ</b></a> ·
+  <a href="#documentation"><b>Docs</b></a>
+</p>
 
-Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once audited, nobody can change it.
-- **The protocol still decides who gets paid. Bulkhead decides how fast.**
-- **Taking back your own deposit is never throttled, frozen or priced.** No oracle, no limit, no freeze.
-- **Everything else leaves at most 2% of the vault per hour and 5% per day.** The one exception is a loan against allowlisted, Pyth-priced collateral: it is bounded by haircuts and Pyth, not by the limiter, and a guardian's freeze stops new ones (`04`, T5; `09`, finding 90). The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes: a deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is 4% in any hour and 10% in any day. Above that, payouts wait in a public queue that guardians can freeze. Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
-- **Tightening is instant. Loosening waits 72 hours**, a constant no admin can lower, and any guardian can veto it.
-- **Guardians can stop things. They can never move money.**
+---
 
-## Two tiers, two threats
+On 1 April 2026, **Drift lost $285M in about twelve minutes.** Drift had withdrawal limits. The attacker, holding admin power, raised them. Drift had removed its own timelock five days earlier.
 
-| | **Vault** (Tier 1) | **Floor** (Tier 0) |
-|---|---|---|
-| What it holds | The protocol's token accounts | The program's upgrade key |
-| Stops | Money leaving too fast, whatever the cause: a stolen admin key (the Drift class), a buggy payout path, malicious new code in the protocol, even a one-transaction drain | Malicious *new code*: new binaries wait 72h in public, any guardian can stop the program at once, and a quorum restores the exact bytes that were stopped |
-| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of the vault in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
-| Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
+Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once it's audited, nobody can change it.
 
-**Who the guardians are.** A protocol names 2–8 guardian keys when it registers: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
+> **The protocol still decides who gets paid. Bulkhead decides how fast.**
 
-**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian (the bot that froze the end-to-end attack within seconds; a patient attacker who paces payouts under its thresholds is bounded by the on-chain limits, not by the bot, [15](docs/15-ADVERSARIAL-REVIEW.md) A2), limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day" through the unbacked lane, with absolute caps set; it excludes oracle risk on backed loans.
+<p align="center">
+  <img src="docs/assets/attack.gif" alt="An attacker with the admin key orders 12 payouts of 100,000 USDC; one is paid, the rest queue, the guardian freezes the protocol and cancels the queue" width="100%">
+  <br>
+  <sub>A drain with the admin key, on a local validator (13 Oct 2026, sped up). 1.2M ordered, 100,000 paid; the guardian freezes and cancels the rest.<br>Every script is in this repo: <code>cloud/e2e/attack.mjs</code>, <code>cloud/guardian/main.mjs</code>, <code>cloud/status/</code>.</sub>
+</p>
 
-**Why not just an abort binary?** Dean Little's `sbpf-asm-abort` showed that a program can be stopped by upgrading it to a tiny binary that always fails. Floor builds on that pattern (credited in [DISCLOSURE.md](DISCLOSURE.md)). But a bare abort:
-- is pressed by whoever holds the upgrade key, the same key that can deploy anything;
-- waits for the timelock under a timelocked multisig;
-- is undone only by re-uploading the program.
+## The rules
 
-Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
+| Rule | What it means |
+|---|---|
+| 🟢 **Your own money is never held** | Taking back your own deposit is never throttled, frozen or priced. No oracle, no limit, no freeze. |
+| 🔵 **Everything else is rate-limited** | At most **2% of the vault per hour** and **5% per day**. Above that, payouts wait in a public queue. |
+| ⏳ **Loosening takes 72 hours** | Tightening is instant. Loosening waits 72h, a constant no admin can lower, and any guardian can veto it. |
+| 🛑 **Guardians stop, never steal** | Any guardian can freeze, veto or stop. None can move a single token. |
+| 🔒 **The upgrade key is fenced too** | Floor holds the program's upgrade key. New code waits 72h in public; one guardian can stop the program; a quorum restores it byte for byte. |
 
-> **Status (10 Oct 2026):** built:
-> - the core math;
-> - the on-chain programs: Floor, Vault, and Harbor (a demo protocol);
-> - the Cloud guardian and the status page.
->
-> They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#on-devnet). Devnet runs this tree's build (PR #77, 11 Oct), and S1 has run there. **Not independently audited; not for real funds.** An internal pre-audit by six AI-agent reviewers, each finding reproduced as a test, is in [16](docs/16-AUDIT-REPORT.md); it is not an audit; see [SECURITY.md](SECURITY.md).
+<details>
+<summary><b>What "2% per hour" means exactly</b></summary>
 
-## Why the brake must sit in the path of the money
+<br>
+
+The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes. A deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is **4% in any hour and 10% in any day**. Above that, payouts wait in a public queue that guardians can freeze.
+
+Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
+
+The one exception is a loan against allowlisted, Pyth-priced collateral. It is bounded by haircuts and Pyth, not by the limiter, and a guardian's freeze stops new ones (`04`, T5; `09`, finding 90).
+
+</details>
+
+## Why the brake has to sit where the money moves
 
 | Fact | Source |
 |---|---|
@@ -48,7 +67,49 @@ Floor separates stopping from upgrading. Any guardian stops, new code waits 72h,
 
 Timelocks are settings, not floors. Stop buttons act after the transaction that did the damage. Only a limit enforced inside every payout bounds an atomic attack.
 
-On Solana, the one control an admin or upgrade key can't bypass is ownership of the token account. Bulkhead becomes that owner.
+**On Solana, the one control an admin or upgrade key can't get around is ownership of the token account. Bulkhead becomes that owner.**
+
+## How it works
+
+```mermaid
+flowchart LR
+    P["Protocol<br/>(admin key)"] -->|payout| V{{"Bulkhead Vault<br/>owns the token accounts"}}
+    U["Depositor"] -->|"withdraw own deposit"| V
+    V -->|"own deposit:<br/>always instant"| OK["✅ paid"]
+    V -->|"within 2%/h · 5%/day"| OK
+    V -->|"over the limit"| Q["⏳ public queue"]
+    G["Guardians<br/>(2–8 keys)"] -.->|"freeze · cancel"| Q
+    G -.->|"veto loosening"| V
+    F["Floor<br/>holds the upgrade key"] -->|"new code waits 72h"| PR["Protocol program"]
+    G -.->|"stop · veto"| F
+```
+
+### Two tiers, two threats
+
+| | **Vault** (Tier 1) | **Floor** (Tier 0) |
+|---|---|---|
+| What it holds | The protocol's token accounts | The program's upgrade key |
+| Stops | Money leaving too fast, whatever the cause: a stolen admin key (the Drift class), a buggy payout path, malicious new code in the protocol, even a one-transaction drain | Malicious *new code*: new binaries wait 72h in public, any guardian can stop the program at once, and a quorum restores the exact bytes that were stopped |
+| Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of the vault in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
+| Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
+
+**Who the guardians are.** When a protocol registers, it names 2–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
+
+**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian, limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day" through the unbacked lane, with absolute caps set. It excludes oracle risk on backed loans. A patient attacker who paces payouts under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2).
+
+<details>
+<summary><b>Why not just an abort binary?</b></summary>
+
+<br>
+
+Dean Little's `sbpf-asm-abort` showed that a program can be stopped by upgrading it to a tiny binary that always fails. Floor builds on that pattern (credited in [DISCLOSURE.md](DISCLOSURE.md)). A bare abort, though:
+- is pressed by whoever holds the upgrade key, the same key that can deploy anything;
+- waits for the timelock under a timelocked multisig;
+- is undone only by re-uploading the program.
+
+Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
+
+</details>
 
 ## What it does to an attack
 
@@ -58,10 +119,10 @@ On Solana, the one control an admin or upgrade key can't bypass is ownership of 
 |---|---|
 | The attacker orders | 12 payouts of 100,000 USDC, one every 800 ms |
 | The attacker receives | **100,000 USDC**. The burst is 2% of what is in the vault at each payout, so after the first 100,000 the second no longer fits. An attacker who sizes each payout exactly gets 199,000 (S8), never more than 2%. |
-| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts. In a local-validator run with three guardians: 5.4–5.6 s after the first payout (the freeze confirms 2–3 s after the payout that crosses the threshold) with a healthy RPC, 13–20 s with every RPC call delayed 1.5 s (`09`, finding 82). A patient attacker who stays under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2) |
+| The guardian | Freezes the protocol on its own, seconds after the second payout, then cancels all 11 queued payouts. In a local-validator run with three guardians: 5.4–5.6 s after the first payout with a healthy RPC (the freeze confirms 2–3 s after the payout that crosses the threshold); 13–20 s with every RPC call delayed 1.5 s (`09`, finding 82) |
 | Afterwards | 9,900,000 USDC still in the vault; 0 payouts pending; the status page's figures equal the program's own `attest` |
 
-**Modeled, the Drift incident** (`reference/drift_model.py`). Inputs: Chainalysis per-asset amounts, and a $550M TVL **assumption** with vaults proportional to what was drained. It is a model, not a replay.
+**Modeled: the Drift incident** (`reference/drift_model.py`). Inputs: Chainalysis per-asset amounts, and a $550M TVL **assumption** with vaults proportional to what was drained. It is a model, not a replay.
 
 | Nobody freezes for | Loss behind Bulkhead | Share of TVL |
 |---|---|---|
@@ -92,7 +153,8 @@ scripts/check-programs.sh         # the programs on the real runtime: needs the 
                                   #   sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
 ```
 
-**Deeper, and slower:**
+<details>
+<summary><b>Deeper, and slower: proofs, fuzzing, mutation testing, deploy checks</b></summary>
 
 ```bash
 E2E=1 scripts/check-programs.sh   # ...plus the attacker-vs-guardian run and a deploy rehearsal, on local validators
@@ -111,29 +173,29 @@ scripts/floor-devnet.sh <url> <team.json> <dir>  # Floor's full lifecycle on a l
 node cloud/deploy/vault-check.mjs <url> <market> # a live market checked without sending anything (needs its keys)
 ```
 
+</details>
+
 These scripts install nothing. The core has zero dependencies, and Cloud and the Python code use only their standard libraries.
+
+### What the checks show
 
 | Check | Result (latest run of each) |
 |---|---|
-| Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
-| Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 31 commands now, 300k cases on every pull request and 3M weekly in CI |
-| Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 26/26, with coverage counters so a vacuous pass fails |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **123/123**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
 | Bounded proofs (Kani) and exhaustive checks | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
-| Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
-| Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | 123/123: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
+| Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 31 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
-| End to end | Above |
-| On devnet | All three programs run this tree's build (PR #77, 11 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#on-devnet)) |
-| What this process found in our own code and docs | 95 findings: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
+| Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
+| Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 26/26, with coverage counters so a vacuous pass fails |
+| Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
+| End to end | [Above](#what-it-does-to-an-attack) |
+| On devnet | All three programs run this tree's build (PR #77, 11 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
+| What this process found in our own code and docs | **95 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
-## On devnet
+## Live on devnet
 
-Deployed 28 Sep 2026; all three programs upgraded in place since (same ids, market and seal), most recently on 11 Oct (Floor; the Vault on 10 Oct, Harbor on 6 Oct). Each runs exactly the canonical build of PR #77 (the Vault: the same bytes since PR #75; Harbor: since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). CI repeats this check every week.
-
-```bash
-scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet
-```
+Deployed 28 Sep 2026. All three programs have been upgraded in place since then (same ids, market and seal), most recently on 11 Oct (Floor; the Vault on 10 Oct, Harbor on 6 Oct). Each runs exactly the canonical build of PR #77 (the Vault: the same bytes since PR #75; Harbor: since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. CI repeats this check every week.
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
@@ -141,12 +203,24 @@ scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewher
 | Vault | [`HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b`](https://explorer.solana.com/address/HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b?cluster=devnet) | `b0cda14c…0af96097` |
 | Harbor (demo protocol) | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `543be60b…10adeb40` |
 
-All three share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
+```bash
+scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet
+```
 
-- **The demo market:** Harbor over a Vault holding 10,000,000 test USDC (protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet)). Sealed on 1 Oct, 72h after its seal was proposed; until then no payout of any kind was possible. **S1 then ran there** with `cloud/e2e/s1.sh`, the script of the local end-to-end run: the admin key ordered 12 payouts of 100,000 USDC; the first paid out (the 2% burst) and 11 queued. The Cloud guardian froze the protocol and cancelled all 11, leaving 9,900,000 in the vault. It froze 12.5 minutes after the first payout, not seconds as it does locally: a mistyped Compute Budget id made the node refuse every freeze until the id was corrected and the guardian restarted. A queued payout waits at least 6h, so nothing more could leave; the guardian now drops a refused compute budget and sends the freeze without it ([`09`, finding 47](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The devnet Vault names its protocol in every event (finding 64), as this guardian requires.
+A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). All three programs share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
+
+- **The demo market:** Harbor over a Vault holding 10,000,000 test USDC (protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet)). Sealed on 1 Oct, 72h after its seal was proposed; until then no payout of any kind was possible.
+- **S1 ran there** with `cloud/e2e/s1.sh`, the script of the local end-to-end run: the admin key ordered 12 payouts of 100,000 USDC; the [first paid out](https://explorer.solana.com/tx/2zBFf6Ho6oQLULthoJfHtpqYWGfz3NmJbbxFo3JqbceQFQNeq4d6nnHsfTRYHoPtA7RTmRQAqTTZne4zbg64fUKb?cluster=devnet) (the 2% burst) and 11 queued. The Cloud guardian [froze the protocol](https://explorer.solana.com/tx/3mjsHTaPDCu7q5MdtSZyYgBBUCSAxMDtnH4wPe6RPe49GYJWcE266fHbC51pgpyXMKtQGgeNErL4YGpCngSH5nUR?cluster=devnet) and cancelled all 11, leaving 9,900,000 in the vault. It froze 12.5 minutes after the first payout, not seconds as it does locally: a mistyped Compute Budget id made the node refuse every freeze until the id was corrected and the guardian restarted. A queued payout waits at least 6h, so nothing more could leave. The guardian now drops a refused compute budget and sends the freeze without it ([`09`, finding 47](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The devnet Vault names its protocol in every event (finding 64), as this guardian requires.
 - **Floor S10:** a target program ([`CvZEMDwM…`](https://explorer.solana.com/address/CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs?cluster=devnet)) was registered, [stopped by one guardian](https://explorer.solana.com/tx/VzwPxcMzikf5YRxGvoBhH4qWc8hKteDRKYrHPTEkfZ6BeP3t1xmugaKWNiATmQQaAZp3obrLuSxrPP4CYAQ5jhY?cluster=devnet), [restored byte-identical by two](https://explorer.solana.com/tx/4j61VvmWHfdNSgZnvvuzHsVzBML9NXYcfZLT6SU2AEeRtkD5Wyf39bDq4XvwQy77FmS8C92fPzjAZ2WboDLQR9DY?cluster=devnet), and left armed (`scripts/floor-devnet.sh`).
 
 Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
+
+## Status
+
+> [!WARNING]
+> **Not independently audited. Not for real funds.**
+>
+> What's built: the core math; the on-chain programs (Floor, Vault, and Harbor, a demo protocol); the Cloud guardian; and the status page. They pass their tests on the real Solana runtime (LiteSVM) and on a local validator, and they are [deployed on devnet](#live-on-devnet). An internal pre-audit by six AI-agent reviewers, with each finding reproduced as a test, is in [16](docs/16-AUDIT-REPORT.md). It is not an audit; see [SECURITY.md](SECURITY.md).
 
 ## Guarantees
 
@@ -163,6 +237,9 @@ Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
 | G9 | Bulkhead's and Floor's own upgrade authorities are burned after audit (on devnet: a team key, disclosed) |
 
 ## Repository
+
+<details>
+<summary><b>Layout</b></summary>
 
 ```
 crates/bulkhead-core/   the math: dual-bucket GCRA, EMA, value, prices, ledger, classification, governance,
@@ -185,9 +262,18 @@ fuzz/                   libFuzzer targets (cargo-fuzz) and their committed seeds
 .github/workflows/      CI: every pull request, and a deeper run every Monday (docs/09 §8)
 ```
 
+</details>
+
 The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build for **sBPF v3**. `scripts/build-programs.sh` fails unless each binary is still deployable after SIMD-0500.
 
 ## Documentation
+
+**Start here:** [FAQ](docs/FAQ.md) · [03 Mechanism](docs/03-MECHANISM.md) · [04 Threat model](docs/04-THREAT-MODEL.md) · [16 Pre-audit report](docs/16-AUDIT-REPORT.md)
+
+<details>
+<summary><b>All 18 documents</b></summary>
+
+<br>
 
 | Doc | What it answers |
 |---|---|
@@ -210,8 +296,14 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [15 Adversarial review](docs/15-ADVERSARIAL-REVIEW.md) | An internal red-team pass on the code and the idea: what an attacker who knows every rule gets, what was fixed, what is still open |
 | [16 Pre-audit report](docs/16-AUDIT-REPORT.md) | A six-reviewer engagement run like an audit, by AI agents (9 Oct 2026): scope, method, every finding and its status, external assumptions checked, and the design decisions left before a lending integration. Not a substitute for an independent audit |
 
+</details>
+
+## Team
+
+Built full time in Kathmandu, Nepal, by **Shuvam Pandey** ([@shuv-amp](https://github.com/shuv-amp)) and **Praful** ([@Prafyl](https://github.com/Prafyl)) for the Colosseum Crypto World's Fair.
+
 ## Credits and license
 
 The one-transaction abort pattern is Dean Little's (`sbpf-asm-abort`); our binaries are generated by our own code. The verification method comes from [SP-Differ](https://github.com/shuv-amp/sp-differ). See [DISCLOSURE.md](DISCLOSURE.md).
 
-Apache-2.0.
+[Apache-2.0](LICENSE).
