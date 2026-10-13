@@ -41,7 +41,7 @@ Each row is a choice we will not reopen without new evidence.
 
 | # | Decision | Choice | Why | Rejected alternative (and why) |
 |---|---|---|---|---|
-| D1 | What to build | Bulkhead (Floor + Vault) | Largest verified failure of 2026, measured governance weakness, a primitive with provable bounds, and a founder whose record is finding bugs in shipped crypto code | SP-Differ for Solana stealth (~50–100 sweeps/week, no payer). A v3-migration replay tool (svmscope and QEDGen already do it). A governance monitor (solgov exists; judges are tired of monitors). A signer or durable-nonce guard (Drift disabled nonces; shield and Blockaid cover it). |
+| D1 | What to build | Bulkhead (Floor + Vault) | Largest verified failure of 2026, measured governance weakness, a primitive with provable bounds, and a founder whose record is finding bugs in shipped crypto code | SP-Differ for Solana stealth (~50–100 sweeps/week, no payer). A v3-migration replay tool (svmscope and QEDGen already do it). A governance monitor (solgov exists, and a monitor acts only after the damage). A signer or durable-nonce guard (Drift disabled nonces; shield and Blockaid cover it). |
 | D2 | Where to enforce | **In the money path** (custody of the vault token account) | Only in-path enforcement bounds an atomic attack (44% of incidents) and an admin who changes the rules | Detect-then-pause (Hypernative, Holdfast, Sentinel's trip, a bare abort button). All of these act after the transaction that did the damage. |
 | D3 | Limiter shape | **Two GCRA buckets**: 2% per hour (burst) and 5% per 24h (daily cap) | With one hourly bucket, a patient attacker who only takes the refill gets 50% in a day. With the daily cap, 24h of total silence costs 10% (Drift model: $55M instead of $275M). | Single bucket (the original spec). Fixed daily withdrawal limit (resets create cliffs; GCRA has none). |
 | D4 | Queue semantics | FIFO tickets that **reserve** capacity, **no refund** on cancel, `reset_backlog` only with **zero pending tickets**, 7-day horizon | Each rule is required for the G1 proof (`03 §2.5`). The reset rule stops a cancelled attack from locking honest flows for days. | Refund on cancel (breaks the bound through idle-time credit). Reset while tickets are pending (breaks the bound; the property test would fail). |
@@ -72,7 +72,7 @@ Each row is a choice we will not reopen without new evidence.
 
 | Not building | Reason |
 |---|---|
-| A general monitoring dashboard | solgov, Range, Hypernative exist; monitors are what judges have seen fifty times. Bulkhead consumes their alerts. Its status page shows only Bulkhead's own on-chain bound. |
+| A general monitoring dashboard | solgov, Range, Hypernative exist and do it well. Bulkhead consumes their alerts. Its status page shows only Bulkhead's own on-chain bound. |
 | An oracle | We consume Pyth (and optionally SVI-style on-chain valuations); owning price risk is a different company |
 | User-wallet protection (drainers, phishing) | Different threat, different product (wallet vendors own it) |
 | AMM / DEX pool protection | Every swap output is unbacked by definition; the model does not fit |
@@ -88,10 +88,10 @@ Each row is a choice we will not reopen without new evidence.
    - separates backed from unbacked value;
    - enforces a loosen delay the admin cannot reduce.
 
-   Not found as of 26 Sep (`01 §8`). Re-check on Thu 1 Oct and Sun 11 Oct.
+   Not found as of 28 Sep (`01 §8`, decision log).
 2. **Floor only.** If Squads (or anyone) ships a non-reducible minimum upgrade delay with a guardian abort, drop Floor and point integrators there. Vault is unaffected.
-3. **Technical.** If the S1 scenario does not pass on LiteSVM by Thu 1 Oct, 23:59 NPT, submit core + program + terminal scenarios without the web page.
-4. **Demand.** If none of ≥ 15 contacted protocol teams answers in writing by Mon 5 Oct, keep the product and narrow go-to-market to new launches and relaunches.
+3. **Technical.** If the S1 scenario does not pass on the real runtime, drop the web page and ship core, programs and terminal scenarios. (S1 passed on LiteSVM on 27 Sep and on devnet on 1 Oct.)
+4. **Demand.** If none of the protocol teams contacted answers in writing, keep the product and narrow go-to-market to new launches and relaunches.
 
 ## Decision log
 

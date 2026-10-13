@@ -24,7 +24,7 @@
 
 On 1 April 2026, **Drift lost $285M in about twelve minutes.** Drift had withdrawal limits. The attacker, holding admin power, raised them. Drift had removed its own timelock five days earlier.
 
-Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once it's audited, nobody can change it.
+Bulkhead is a small Solana program that holds a protocol's token accounts on the protocol's behalf. Once it's audited, its upgrade key is burned and nobody can change it. Until then, on devnet, a disclosed team key can.
 
 > **The protocol still decides who gets paid. Bulkhead decides how fast.**
 
@@ -39,7 +39,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 | Rule | What it means |
 |---|---|
 | 🟢 **Your own money is never held** | Taking back your own deposit is never throttled, frozen or priced. No oracle, no limit, no freeze. |
-| 🔵 **Everything else is rate-limited** | At most **2% of the vault per hour** and **5% per day**. Above that, payouts wait in a public queue. |
+| 🔵 **Everything else is rate-limited** | Limits refill at **2% of the vault per hour** and **5% per day**, so at most 4% leaves in any hour and 10% in any day. Above that, payouts wait in a public queue. |
 | ⏳ **Loosening takes 72 hours** | Tightening is instant. Loosening waits 72h, a constant no admin can lower, and any guardian can veto it. |
 | 🛑 **Guardians stop, never steal** | Any guardian can freeze, veto or stop. None can move a single token. |
 | 🔒 **The upgrade key is fenced too** | Floor holds the program's upgrade key. New code waits 72h in public; one guardian can stop the program; a quorum restores it byte for byte. |
@@ -53,7 +53,7 @@ The percentages apply to the least of the live balance, its 24-hour average and 
 
 Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
 
-The one exception is a loan against allowlisted, Pyth-priced collateral. It is bounded by haircuts and Pyth, not by the limiter, and a guardian's freeze stops new ones (`04`, T5; `09`, finding 90).
+The one exception is a loan against allowlisted, Pyth-priced collateral. It is bounded by haircuts and Pyth, not by the limiter, and a guardian's freeze stops new ones ([threat model](docs/04-THREAT-MODEL.md), T5; [finding 90](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)).
 
 </details>
 
@@ -191,7 +191,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
 | End to end | [Above](#what-it-does-to-an-attack) |
 | On devnet | All three programs run this tree's build (PR #77, 11 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
-| What this process found in our own code and docs | **95 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | **98 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–98, from a review after the submission, are stated with their fixes, which ship with the audit build. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## Live on devnet
 
@@ -209,8 +209,8 @@ scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewher
 
 A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). All three programs share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
 
-- **The demo market:** Harbor over a Vault holding 10,000,000 test USDC (protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet)). Sealed on 1 Oct, 72h after its seal was proposed; until then no payout of any kind was possible.
-- **S1 ran there** with `cloud/e2e/s1.sh`, the script of the local end-to-end run: the admin key ordered 12 payouts of 100,000 USDC; the [first paid out](https://explorer.solana.com/tx/2zBFf6Ho6oQLULthoJfHtpqYWGfz3NmJbbxFo3JqbceQFQNeq4d6nnHsfTRYHoPtA7RTmRQAqTTZne4zbg64fUKb?cluster=devnet) (the 2% burst) and 11 queued. The Cloud guardian [froze the protocol](https://explorer.solana.com/tx/3mjsHTaPDCu7q5MdtSZyYgBBUCSAxMDtnH4wPe6RPe49GYJWcE266fHbC51pgpyXMKtQGgeNErL4YGpCngSH5nUR?cluster=devnet) and cancelled all 11, leaving 9,900,000 in the vault. It froze 12.5 minutes after the first payout, not seconds as it does locally: a mistyped Compute Budget id made the node refuse every freeze until the id was corrected and the guardian restarted. A queued payout waits at least 6h, so nothing more could leave. The guardian now drops a refused compute budget and sends the freeze without it ([`09`, finding 47](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The devnet Vault names its protocol in every event (finding 64), as this guardian requires.
+- **The demo market:** Harbor over a Vault holding 10,000,000 test USDC (protocol [`26dY2HWr…`](https://explorer.solana.com/address/26dY2HWrczKyPYh8jB4cBgzFsf5gkYo789BfCBQXRvSq?cluster=devnet)). Sealed on 1 Oct, after the 72h review that follows a seal proposal; until then no payout of any kind was possible.
+- **S1 ran there** with `cloud/e2e/s1.sh`, the script of the local end-to-end run: the admin key ordered 12 payouts of 100,000 USDC; the [first paid out](https://explorer.solana.com/tx/2zBFf6Ho6oQLULthoJfHtpqYWGfz3NmJbbxFo3JqbceQFQNeq4d6nnHsfTRYHoPtA7RTmRQAqTTZne4zbg64fUKb?cluster=devnet) (the 2% burst) and 11 queued. The Cloud guardian [froze the protocol](https://explorer.solana.com/tx/3mjsHTaPDCu7q5MdtSZyYgBBUCSAxMDtnH4wPe6RPe49GYJWcE266fHbC51pgpyXMKtQGgeNErL4YGpCngSH5nUR?cluster=devnet) and cancelled all 11, leaving 9,900,000 in the vault. It froze about 13 minutes after the first payout, not seconds as it does locally: a mistyped Compute Budget id made the node refuse every freeze until the id was corrected and the guardian restarted. A queued payout waits at least 6h, so nothing more could leave. The guardian now drops a refused compute budget and sends the freeze without it ([`09`, finding 47](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). The devnet Vault names its protocol in every event (finding 64), as this guardian requires.
 - **Floor S10:** a target program ([`CvZEMDwM…`](https://explorer.solana.com/address/CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs?cluster=devnet)) was registered, [stopped by one guardian](https://explorer.solana.com/tx/VzwPxcMzikf5YRxGvoBhH4qWc8hKteDRKYrHPTEkfZ6BeP3t1xmugaKWNiATmQQaAZp3obrLuSxrPP4CYAQ5jhY?cluster=devnet), [restored byte-identical by two](https://explorer.solana.com/tx/4j61VvmWHfdNSgZnvvuzHsVzBML9NXYcfZLT6SU2AEeRtkD5Wyf39bDq4XvwQy77FmS8C92fPzjAZ2WboDLQR9DY?cluster=devnet), and left armed (`scripts/floor-devnet.sh`).
 
 Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
@@ -230,7 +230,7 @@ Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
 | G2 | An owner who owes nothing is never throttled, frozen or priced taking back their own deposit. (Whether the tokens are in the pool is the pool's liquidity; [`03 §4.6`](docs/03-MECHANISM.md#46-guarantees-of-the-ledger).) |
 | G3 | Backed payouts never leave an owner's ledger unsound at conservative prices |
 | G4 | Tighten instantly; loosen only after ≥ 72h, public, vetoable |
-| G5 | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one. |
+| G5 | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one, in any set larger than its threshold (run at least `threshold + 2`; [finding 96](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). |
 | G6 | Emergency moves go only into a Bulkhead-held lifeboat. Exits wait 72h, and go only to a destination committed 72h earlier. |
 | G7 | Missing, stale or wide prices, unknown assets and overflow only ever reduce what is backed |
 | G8 | (Floor) A new binary deploys only after ≥ 72h without veto. While the program is stopped, a live quorum's approval of that exact frozen buffer can deploy it sooner. Any live guardian stops the program instantly; a live quorum restores the snapshot, verified byte-identical to the stopped code. |
@@ -288,9 +288,9 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [07 Integration](docs/07-INTEGRATION.md) | How a protocol integrates; calibration; Harbor |
 | [08 Scenarios](docs/08-SCENARIOS.md) | S1 Drift, S4 bank run, S7 loosen, S8 one-transaction attack, S9 honest borrower, S10 Floor, S11 liquidation cascade: where each runs and what it showed |
 | [09 Verification](docs/09-VERIFICATION.md) | The method, every result, every bug it found |
-| [10 Build plan](docs/10-BUILD-PLAN.md) | What remains to 12 Oct, cut rules, risks |
+| [10 Build log](docs/10-BUILD-PLAN.md) | What was built when, what was planned and not done, what comes next, risks |
 | [11 Business](docs/11-BUSINESS.md) | Market, pricing, go-to-market, competition, moat |
-| [12 Submission](docs/12-SUBMISSION.md) | Colosseum checklist, video scripts, Q&A |
+| [12 Submission](docs/12-SUBMISSION.md) | Where to check each claim, go-to-market, prior-code disclosure, team |
 | [13 Sources](docs/13-SOURCES.md) | Every URL and source path |
 | [14 State of the art](docs/14-STATE-OF-THE-ART.md) | Every mechanism compared with the best shipped systems (Wormhole NTT, CCIP, Kamino, Project 0, MetaMorpho, Lido, Aave, network calculus): what we took, what we rejected, why |
 | [15 Adversarial review](docs/15-ADVERSARIAL-REVIEW.md) | An internal red-team pass on the code and the idea: what an attacker who knows every rule gets, what was fixed, what is still open |

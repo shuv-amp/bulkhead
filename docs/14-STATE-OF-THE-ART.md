@@ -124,14 +124,13 @@ Solana DeFi has no equivalent. Our census: 37 of 54 tracked multisigs have a 0-h
 | Guided fuzzing of Solana programs | **Trident** (Ackee; flows + invariants) | Our program-vs-model differential covers the same ground with an exact oracle; Trident flows are a planned addition |
 | Verifiable builds | OtterSec `solana-verify` | Required before any mainnet claim |
 
-## 7. Product-level check: what won recently, and what is crowded
+## 7. Product-level check: nearby projects, and what is crowded
 
-- **Colosseum Frontier (Apr–May 2026):**
-  - 2,857 submissions, 26 winners, grand champion a robotics DePIN (CrowdBrain).
-  - Exactly one security winner: **Sudont**, "agentic crypto security platform providing bare-metal execution firewall and local RPC." That is user/agent-side, not protocol custody.
-  - YieldCompass (risk scoring; builds `solana-upgrade-watch`) also won.
+- **Recent Solana security projects (Colosseum Frontier, Apr–May 2026):**
+  - **Sudont**, an "agentic crypto security platform providing bare-metal execution firewall and local RPC": user and agent side, not protocol custody.
+  - **YieldCompass**, risk scoring, which builds `solana-upgrade-watch`: it watches upgrade authorities; it does not hold them.
 
-  Security can win, but winners showed users and a clear product. Our answers: Floor's one-transaction adoption, and the status page / exit-window view that users and curators can read.
+  Neither sits in the path of a protocol's money. What users and curators need from a protocol-side control is something they can read and adopt: Floor's one-transaction adoption, and the status page's worst case and exit-window view.
 - **Crowding for custody-level limits on Solana:** Sentinel (loosenable, not custody) and Holdfast (human pause) remain the closest (`01 §8`). Nothing found holds vault custody with a backed/unbacked split.
 
 ## 7b. STRIDE (the Solana ecosystem's own scorecard)

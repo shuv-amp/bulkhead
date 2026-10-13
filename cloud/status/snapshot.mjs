@@ -3,7 +3,7 @@
 //   node cloud/status/snapshot.mjs <rpc> <vaultProgram> <protocolProgram> <mint,...> [funded keypair]
 // With a funded keypair it also simulates the program's own `attest` and
 // asserts that the page's local computation (lib/limits.mjs) agrees exactly.
-import { Rpc, decodeProtocol, decodeVault } from "../lib/solana.mjs";
+import { Rpc, decodeProtocol, decodeVault, b58encode, key } from "../lib/solana.mjs";
 import { VaultClient } from "../lib/bulkhead.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 import { readOpenChanges, openExit, duration } from "../lib/changes.mjs";
@@ -15,8 +15,17 @@ if (!mints) {
   process.exit(2);
 }
 const rpc = new Rpc(url);
+// A missing account is a wrong id or cluster, not a crash.
+async function need(k, what) {
+  const acc = await rpc.account(k);
+  if (!acc) {
+    console.error(`no ${what} account at ${b58encode(key(k))} on ${new URL(url).host}: check the ids and the cluster`);
+    process.exit(1);
+  }
+  return acc;
+}
 const vc = await new VaultClient(vaultProgram, protocolProgram).init();
-const p = decodeProtocol((await rpc.account(vc.protocol)).bytes);
+const p = decodeProtocol((await need(vc.protocol, "protocol")).bytes);
 const slot = await rpc.call("getSlot", [{ commitment: "confirmed" }]);
 const now = await rpc.call("getBlockTime", [slot]);
 const live = p.guardians.filter((_, i) => now - p.lastHeartbeat[i] <= p.heartbeatIntervalS).length;
@@ -36,8 +45,8 @@ try {
 let mismatches = 0;
 for (const mint of mints.split(",")) {
   const { vault, vaultTokens } = await vc.vault(mint);
-  const v = decodeVault((await rpc.account(vault)).bytes);
-  const balance = new DataView((await rpc.account(vaultTokens)).bytes.buffer).getBigUint64(64, true);
+  const v = decodeVault((await need(vault, "vault")).bytes);
+  const balance = new DataView((await need(vaultTokens, "vault token")).bytes.buffer).getBigUint64(64, true);
   const a = attestLocal(v, p, balance, now);
   const d = v.decimals;
   console.log(`vault     ${mint.slice(0, 8)}… balance ${fmt(a.balance, d)}`);
