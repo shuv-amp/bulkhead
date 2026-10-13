@@ -71,6 +71,9 @@ pub enum VaultError {
     /// An eleventh vault before the seal, which could then never execute
     /// (finding 87).
     TooManyVaults,
+    /// A lifeboat move of a mint that charges, or can be set to charge, a
+    /// transfer fee: each round trip would burn depositors' value (finding 97).
+    FeeBearingMint,
 }
 
 impl From<VaultError> for ProgramError {

@@ -327,9 +327,13 @@ pub fn release(
     // holder, draining this mint through the unfreezable backed lane and
     // taking away the holder's instant own-deposit exit (docs/09, finding 74).
     // Without the signature the excess is unbacked: limited and freezable.
+    // The caller PDA signs every release, so its signature is never consent:
+    // an integrator that deposits through its caller PDA (a pooled ledger)
+    // would otherwise have every loan against that ledger consented by the
+    // program alone (docs/09, finding 98). Its own balance still leaves.
     let mut backed = ledger.backed_amount(&v.mint, amount, &lookup);
     let own = ledger.net(&v.mint).clamp(0, u64::MAX as i128) as u64;
-    if !accounts.iter().any(|a| a.is_signer() && key(a) == owner) {
+    if owner == p.caller || !accounts.iter().any(|a| a.is_signer() && key(a) == owner) {
         backed = backed.min(own);
     }
     // A freeze stops new loans too. A loan against allowlisted collateral is

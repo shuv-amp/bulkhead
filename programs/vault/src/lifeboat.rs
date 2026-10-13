@@ -70,6 +70,9 @@ pub fn move_in(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
     {
         return Err(VaultError::WrongVault.into());
     }
+    if token::may_charge_transfer_fee(mint)? {
+        return Err(VaultError::FeeBearingMint.into());
+    }
     let bump = check_lifeboat(program_id, &v.protocol, &v.mint, lifeboat)?;
     if lifeboat.is_data_empty() {
         check_system(acc(accounts, 8)?)?;

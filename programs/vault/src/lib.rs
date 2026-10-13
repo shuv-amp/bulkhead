@@ -37,11 +37,11 @@ pub use error::VaultError;
 pub use state::{change, Asset, Backing, Change, Protocol, Ticket, Vault, MAX_GUARDIANS};
 // Pure byte parsers, exported for the fuzz targets (`fuzz/`).
 pub use pyth::{parse as parse_price_update, PriceUpdate};
-pub use token::{mint_policy_decimals, token_account_fields};
+pub use token::{mint_policy_decimals, token_account_fields, transfer_fee_possible};
 
 use bulkhead_core::ema::ema_update;
 use bulkhead_core::governance::{
-    MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
+    guardian_set_ok, MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
 };
 use bulkhead_core::limiter::capacity_base;
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
@@ -436,8 +436,7 @@ pub(crate) fn parse_guardian_set(
     }
     let threshold = r.u8()?;
     let interval = r.i64()?;
-    if threshold < MIN_GUARDIAN_THRESHOLD
-        || threshold as usize > count
+    if !guardian_set_ok(count as u8, threshold)
         || !(MIN_HEARTBEAT_INTERVAL_S..=MAX_HEARTBEAT_INTERVAL_S).contains(&interval)
     {
         return Err(VaultError::InvalidGuardians.into());

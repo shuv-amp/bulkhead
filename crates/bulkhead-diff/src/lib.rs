@@ -325,6 +325,13 @@ impl Session {
                     governance::can_eject(ap, al, th, target, count) as u8
                 ))
             }
+            "GV" => {
+                let (count, th): (u8, u8) = (t.p()?, t.p()?);
+                Ok(format!(
+                    "GV {}",
+                    governance::guardian_set_ok(count, th) as u8
+                ))
+            }
             "FH" => {
                 let bytes = decode_hex_or_empty(t.next()?)?;
                 Ok(format!("FH {}", floor::murmur3_32(&bytes)))

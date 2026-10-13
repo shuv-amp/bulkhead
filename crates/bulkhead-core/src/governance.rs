@@ -119,6 +119,15 @@ pub fn quorum(approvals: u8, alive: u8, threshold: u8) -> bool {
 /// stop: unfreeze, restore and eject always need at least two live guardians.
 pub const MIN_GUARDIAN_THRESHOLD: u8 = 2;
 
+/// Whether a guardian set of `count` keys may use `threshold`: at least two to
+/// undo a stop, and fewer than all of them, so the others can always reach a
+/// quorum without a rogue and eject it (finding 96: in an n-of-n set nobody
+/// can be ejected, so one guardian kept a program stopped for good). A set
+/// therefore has at least 3 keys. Both programs check every set with this.
+pub fn guardian_set_ok(count: u8, threshold: u8) -> bool {
+    count <= 8 && threshold >= MIN_GUARDIAN_THRESHOLD && threshold < count
+}
+
 /// Whether a live quorum of the *other* guardians may eject guardian `target`
 /// immediately (the L2BEAT Security Council model: any single guardian may
 /// stop, a quorum may always undo a minority). Without this, one malicious

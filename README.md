@@ -39,7 +39,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 | Rule | What it means |
 |---|---|
 | 🟢 **Your own money is never held** | Taking back your own deposit is never throttled, frozen or priced. No oracle, no limit, no freeze. |
-| 🔵 **Everything else is rate-limited** | Limits refill at **2% of the vault per hour** and **5% per day**, so at most 4% leaves in any hour and 10% in any day. Above that, payouts wait in a public queue. |
+| 🔵 **Everything else is rate-limited** | Limits refill at **2% of the vault per hour** and **5% per day**, so of the payouts asked for in any hour at most 4% are paid within it, and 10% of a day's. Above that, payouts wait at least 6 hours in a public queue any guardian can cancel. |
 | ⏳ **Loosening takes 72 hours** | Tightening is instant. Loosening waits 72h, a constant no admin can lower, and any guardian can veto it. |
 | 🛑 **Guardians stop, never steal** | Any guardian can freeze, veto or stop. None can move a single token. |
 | 🔒 **The upgrade key is fenced too** | Floor holds the program's upgrade key. New code waits 72h in public; one guardian can stop the program; a quorum restores it byte for byte. |
@@ -49,7 +49,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 <br>
 
-The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes. A deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so the most that can leave is **4% in any hour and 10% in any day**. Above that, payouts wait in a public queue that guardians can freeze.
+The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes. A deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so of the payouts requested from any moment on, at most **4% are paid within the hour and 10% within the day**. Above that, payouts wait at least 6 hours in a public queue that guardians can freeze and cancel. Queued payouts can come due together: a single request for 6.25% of the vault, made openly, is paid in one go 6 hours later unless a guardian cancels it (`docs/09`, finding 102).
 
 Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
 
@@ -78,7 +78,7 @@ flowchart LR
     V -->|"own deposit:<br/>always instant"| OK["✅ paid"]
     V -->|"within 2%/h · 5%/day"| OK
     V -->|"over the limit"| Q["⏳ public queue"]
-    G["Guardians<br/>(2–8 keys)"] -.->|"freeze · cancel"| Q
+    G["Guardians<br/>(3–8 keys)"] -.->|"freeze · cancel"| Q
     G -.->|"veto loosening"| V
     F["Floor<br/>holds the upgrade key"] -->|"new code waits 72h"| PR["Protocol program"]
     G -.->|"stop · veto"| F
@@ -93,7 +93,7 @@ flowchart LR
 | Does **not** stop | Outflow within the limits: with nobody responding, up to 10% of the vault in a day. Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
 | Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
 
-**Who the guardians are.** When a protocol registers, it names 2–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly, so a stolen guardian key means denial of service until then, never theft.
+**Who the guardians are.** When a protocol registers, it names 3–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly (the threshold is always below the number of guardians, so the others can always reach one), so a stolen guardian key means denial of service until then, never theft.
 
 **Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian, limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day" through the unbacked lane, with absolute caps set. It excludes oracle risk on backed loans. A patient attacker who paces payouts under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2).
 
