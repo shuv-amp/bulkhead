@@ -4124,7 +4124,8 @@ impl Ledgered {
             &self.m.vault_program,
         );
         // Harbor derives its caller PDA on every call, at the same cost per
-        // step (its program id, and so this bump, differ between machines).
+        // step. Harbor's program id differs between machines, and with it
+        // this bump and the protocol PDA in the ticket's seeds.
         let (_, caller_bump) = Address::find_program_address(&[b"bulkhead-caller"], &self.m.harbor);
         let quote = self.m.vault_ix(23, &release_args(amount, nonce), qacc);
         let q = self.env.ok(&[quote], &[&b]);
@@ -4182,7 +4183,7 @@ struct Cost {
 /// Every case: under 80,000 CU (about 77k in the worst case measured) apart from two PDA bump
 /// searches, each 1,500 CU per step the bump sits below 255: Harbor's caller
 /// PDA (its program id decides it) and, when a ticket is created, the ticket's
-/// (the payer and nonce decide it; half of all tickets need none); and, through Harbor,
+/// (the protocol, payer and nonce decide it; half of all tickets need none); and, through Harbor,
 /// 14 fixed keys plus `mints` (asset, price) pairs, all distinct.
 fn assert_cheap(c: &Cost, mints: usize) {
     let net = c.cu - 1_500 * c.bump_steps;
@@ -4230,7 +4231,7 @@ fn release_cost_report(slots: usize) -> (usize, usize) {
         assert_eq!(c.o.backed, 10 * USDC, "a new position, backed");
     } else {
         assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 10 * USDC), "no slot: nothing backed");
-        // So no price is read: the price accounts may all be one placeholder
+        // So no price can change the outcome: the price accounts may all be one placeholder
         // (`07` §2), and the payout then fits a legacy transaction.
         l.placeholder_prices = true;
         let c = l.measure("the same, placeholder prices", slots, 10 * USDC);
