@@ -64,7 +64,7 @@ fn parse(
                 || (kind == change::SET_ADMIN && *target == p.lifeboat_destination)
                 || (kind == change::SET_ADMIN
                     && (*target == p.recovery
-                        || p.guardians[..p.guardian_count as usize].contains(target)))
+                        || p.guardian_index(target).is_some()))
             {
                 return Err(VaultError::InvalidInstruction.into());
             }
@@ -72,7 +72,7 @@ fn parse(
         }
         // The admin and the recovery key stay distinct, or recovery means nothing.
         change::SET_RECOVERY => {
-            if *target == p.admin || p.guardians[..p.guardian_count as usize].contains(target) {
+            if *target == p.admin || p.guardian_index(target).is_some() {
                 return Err(VaultError::InvalidInstruction.into());
             }
             Parsed::Key(*target)
@@ -544,7 +544,7 @@ pub fn replace_recovery(
     let recovery = R::args(args).key()?;
     let mut p = load_protocol(program_id, acc(accounts, 0)?)?;
     require_admin(&p, acc(accounts, 1)?)?;
-    if recovery == p.admin || p.guardians[..p.guardian_count as usize].contains(&recovery) {
+    if recovery == p.admin || p.guardian_index(&recovery).is_some() {
         return Err(VaultError::InvalidInstruction.into());
     }
     // An abdicated recovery key is fixed for good, and nothing changes while

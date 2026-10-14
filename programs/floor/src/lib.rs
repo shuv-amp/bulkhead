@@ -859,15 +859,12 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
         // The owner is never a guardian (as `parse_guardian_set` keeps it
         // from the other side), or the owner's limits fall away (finding 57).
         kind::SET_OWNER => {
-            if target == [0; 32]
-                || target == c.recovery
-                || c.guardians[..c.guardian_count as usize].contains(&target)
-            {
+            if target == [0; 32] || target == c.recovery || c.guardian_index(&target).is_some() {
                 return Err(FloorError::InvalidInstruction.into());
             }
         }
         kind::SET_RECOVERY => {
-            if target == c.owner || c.guardians[..c.guardian_count as usize].contains(&target) {
+            if target == c.owner || c.guardian_index(&target).is_some() {
                 return Err(FloorError::InvalidInstruction.into());
             }
         }
@@ -1214,15 +1211,14 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
                 }
                 kind::SET_OWNER => {
                     if c.pending_target == c.recovery
-                        || c.guardians[..c.guardian_count as usize].contains(&c.pending_target)
+                        || c.guardian_index(&c.pending_target).is_some()
                     {
                         return Err(FloorError::InvalidInstruction.into());
                     }
                     c.owner = c.pending_target;
                 }
                 kind::SET_RECOVERY => {
-                    if c.pending_target == c.owner
-                        || c.guardians[..c.guardian_count as usize].contains(&c.pending_target)
+                    if c.pending_target == c.owner || c.guardian_index(&c.pending_target).is_some()
                     {
                         return Err(FloorError::InvalidInstruction.into());
                     }
@@ -1417,7 +1413,7 @@ fn replace_recovery(
         return Err(FloorError::NotOwner.into());
     }
     let recovery = k32_arg(args, 0)?;
-    if recovery == c.owner || c.guardians[..c.guardian_count as usize].contains(&recovery) {
+    if recovery == c.owner || c.guardian_index(&recovery).is_some() {
         return Err(FloorError::InvalidInstruction.into());
     }
     let alive = c.alive_mask(now()?);
