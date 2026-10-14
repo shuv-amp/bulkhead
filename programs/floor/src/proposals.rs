@@ -224,7 +224,7 @@ pub(crate) fn approve(
 //   The new authority signs (`SetAuthorityChecked`): a mistyped key nobody
 //   holds fails here, while the config still exists, instead of leaving the
 //   program with no one able to upgrade it (issue #39).
-// SetGuardians / SetOwner / SetDelay: 0 config [w].
+// SetGuardians / SetOwner / SetDelay / SetRecovery: 0 config [w].
 pub(crate) fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let c = load_config(program_id, acc(accounts, 0)?)?;
     let t = now()?;
@@ -487,11 +487,13 @@ fn execute_config(
             }
             c.recovery = c.pending_target;
         }
-        _ => {
+        kind::SET_DELAY => {
             let d = i64_arg(&payload[..len], 0)?;
             check_delay(d)?;
             c.upgrade_delay_s = d;
         }
+        // Only the four setting kinds reach this function (`execute`).
+        _ => return Err(FloorError::WrongProposalKind.into()),
     }
     let (k, id) = (c.pending_kind, c.pending_id);
     c.clear_pending();

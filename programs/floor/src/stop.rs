@@ -230,7 +230,7 @@ pub(crate) fn restore_snapshot(
     ) {
         return Err(FloorError::NoQuorum.into());
     }
-    // As in `execute`: the snapshot buffer's rent returns to the owner.
+    // As in `execute_code`: the snapshot buffer's rent returns to the owner.
     if key(acc(accounts, 4)?) != c.owner {
         return Err(FloorError::NotOwner.into());
     }
