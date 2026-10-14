@@ -85,7 +85,7 @@ text (vaddr 2^32): mov64 r1, 0 ; mov64 r2, len ; syscall sol_log_ ; mov64 r0, 0x
 
 ## 6. Instructions
 
-Account lists and data layouts are documented above each handler in `programs/floor/src/lib.rs`.
+Account lists and data layouts are documented above each handler in `programs/floor/src/`: `register.rs`, `stop.rs` (stage, pin, abort, restore, close a buffer), `proposals.rs` (propose, veto, approve, execute, cancel) and `guardians.rs` (heartbeat, eject, replace the recovery key); the instruction and event ids are in `lib.rs`.
 
 | # | Instruction | Signer | Effect |
 |---|---|---|---|
@@ -106,12 +106,12 @@ Account lists and data layouts are documented above each handler in `programs/fl
 
 ## 7. Measured
 
-Real agave loader, LiteSVM with the mainnet feature set (`programs/tests/tests/floor.rs`), measured 8 Oct 2026 on a macOS (arm64) build of this tree:
+Real agave loader, LiteSVM with the mainnet feature set (`programs/tests/tests/floor.rs`), measured 14 Oct 2026 on a macOS (arm64) build of this tree:
 
 | Operation | Compute units |
 |---|---|
-| Stop a ~200 KB program, including byte-for-byte snapshot verification | 10,312 |
-| Restore the ~200 KB snapshot (guardian quorum) | 8,149 |
+| Stop a ~200 KB program, including byte-for-byte snapshot verification | 10,461 |
+| Restore the ~200 KB snapshot (guardian quorum) | 8,225 |
 
 A snapshot buffer costs rent for a copy of the program (about 5,080 lamports per byte at current rent, the same on mainnet and devnet on 28 Sep 2026; about 1.04 SOL for 200 KB). The rent is returned when a restore consumes the buffer. A pin that is replaced or cleared by an upgrade, and a proposal's buffer after a cancel or a stop, return theirs through `close_buffer` (the owner), and a release closes the abort buffer and the pin. That is the price of a one-instruction, trustless undo.
 

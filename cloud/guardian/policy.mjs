@@ -507,7 +507,7 @@ function decodeFields(ev) {
     case "vault:change_executed":
       return { kind: "change_executed", id: u64(f[0]), changeKind: f[1]?.[0] };
     // A stop, a guardian ejected, a restore and a restore approval
-    // (programs/floor/src/lib.rs, `ev::ABORTED` and the others). These went
+    // (programs/floor/src/lib.rs `ev`, emitted from the handlers in programs/floor/src/). These went
     // to "other" and were dropped: a stop was noticed only by the minute's
     // config check (45 s late on a validator), and one a quorum undid within
     // the minute, an ejection or a restore approval never at all (docs/09,

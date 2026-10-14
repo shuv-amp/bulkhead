@@ -1,6 +1,6 @@
 # 07 — Integration guide (and Harbor, the reference integration)
 
-Exact account lists and data layouts are documented above each handler in `programs/floor/src/lib.rs` and `programs/vault/src/*.rs`. Working instruction builders (Rust) are in `programs/tests/tests/common/`, and the zero-dependency JavaScript client is in `cloud/lib/`.
+Exact account lists and data layouts are documented above each handler in `programs/floor/src/*.rs` and `programs/vault/src/*.rs`. Working instruction builders (Rust) are in `programs/tests/tests/common/`, and the zero-dependency JavaScript client is in `cloud/lib/`.
 
 ## 1. Floor (Tier 0): one instruction, zero code changes
 
