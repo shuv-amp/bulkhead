@@ -4117,6 +4117,12 @@ impl Ledgered {
         let mut qacc = vec![AccountMeta::new_readonly(self.m.caller, false)];
         qacc.extend(ix.accounts[3..].iter().cloned());
         let nonce = u64::from_le_bytes(ix.data[9..17].try_into().unwrap());
+        // The ticket PDA's bump: `release` derives it on chain only when part
+        // of the payout queues, and each step below 255 costs extra compute.
+        let (_, ticket_bump) = Address::find_program_address(
+            &[b"ticket", self.m.protocol.as_ref(), payer.as_ref(), &nonce.to_le_bytes()],
+            &self.m.vault_program,
+        );
         let quote = self.m.vault_ix(23, &release_args(amount, nonce), qacc);
         let q = self.env.ok(&[quote], &[&b]);
         let quote_cu = q.compute_units_consumed;
@@ -4135,7 +4141,7 @@ impl Ledgered {
         assert_eq!((o.backed, o.instant, o.queued), (quoted.backed, quoted.instant, quoted.queued), "quote and release agree");
         println!(
             "[{label}] slots={} (asset, price) accounts={pair_accounts} | CU: harbor tx {cu}, vault inside CPI {vault_cu}, \
-             direct quote_release {quote_cu} | backed={} instant={} queued={}",
+             direct quote_release {quote_cu} | backed={} instant={} queued={} | ticket bump {ticket_bump}",
             self.slots,
             o.backed / USDC,
             o.instant / USDC,
@@ -4148,26 +4154,33 @@ impl Ledgered {
             PACKET as i64 - s1 as i64,
             PACKET as i64 - s1cb as i64,
         );
-        Cost { o, cu, pair_accounts, keys2: k2, size2: s2, size1: s1 }
+        // The bump search runs only when a ticket is created.
+        let bump_steps = if o.queued > 0 { 255 - ticket_bump as u64 } else { 0 };
+        Cost { o, cu, bump_steps, pair_accounts, keys2: k2, size2: s2, size1: s1 }
     }
 }
 
-/// What one release cost: the outcome, the transaction's compute, the (asset,
-/// price) accounts it named, and the legacy transaction's keys and size with a
-/// relayer paying (two signatures) and the user paying (one).
+/// What one release cost: the outcome, the transaction's compute and the
+/// ticket PDA's bump-search steps in it, the (asset, price) accounts it named,
+/// and the legacy transaction's keys and size with a relayer paying (two
+/// signatures) and the user paying (one).
 struct Cost {
     o: Outcome,
     cu: u64,
+    bump_steps: u64,
     pair_accounts: usize,
     keys2: usize,
     size2: usize,
     size1: usize,
 }
 
-/// Every case: under 85,000 CU (the worst measured is about 77k), and, through
-/// Harbor, 14 fixed keys plus `mints` (asset, price) pairs, all distinct.
+/// Every case: under 80,000 CU (about 77k at most) apart from the ticket PDA's
+/// bump search, which costs 1,500 CU per step its bump sits below 255 (half of
+/// all tickets need none; the payer and nonce decide it); and, through Harbor,
+/// 14 fixed keys plus `mints` (asset, price) pairs, all distinct.
 fn assert_cheap(c: &Cost, mints: usize) {
-    assert!(c.cu < 85_000, "{} CU", c.cu);
+    let net = c.cu - 1_500 * c.bump_steps;
+    assert!(net < 80_000, "{} CU, {} of them the bump search", c.cu, c.cu - net);
     assert_eq!(c.pair_accounts, 2 * mints, "one (asset, price) pair per mint");
     assert_eq!(c.keys2, 14 + 2 * mints);
 }
@@ -4221,7 +4234,8 @@ fn release_cost_report(slots: usize) -> (usize, usize) {
     outside
 }
 
-/// Finding 104: compute is never the limit (at most about 77k CU), the size is.
+/// Finding 104: compute is never the limit (about 77k CU at most, plus 1,500 per
+/// bump step when a ticket is created), the size is.
 /// With a full ledger (8 mints), a borrow still fits a legacy transaction (1,176
 /// of 1,232 bytes with a relayer paying), but paying a ninth mint does not
 /// (1,242 bytes) unless the user pays the fees; an integrator's own accounts
