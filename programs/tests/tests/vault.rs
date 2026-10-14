@@ -4179,7 +4179,7 @@ struct Cost {
     size1: usize,
 }
 
-/// Every case: under 80,000 CU (about 77k at most) apart from two PDA bump
+/// Every case: under 80,000 CU (about 77k in the worst case measured) apart from two PDA bump
 /// searches, each 1,500 CU per step the bump sits below 255: Harbor's caller
 /// PDA (its program id decides it) and, when a ticket is created, the ticket's
 /// (the payer and nonce decide it; half of all tickets need none); and, through Harbor,
@@ -4240,8 +4240,8 @@ fn release_cost_report(slots: usize) -> (usize, usize) {
     outside
 }
 
-/// Finding 104: compute is never the limit (about 77k CU at most, plus 1,500 per
-/// bump step when a ticket is created), the size is.
+/// Finding 104: in these cases compute is not the limit (about 77k CU net of PDA
+/// bump searches; it grows with the search, so integrators simulate), the size is.
 /// With a full ledger (8 mints), a borrow still fits a legacy transaction (1,176
 /// of 1,232 bytes with a relayer paying), but paying a ninth mint does not
 /// (1,242 bytes) unless the user pays the fees; an integrator's own accounts
