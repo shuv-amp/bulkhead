@@ -4123,6 +4123,9 @@ impl Ledgered {
             &[b"ticket", self.m.protocol.as_ref(), payer.as_ref(), &nonce.to_le_bytes()],
             &self.m.vault_program,
         );
+        // Harbor derives its caller PDA on every call, at the same cost per
+        // step (its program id, and so this bump, differ between machines).
+        let (_, caller_bump) = Address::find_program_address(&[b"bulkhead-caller"], &self.m.harbor);
         let quote = self.m.vault_ix(23, &release_args(amount, nonce), qacc);
         let q = self.env.ok(&[quote], &[&b]);
         let quote_cu = q.compute_units_consumed;
@@ -4141,7 +4144,7 @@ impl Ledgered {
         assert_eq!((o.backed, o.instant, o.queued), (quoted.backed, quoted.instant, quoted.queued), "quote and release agree");
         println!(
             "[{label}] slots={} (asset, price) accounts={pair_accounts} | CU: harbor tx {cu}, vault inside CPI {vault_cu}, \
-             direct quote_release {quote_cu} | backed={} instant={} queued={} | ticket bump {ticket_bump}",
+             direct quote_release {quote_cu} | backed={} instant={} queued={} | ticket bump {ticket_bump}, caller bump {caller_bump}",
             self.slots,
             o.backed / USDC,
             o.instant / USDC,
@@ -4154,14 +4157,16 @@ impl Ledgered {
             PACKET as i64 - s1 as i64,
             PACKET as i64 - s1cb as i64,
         );
-        // The bump search runs only when a ticket is created.
-        let bump_steps = if o.queued > 0 { 255 - ticket_bump as u64 } else { 0 };
+        // Harbor's caller search runs on every call; the ticket's only when a
+        // ticket is created.
+        let ticket_steps = if o.queued > 0 { 255 - ticket_bump as u64 } else { 0 };
+        let bump_steps = 255 - caller_bump as u64 + ticket_steps;
         Cost { o, cu, bump_steps, pair_accounts, keys2: k2, size2: s2, size1: s1 }
     }
 }
 
 /// What one release cost: the outcome, the transaction's compute and the
-/// ticket PDA's bump-search steps in it, the (asset, price) accounts it named,
+/// PDA bump-search steps in it (Harbor's caller, and the ticket's), the (asset, price) accounts it named,
 /// and the legacy transaction's keys and size with a relayer paying (two
 /// signatures) and the user paying (one).
 struct Cost {
@@ -4174,13 +4179,14 @@ struct Cost {
     size1: usize,
 }
 
-/// Every case: under 80,000 CU (about 77k at most) apart from the ticket PDA's
-/// bump search, which costs 1,500 CU per step its bump sits below 255 (half of
-/// all tickets need none; the payer and nonce decide it); and, through Harbor,
+/// Every case: under 80,000 CU (about 77k at most) apart from two PDA bump
+/// searches, each 1,500 CU per step the bump sits below 255: Harbor's caller
+/// PDA (its program id decides it) and, when a ticket is created, the ticket's
+/// (the payer and nonce decide it; half of all tickets need none); and, through Harbor,
 /// 14 fixed keys plus `mints` (asset, price) pairs, all distinct.
 fn assert_cheap(c: &Cost, mints: usize) {
     let net = c.cu - 1_500 * c.bump_steps;
-    assert!(net < 80_000, "{} CU, {} of them the bump search", c.cu, c.cu - net);
+    assert!(net < 80_000, "{} CU, {} of them bump searches", c.cu, c.cu - net);
     assert_eq!(c.pair_accounts, 2 * mints, "one (asset, price) pair per mint");
     assert_eq!(c.keys2, 14 + 2 * mints);
 }
