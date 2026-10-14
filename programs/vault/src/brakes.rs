@@ -243,10 +243,13 @@ pub fn reset_backlog(program_id: &Address, accounts: &mut [AccountView]) -> Prog
     // never reads a capacity, so the reference alone is enough here.
     let params = params_from_config(&v.limits, v.ref_balance);
     let mut state = v.limiter_state();
+    // "Just emptied" at the latest time this vault has seen, not at a clock
+    // that stepped back: there an empty bucket ends earlier, and a reset right
+    // after a drain granted `C·δ/W` more than G1 allows (finding 101).
     core_reset(
         &mut state,
         &params,
-        t.saturating_mul(1_000),
+        t.max(v.ref_updated_s).saturating_mul(1_000),
         v.pending_tickets,
     )
     .map_err(|_| VaultError::TicketsPending)?;

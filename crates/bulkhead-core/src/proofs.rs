@@ -28,7 +28,8 @@ use crate::floor::{
     snapshot_matches, RestoreSource,
 };
 use crate::governance::{
-    can_eject, can_execute, freeze_until, guardian_alive, quorum, schedule, Abdications,
+    can_eject, can_execute, freeze_until, guardian_alive, guardian_set_ok, quorum, schedule,
+    Abdications,
 };
 use crate::limiter::{
     clamp_capacity, lane_always_closed, params_from_config, request, reset_backlog, Bucket,
@@ -313,6 +314,20 @@ fn eject_rules_hold() {
             can_eject(with_self, al, th, target, count)
                 == can_eject(without_self, al, th, target, count)
         );
+    }
+}
+
+/// FULL. A guardian set is accepted exactly when every guardian in it can be
+/// ejected by a live quorum of the others (finding 96): `guardian_set_ok` is
+/// the condition for ejection to be reachable at all, for every target.
+#[kani::proof]
+fn accepted_sets_can_eject_anyone() {
+    let (count, th, target): (u8, u8, u8) = (kani::any(), kani::any(), kani::any());
+    kani::assume(target < count);
+    let reachable = can_eject(0xFF, 0xFF, th, target, count);
+    assert!(guardian_set_ok(count, th) == reachable);
+    if guardian_set_ok(count, th) {
+        assert!(count >= 3 && th >= 2);
     }
 }
 

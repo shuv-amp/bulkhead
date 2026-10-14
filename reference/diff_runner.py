@@ -210,6 +210,8 @@ def gen_floor(r: random.Random) -> str:
         return (f"FR {r.choice(['S', 'P'])} {r.randrange(3)} {r.randrange(3)} {r.randrange(2)} "
                 f"{r.randrange(2)} {now} {eta} {exp}")
     if k == 6:
+        if r.random() < 0.2:
+            return f"GV {r.randrange(12)} {r.randrange(12)}"
         if r.random() < 0.5:   # realistic guardian sets, so both outcomes are common
             count = r.randrange(2, 9)
             th = r.randrange(1, count + 1)

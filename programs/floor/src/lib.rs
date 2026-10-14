@@ -39,8 +39,8 @@ use bulkhead_core::floor::{
     RestoreSource, BUFFER_DATA_OFFSET, PROGRAMDATA_DATA_OFFSET,
 };
 use bulkhead_core::governance::{
-    can_eject, can_execute, quorum, GovError, Schedule, CHANGE_EXPIRY_S, MAX_HEARTBEAT_INTERVAL_S,
-    MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
+    can_eject, can_execute, guardian_set_ok, quorum, GovError, Schedule, CHANGE_EXPIRY_S,
+    MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
 };
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
 use pinocchio::error::ProgramError;
@@ -380,7 +380,7 @@ fn parse_guardian_set(
         g[i] = k;
     }
     let threshold = args[1 + 32 * count];
-    if threshold < MIN_GUARDIAN_THRESHOLD || threshold as usize > count {
+    if !guardian_set_ok(count as u8, threshold) {
         return Err(FloorError::InvalidThreshold.into());
     }
     let interval = i64_arg(args, 2 + 32 * count)?;
@@ -1117,14 +1117,32 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
             }
             // Close what Floor still holds: after this nothing can (issue #37).
             let rest = accounts.get(5..).unwrap_or(&[]);
+            // Anyone may re-pin while the program is live, so a release naming
+            // the pin it read must not fail: a passed frozen copy of the live
+            // code stands in for the pin and is closed with the spares below,
+            // as in `abort` (finding 66). A stranger's re-pin keeps its rent.
+            let mut live_copy = false;
+            if c.status == STATUS_LIVE {
+                for a in rest {
+                    if key(a) != c.abort_buffer
+                        && check_frozen_buffer(program_id, &c, a).is_ok()
+                        && snapshot_identical(a, programdata)?
+                    {
+                        live_copy = true;
+                        break;
+                    }
+                }
+            }
             for held in [c.abort_buffer, c.snapshot_buffer] {
                 if held == [0; 32] {
                     continue;
                 }
-                let buffer = rest
-                    .iter()
-                    .find(|a| key(a) == held)
-                    .ok_or(FloorError::WrongBuffer)?;
+                let Some(buffer) = rest.iter().find(|a| key(a) == held) else {
+                    if held == c.snapshot_buffer && live_copy {
+                        continue;
+                    }
+                    return Err(FloorError::WrongBuffer.into());
+                };
                 check_frozen_buffer(program_id, &c, buffer)?;
                 cpi_close_buffer(&c, buffer, &accounts[4], authority)?;
             }

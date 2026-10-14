@@ -259,7 +259,7 @@ fn registration_requires_the_current_upgrade_authority() {
     let f = Floor::new(env.floor, program);
     let attacker = Keypair::new();
     env.fund(&attacker);
-    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let ix = f.register(
         &env.payer.pubkey(),
         &attacker.pubkey(),
@@ -284,7 +284,7 @@ fn registration_rejects_weak_settings() {
     let (program, _) = env.deploy(&honest_v1(), &team, 1024);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new().pubkey();
-    let (a, b) = (Keypair::new().pubkey(), Keypair::new().pubkey());
+    let (a, b, c) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
     let pay = env.payer.pubkey();
     let cases = [
         (
@@ -292,7 +292,7 @@ fn registration_rejects_weak_settings() {
                 &pay,
                 &team.pubkey(),
                 &owner,
-                &[a, b],
+                &[a, b, c],
                 2,
                 7 * DAY,
                 3 * DAY - 1,
@@ -306,6 +306,16 @@ fn registration_rejects_weak_settings() {
         (
             f.register(&pay, &team.pubkey(), &owner, &[a, a], 2, 7 * DAY, 3 * DAY),
             err::INVALID_GUARDIANS,
+        ),
+        // n-of-n: nobody could ever be ejected, so one rogue guardian kept
+        // the program stopped for good (finding 96).
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY),
+            err::INVALID_THRESHOLD,
+        ),
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 3, 7 * DAY, 3 * DAY),
+            err::INVALID_THRESHOLD,
         ),
         (
             f.register(
@@ -340,7 +350,7 @@ fn registration_survives_a_prefunded_config_address() {
     let ix =
         solana_system_interface::instruction::transfer(&env.payer.pubkey(), &f.config, 1_000_000);
     env.ok(&[ix], &[]);
-    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let owner = Keypair::new().pubkey();
     let ix = f.register(
         &env.payer.pubkey(),
@@ -488,7 +498,7 @@ fn a_new_guardian_set_waits_the_delay_and_is_vetoable() {
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let f = &p.f;
-    let attacker_keys = [Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let attacker_keys = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let set = Floor::guardian_set(&attacker_keys, 2, 7 * DAY);
     let zero = solana_address::Address::default();
     env.ok(
@@ -707,7 +717,7 @@ fn an_abort_binary_that_would_not_fit_is_refused_and_the_minimal_one_is_accepted
     let owner = Keypair::new();
     let guardian = Keypair::new();
     env.fund(&guardian);
-    let gs = [guardian.pubkey(), Keypair::new().pubkey()];
+    let gs = [guardian.pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let ix = f.register(
         &env.payer.pubkey(),
         &team.pubkey(),
@@ -1298,12 +1308,12 @@ fn a_guardian_is_never_the_recovery_key() {
     let (program, _) = env.deploy(&honest_v1(), &team, 1024);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new().pubkey();
-    let (a, b) = (Keypair::new().pubkey(), Keypair::new().pubkey());
-    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    let (a, b, c) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
+    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(b.as_ref());
     assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_GUARDIANS);
     let fresh = Keypair::new().pubkey();
-    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(fresh.as_ref());
     env.ok(&[ix], &[&team]);
     assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref());
@@ -1318,12 +1328,12 @@ fn registration_refuses_a_cut_off_recovery_key() {
     let (program, _) = env.deploy(&honest_v1(), &team, 1024);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new().pubkey();
-    let (a, b) = (Keypair::new().pubkey(), Keypair::new().pubkey());
+    let (a, b, c) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
     let pay = env.payer.pubkey();
-    let mut ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    let mut ix = f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(&Keypair::new().pubkey().as_ref()[..31]);
     assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_INSTRUCTION);
-    let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b], 2, 7 * DAY, 3 * DAY);
+    let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
     env.ok(&[ix], &[&team]);
 }
 
@@ -1434,4 +1444,39 @@ fn a_release_to_none_needs_the_owner_so_no_stranger_strands_a_spare() {
     assert_eq!(env.upgrade_authority(&f.programdata), None, "immutable");
     assert!(env.svm.get_account(&spare).map(|a| a.lamports == 0).unwrap_or(true), "spare closed");
     assert_eq!(env.account(&owner).lamports, before + rent + config_rent);
+}
+
+/// Anyone may re-pin while the program is live. A release had to name
+/// whatever was pinned when it executed, so a stranger landing `pin_snapshot`
+/// with its own copy of the live code just ahead of the owner's release made
+/// it fail (`WrongBuffer`), round after round until the proposal expired:
+/// the race finding 66 closed for `abort`. Now a passed frozen copy of the
+/// live code stands in for the pin, as in `abort`; the owner's buffers are
+/// closed to the owner, and the stranger's copy keeps the stranger's rent.
+#[test]
+fn a_strangers_re_pin_cannot_make_a_release_fail() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let owner = p.owner.pubkey();
+    let none = solana_address::Address::new_from_array([0; 32]);
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &none, &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    let read = [p.abort_buffer, p.snapshot];
+    let stranger = Keypair::new();
+    env.fund(&stranger);
+    let copy = env.write_buffer(&honest_v1(), &stranger);
+    env.set_buffer_authority(&copy, &stranger, &f.authority);
+    env.ok(&[f.pin_snapshot(&copy)], &[]);
+    // A buffer that is not a copy of the live code stands in for nothing.
+    let other = env.write_buffer(&honest_fix(), &stranger);
+    env.set_buffer_authority(&other, &stranger, &f.authority);
+    let ix = f.execute_release(&owner, None, &[p.abort_buffer, other]);
+    assert_eq!(env.fails(&[ix], &[&p.owner]), err::WRONG_BUFFER);
+    env.ok(&[f.execute_release(&owner, None, &read)], &[&p.owner]);
+    assert_eq!(env.upgrade_authority(&f.programdata), None);
+    for gone in read {
+        assert!(env.svm.get_account(&gone).is_none_or(|a| a.lamports == 0), "the owner's buffers are closed");
+    }
+    assert!(env.svm.get_account(&copy).is_some_and(|a| a.lamports > 0), "the stranger's copy keeps its rent");
 }

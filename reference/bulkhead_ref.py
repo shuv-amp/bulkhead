@@ -558,6 +558,11 @@ def quorum(approvals: int, alive: int, threshold: int) -> bool:
 MIN_GUARDIAN_THRESHOLD = 2
 
 
+def guardian_set_ok(count: int, threshold: int) -> bool:
+    """At least two to undo a stop, fewer than all, so the others can eject a rogue (finding 96)."""
+    return count <= 8 and MIN_GUARDIAN_THRESHOLD <= threshold < count
+
+
 def can_eject(approvals: int, alive: int, threshold: int, target: int, count: int) -> bool:
     """A live quorum of the other guardians ejects `target`; >= threshold must remain."""
     if not (0 <= target < count <= 8) or threshold < MIN_GUARDIAN_THRESHOLD:

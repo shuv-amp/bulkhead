@@ -794,3 +794,59 @@ fn lane_always_closed_is_exactly_a_bucket_without_bps_or_floor() {
     capped.long_cap = 1;
     assert!(!lane_always_closed(&capped));
 }
+
+/// Finding 102: G1 counts payouts by request time. At the defaults (2%/1h,
+/// 5%/24h, 6h delay) a single request for 6.25% of a 10M vault,
+/// `C_l·(W_l+D)/W_l`, is a ticket payable in one go 6h later; one unit more
+/// is not. What the queue gives is 6h in public to cancel it.
+#[test]
+fn one_request_can_queue_a_long_window_plus_the_delay() {
+    let cfg = LimitConfig {
+        short_bps: 200,
+        short_window_s: 3_600,
+        long_bps: 500,
+        long_window_s: 86_400,
+        min_queue_delay_s: 21_600,
+        short_floor: 0,
+        long_floor: 0,
+        short_cap: 0,
+        long_cap: 0,
+    };
+    let p = params_from_config(&cfg, 10_000_000);
+    let t = 1_800_000_000_000;
+    let mut s = LimiterState::default();
+    assert_eq!(
+        request(&mut s, &p, t, 625_000, 0),
+        Ok(Decision::Queued {
+            eta_ms: t + 21_600_000
+        })
+    );
+    let mut s = LimiterState::default();
+    assert!(
+        matches!(request(&mut s, &p, t, 625_001, 0), Ok(Decision::Queued { eta_ms }) if eta_ms > t + 21_600_000)
+    );
+}
+
+/// Finding 96: the guardian-set shape, at every boundary. At least two to undo
+/// a stop, fewer than all of them (so the others can eject a rogue), at most 8.
+#[test]
+fn guardian_set_shape_is_exact() {
+    use bulkhead_core::governance::guardian_set_ok;
+    for (count, threshold, ok) in [
+        (3, 2, true),
+        (8, 7, true),
+        (8, 2, true),
+        (2, 2, false), // n-of-n
+        (3, 3, false),
+        (8, 8, false),
+        (3, 1, false), // one key alone could undo a stop
+        (9, 8, false), // more than 8 guardians
+        (0, 0, false),
+    ] {
+        assert_eq!(
+            guardian_set_ok(count, threshold),
+            ok,
+            "{threshold}-of-{count}"
+        );
+    }
+}

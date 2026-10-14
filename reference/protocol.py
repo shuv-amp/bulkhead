@@ -25,6 +25,7 @@ Command table (all integers are decimal):
   GQ approvals alive threshold               quorum over live guardians    -> "GQ 0|1"
   GA mask kind                               abdicate, then check          -> "GA newmask abdicated(0|1)"
   GJ approvals alive threshold target count  eject a guardian?             -> "GJ 0|1"
+  GV count threshold                         guardian set shape allowed?   -> "GV 0|1"
   FH hex                                     murmur3_32 (syscall ids)      -> "FH u32"
   FB hex                                     loader-v3 buffer authority    -> "FB NONE" | "FB -" | "FB key"
   FP hex                                     loader-v3 programdata header  -> "FP NONE" | "FP slot key|-"
@@ -150,6 +151,9 @@ class Session:
         if cmd == "GJ":
             ap, al, th, target, count = map(int, a)
             return f"GJ {int(ref.can_eject(ap, al, th, target, count))}"
+        if cmd == "GV":
+            count, th = map(int, a)
+            return f"GV {int(ref.guardian_set_ok(count, th))}"
         if cmd == "FH":
             return f"FH {ref.murmur3_32(_hex(a[0]))}"
         if cmd == "FB":

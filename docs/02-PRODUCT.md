@@ -5,7 +5,7 @@
 | User | Their question | What Bulkhead gives them |
 |---|---|---|
 | **Protocol founder / security lead** (lending, perps, CDP stablecoins, yield vaults, treasuries) | "If our admin key, upgrade key or code is compromised, how much can leave before we react?" | A worst case, set in advance, enforced on-chain, that holds against their own compromised keys |
-| **Depositor** | "Can I always get my money out? How bad can a hack get?" | Own deposits are never throttled, frozen or priced by Bulkhead. A public line: "worst case right now: $X, then $Y per hour" |
+| **Depositor** | "Can I always get my money out? How bad can a hack get?" | Own deposits are never throttled, frozen or priced by Bulkhead. A public line: "worst case right now: $X, then $Y per hour", plus what is already queued and when it comes due (queued payouts can land together, `09` finding 102) |
 | **Guardian** (the team's ops key, the Bulkhead Cloud bot, a security firm) | "Let me stop the bleeding without being able to steal." | Freeze, cancel, extend, veto, abort. No power to move funds. |
 | **Curator / fintech distributor** | "Which venues can I explain to my risk committee?" | A published, verifiable bound per venue |
 | **Solana Foundation / STRIDE** | "Raise the security floor across protocols." | An open-source control that maps to circuit-breaker and incident-response checks |

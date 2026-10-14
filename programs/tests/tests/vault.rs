@@ -1287,6 +1287,54 @@ fn sealing_counts_the_spendable_lifeboat_balance_after_token_2022_fees() {
     w.env.ok(&[seal], &[]);
 }
 
+/// Finding 97: Token-2022 withholds a transfer fee even between two accounts
+/// the vault PDA owns, so a stolen admin key pairing `lifeboat_move` and
+/// `lifeboat_return` many times in one transaction burned depositors' value
+/// (30 round trips at 10% withheld almost all of it). The lifeboat now
+/// refuses a mint that charges a fee, or whose fee can be raised.
+#[test]
+fn the_lifeboat_refuses_a_mint_that_charges_or_can_charge_a_transfer_fee() {
+    let mut w = World::with_transfer_fee_mint();
+    let depositor = w.user();
+    w.deposit("usdc", &depositor, 1_000 * USDC);
+    w.seal();
+    w.env.advance(3 * DAY + 1);
+    w.refresh_prices();
+    let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
+    let mv = |w: &World, amount: u64| {
+        w.m.vault_ix(24, &amount.to_le_bytes(), vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.usdc.vault_tokens, false),
+            AccountMeta::new(lifeboat, false),
+            AccountMeta::new_readonly(w.usdc.mint, false),
+            AccountMeta::new_readonly(w.usdc.token_program, false),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+            AccountMeta::new(w.env.payer.pubkey(), true),
+            AccountMeta::new_readonly(SYSTEM, false),
+        ])
+    };
+    let before = w.env.balance(&w.usdc.vault_tokens);
+    assert_eq!(w.env.fails(&[mv(&w, before)], &[&w.m.admin]), verr::FEE_BEARING_MINT);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), before);
+
+    // The same mint with both fees at zero and no fee authority can't burn
+    // anything, so it may use the lifeboat.
+    let mut mint = w.env.svm.get_account(&w.usdc.mint).unwrap();
+    for at in [242usize, 260] {
+        mint.data[at + 16..at + 18].copy_from_slice(&0u16.to_le_bytes());
+    }
+    w.env.svm.set_account(w.usdc.mint, mint.clone()).unwrap();
+    w.env.ok(&[mv(&w, 10 * USDC)], &[&w.m.admin]);
+    assert_eq!(w.env.balance(&lifeboat), 10 * USDC);
+
+    // A fee authority could raise the fee at any time: refused again.
+    mint.data[170..202].copy_from_slice(Keypair::new().pubkey().as_ref());
+    w.env.svm.set_account(w.usdc.mint, mint).unwrap();
+    w.env.advance(1);
+    assert_eq!(w.env.fails(&[mv(&w, 10 * USDC)], &[&w.m.admin]), verr::FEE_BEARING_MINT);
+}
+
 #[test]
 fn a_guardian_quorum_can_return_funds_from_the_lifeboat() {
     let mut w = World::new();
@@ -1550,8 +1598,8 @@ fn nothing_loosens_while_the_seal_is_under_review() {
     let vault = w.usdc.vault;
     let zero = Address::default();
 
-    let puppets = [Keypair::new(), Keypair::new()];
-    let mut guardians = vec![2u8];
+    let puppets = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let mut guardians = vec![3u8];
     for k in &puppets {
         guardians.extend_from_slice(k.pubkey().as_ref());
     }
@@ -3408,6 +3456,42 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     assert_eq!(o.backed, 10_000 * USDC, "signed: a backed loan against the SOL");
 }
 
+/// Finding 98: the caller PDA signs every release, so its signature counted
+/// as consent when it owned the ledger itself (an integrator that deposits
+/// through its caller PDA, a pooled design). A compromised protocol program
+/// then borrowed USDC against the pool's SOL through the backed lane, with no
+/// user's signature. Now that excess is unbacked; the pool's own balance of
+/// the paid mint would still be backed.
+#[test]
+fn the_callers_own_signature_is_not_consent_to_a_loan() {
+    let mut w = World::new();
+    let lender = w.user();
+    w.deposit("usdc", &lender, 1_000_000 * USDC);
+    // A pooled ledger: 700 SOL deposited, then held under the caller PDA.
+    let pooler = w.user();
+    w.deposit("sol", &pooler, 700 * SOL);
+    let caller = w.m.caller;
+    let (from, (to, bump)) = (
+        w.m.backing(&pooler.pubkey()),
+        Address::find_program_address(&[b"backing", w.m.protocol.as_ref(), caller.as_ref()], &w.m.vault_program),
+    );
+    let mut acct = w.env.svm.get_account(&from).unwrap();
+    acct.data[40..72].copy_from_slice(caller.as_ref());
+    acct.data[72] = bump;
+    w.env.svm.set_account(to, acct).unwrap();
+    let mut gone = w.env.svm.get_account(&from).unwrap();
+    gone.data.fill(0);
+    gone.lamports = 0;
+    w.env.svm.set_account(from, gone).unwrap();
+    w.seal();
+    let both = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+    let pool_usdc = w.account("usdc", &caller);
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &pool_usdc, &caller, 50_000 * USDC, &both);
+    let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(o.backed, 0, "the caller's signature is not a borrower's consent");
+    assert_eq!(o.instant + o.queued, 50_000 * USDC, "all of it limited and freezable");
+}
+
 /// `propose_change` signed by `proposer` (the admin or the recovery key).
 fn propose_as(w: &World, proposer: &Address, kind: u8, target: &Address) -> (Instruction, u64) {
     let d = w.env.account(&w.m.protocol).data;
@@ -3484,6 +3568,24 @@ fn no_more_vaults_before_the_seal_than_the_seal_can_name() {
     assert_eq!(env.fails(&[ix], &[&m.admin]), verr::TOO_MANY_VAULTS);
 }
 
+/// Finding 96: in an n-of-n set nobody can be ejected (the others never reach
+/// a quorum without the rogue), so one guardian renewed freezes and vetoed
+/// every loosening for good. A set must have more keys than its threshold;
+/// a 3-of-4 is fine.
+#[test]
+fn an_n_of_n_guardian_set_is_refused() {
+    let mut w = World::new();
+    w.seal();
+    let keys: Vec<Address> = (0..4).map(|_| Keypair::new().pubkey()).collect();
+    let zero = Address::default();
+    for (set, th) in [(&keys[..2], 2u8), (&keys[..3], 3), (&keys[..4], 4)] {
+        let ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(set, th), None);
+        assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_GUARDIANS);
+    }
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&keys, 3), None);
+    w.env.ok(&[ix], &[&w.m.admin]);
+}
+
 /// The guardian-set payload for `SetGuardians`.
 fn guardian_set(keys: &[Address], threshold: u8) -> Vec<u8> {
     let mut d = vec![keys.len() as u8];
@@ -3514,7 +3616,7 @@ fn a_pre_seal_thief_cannot_seal_and_park_the_vault() {
     let (ix, _) = propose_as(&w, &w.m.admin.pubkey(), 6, &recovery.pubkey());
     w.env.ok(&[ix], &[&w.m.admin]); // genesis: at once
     let admin = w.m.admin.pubkey();
-    let puppets = [Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let puppets = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let thief = Keypair::new().pubkey();
     w.env.ok(&[
         w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&puppets, 2), None),
@@ -3626,4 +3728,79 @@ fn an_exit_stale_after_a_rotation_revives_only_if_the_same_admin_returns() {
     assert_eq!(protocol_admin(&w), a);
     w.env.ok(&[exit], &[&w.m.destination]);
     assert_eq!(w.env.balance(&dest), 1_000_000 * USDC);
+}
+
+/// Finding 100 (stated, not fixed): one withdraw-and-redeposit by a holder of
+/// most of the vault lowers the low-water base for two windows, but a payout
+/// made inside them is charged at the lowered capacity, and that reservation
+/// outlives the dip: an ordinary 100,000 payout, instant without the round
+/// trip, queues for 24h and leaves no instant room for a day. Availability
+/// only; G1 is unaffected. This pins today's behaviour so the fix planned for
+/// the audit has to change it on purpose.
+#[test]
+fn a_round_trip_dip_charges_payouts_at_the_dipped_capacity() {
+    use bulkhead_core::consts::LOW_WINDOW_S;
+    let run = |round_trip: bool| -> (Outcome, i64, u64, u64) {
+        let mut w = World::new();
+        let small = w.user();
+        let whale = w.user();
+        w.deposit("usdc", &small, 1_000_000 * USDC);
+        let whale_acc = w.deposit("usdc", &whale, 9_000_000 * USDC);
+        w.seal();
+        w.env.advance(2 * DAY);
+        assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 200_000 * USDC);
+        if round_trip {
+            let out = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_000_000 * USDC, &w.usdc_prices(false));
+            let back = w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_000_000 * USDC);
+            w.env.ok(&[out, back], &[&whale]);
+        }
+        w.env.advance(60);
+        let paid_at = w.env.time;
+        let user = Keypair::new();
+        let to = w.account("usdc", &user.pubkey());
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), 100_000 * USDC, &w.usdc_prices(false));
+        let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+        w.env.advance(2 * LOW_WINDOW_S + 60);
+        let after_dip = w.m.attest(&mut w.env, &w.usdc).available_now;
+        w.env.advance(20 * 3_600);
+        let after_21h = w.m.attest(&mut w.env, &w.usdc).available_now;
+        (o, paid_at, after_dip, after_21h)
+    };
+    let (o, _, after_dip, after_21h) = run(false);
+    assert_eq!((o.instant, o.queued), (100_000 * USDC, 0), "without the round trip: instant");
+    assert_eq!(after_dip, 198_000 * USDC, "2% of the 9.9M left");
+    assert_eq!(after_21h, 198_000 * USDC);
+    let (o, paid_at, after_dip, after_21h) = run(true);
+    assert_eq!((o.instant, o.queued), (0, 100_000 * USDC), "charged at a tenth of the capacity: queued");
+    assert_eq!(o.eta_s - paid_at, 86_400, "the payout waits a day, not 6h");
+    assert_eq!(after_dip, 0, "the base is back to 10M, yet no instant room");
+    assert_eq!(after_21h, 0, "and still none 21 hours after one round trip");
+}
+
+/// Finding 101: a reset clamps each bucket to "just emptied", and it used the
+/// raw clock. If the cluster clock stepped back by δ right after a drain, the
+/// admin alone (or one guardian) reset to `now − δ + W` and paid `C·δ/W`
+/// more than G1 allows. The reset now uses the latest time the vault has seen.
+#[test]
+fn a_reset_on_a_clock_that_stepped_back_grants_nothing_extra() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(2 * DAY);
+    let burst = w.m.attest(&mut w.env, &w.usdc).available_now;
+    assert_eq!(burst, 200_000 * USDC);
+    let user = Keypair::new();
+    let to = w.account("usdc", &user.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), burst, &w.usdc_prices(false));
+    assert_eq!(outcome(&w.env.ok(&[ix], &[&w.m.admin])).instant, burst);
+    w.env.advance(-3_600); // the clock steps back an hour
+    let reset = w.m.vault_ix(16, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+    ]);
+    w.env.ok(&[reset], &[&w.m.admin]);
+    w.env.advance(3_600); // back where the drain happened
+    assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 0, "no room beyond an empty bucket");
 }

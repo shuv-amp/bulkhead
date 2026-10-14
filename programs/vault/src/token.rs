@@ -145,6 +145,46 @@ pub fn rescales_ui_amount(mint: &AccountView) -> Result<bool, ProgramError> {
     Ok(false)
 }
 
+/// Whether a mint that passed `mint_policy_decimals` charges a transfer fee,
+/// or can be made to: TransferFeeConfig (1) with a fee config authority, or a
+/// non-zero older or newer fee. Token-2022 withholds the fee even between two
+/// accounts the vault PDA owns, so the lifeboat refuses such a mint: a stolen
+/// admin key could otherwise cycle it in and out many times in one
+/// transaction and burn depositors' value (docs/09, finding 97).
+pub fn may_charge_transfer_fee(mint: &AccountView) -> Result<bool, ProgramError> {
+    Ok(transfer_fee_possible(&mint.try_borrow()?))
+}
+
+/// `may_charge_transfer_fee` over raw mint bytes. The extension is
+/// `[config authority 32][withdraw authority 32][withheld u64]` and two
+/// `[epoch u64][maximum_fee u64][basis_points u16]` fees (older, newer).
+pub fn transfer_fee_possible(d: &[u8]) -> bool {
+    if d.len() <= ACCOUNT_BASE_LEN + 1 {
+        return false;
+    }
+    let mut o = ACCOUNT_BASE_LEN + 1;
+    while o + 4 <= d.len() {
+        let ty = u16::from_le_bytes([d[o], d[o + 1]]);
+        let len = u16::from_le_bytes([d[o + 2], d[o + 3]]) as usize;
+        match ty {
+            0 => break,
+            1 => {
+                let Some(v) = d.get(o + 4..o + 4 + len).filter(|v| v.len() == 108) else {
+                    return true; // unreadable: assume the worst
+                };
+                let charges = |f: &[u8]| {
+                    f[8..16].iter().any(|b| *b != 0) && f[16..18].iter().any(|b| *b != 0)
+                };
+                return v[..32].iter().any(|b| *b != 0)
+                    || charges(&v[72..90])
+                    || charges(&v[90..108]);
+            }
+            _ => o += 4 + len,
+        }
+    }
+    false
+}
+
 /// `TransferChecked` (instruction 12) from `from` to `to`, authorized by
 /// `authority` (a signer, or the vault PDA through `signer`).
 #[allow(clippy::too_many_arguments)]
