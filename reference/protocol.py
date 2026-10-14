@@ -26,6 +26,7 @@ Command table (all integers are decimal):
   GA mask kind                               abdicate, then check          -> "GA newmask abdicated(0|1)"
   GJ approvals alive threshold target count  eject a guardian?             -> "GJ 0|1"
   GV count threshold                         guardian set shape allowed?   -> "GV 0|1"
+  GP hex forbidden1 forbidden2               parse a guardian set          -> "GP keys count th interval used" | "GP <error>"
   FH hex                                     murmur3_32 (syscall ids)      -> "FH u32"
   FB hex                                     loader-v3 buffer authority    -> "FB NONE" | "FB -" | "FB key"
   FP hex                                     loader-v3 programdata header  -> "FP NONE" | "FP slot key|-"
@@ -151,6 +152,12 @@ class Session:
         if cmd == "GJ":
             ap, al, th, target, count = map(int, a)
             return f"GJ {int(ref.can_eject(ap, al, th, target, count))}"
+        if cmd == "GP":
+            r = ref.guardian_set_parse(_hex(a[0]), [_hex(a[1]), _hex(a[2])])
+            if isinstance(r, str):
+                return f"GP {r}"
+            keys, count, th, interval, used = r
+            return f"GP {b''.join(keys).hex()} {count} {th} {interval} {used}"
         if cmd == "GV":
             count, th = map(int, a)
             return f"GV {int(ref.guardian_set_ok(count, th))}"

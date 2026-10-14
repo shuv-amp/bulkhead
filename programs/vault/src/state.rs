@@ -7,7 +7,7 @@ use bulkhead_core::classify::{AssetConfig, LimitConfig};
 use bulkhead_core::consts::MAX_SLOTS;
 use pinocchio::error::ProgramError;
 
-pub const MAX_GUARDIANS: usize = 8;
+pub use bulkhead_core::governance::MAX_GUARDIANS;
 pub const MAX_PAYLOAD: usize = 300;
 
 // ---------------------------------------------------------------------------
@@ -67,6 +67,14 @@ impl<'a> R<'a> {
     }
     pub fn key(&mut self) -> Result<[u8; 32], ProgramError> {
         Ok(self.take(32)?.try_into().unwrap())
+    }
+    /// The unread bytes, without consuming them.
+    pub fn remaining(&self) -> &'a [u8] {
+        &self.d[self.o.min(self.d.len())..]
+    }
+    /// Consumes `n` bytes.
+    pub fn skip(&mut self, n: usize) -> Result<(), ProgramError> {
+        self.take(n).map(|_| ())
     }
     pub fn rest(&mut self) -> &'a [u8] {
         let s = &self.d[self.o.min(self.d.len())..];
@@ -312,24 +320,17 @@ impl Protocol {
     }
 
     pub fn guardian_index(&self, key: &[u8; 32]) -> Option<usize> {
-        self.guardians[..self.guardian_count as usize]
-            .iter()
-            .position(|g| g == key)
+        bulkhead_core::governance::guardian_index(&self.guardians, self.guardian_count, key)
     }
 
     /// Bitmap of live guardians; bits only for occupied slots.
     pub fn alive_mask(&self, now_s: i64) -> u8 {
-        let mut m = 0u8;
-        for i in 0..self.guardian_count as usize {
-            if bulkhead_core::governance::guardian_alive(
-                self.last_heartbeat[i],
-                self.heartbeat_interval_s,
-                now_s,
-            ) {
-                m |= 1 << i;
-            }
-        }
-        m
+        bulkhead_core::governance::alive_mask(
+            &self.last_heartbeat,
+            self.guardian_count,
+            self.heartbeat_interval_s,
+            now_s,
+        )
     }
 }
 

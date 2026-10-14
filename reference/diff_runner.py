@@ -146,6 +146,9 @@ def gen_governance(r: random.Random) -> str:
     if k == 2:
         return f"GF {r.choice([0, now, now + 86_400, r.randrange(0, 1 << 41)])} {now} {r.choice([-1, 0, 1, 3600, 86_400, 86_401, r.randrange(-10, 200_000)])}"
     if k == 3:
+        if r.random() < 0.2:   # times far apart, across all of i64: the gap must not overflow
+            ext = [-(1 << 63), -1, 0, 1, (1 << 63) - 1, r.randrange(-(1 << 63), 1 << 63)]
+            return f"GH {r.choice(ext)} {r.choice([86_400, 604_800, 2_592_000])} {r.choice(ext)}"
         last = r.randrange(0, 1 << 40)
         return f"GH {last} {r.choice([0, 86_399, 86_400, 604_800, 2_592_000, 2_592_001, r.randrange(0, 10**7)])} {last + r.choice([-1, 0, 86_400, 604_800, 604_801, r.randrange(0, 10**7)])}"
     if k == 4:
@@ -170,6 +173,36 @@ def _mutate(r: random.Random, b: bytes) -> bytes:
 
 def _h(b: bytes) -> str:
     return b.hex() if b else "-"
+
+
+def gen_guardian_set(r: random.Random) -> str:
+    """A guardian set, mostly well formed, then broken in one way or another:
+    a count out of range, a zero, forbidden or repeated key, a threshold or an
+    interval at or past its bounds, cut short, or with bytes after it."""
+    forbidden = [bytes(r.randrange(256) for _ in range(32)) for _ in range(2)]
+    if r.random() < 0.2:
+        forbidden[1] = bytes(32)   # no recovery key
+    count = r.choice([2, 3, 3, 4, 5, 8, 8, r.randrange(0, 12)])
+    keys = [bytes(r.randrange(256) for _ in range(32)) for _ in range(min(count, 9))]
+    roll = r.random()
+    if keys and roll < 0.1:
+        keys[r.randrange(len(keys))] = bytes(32)
+    elif keys and roll < 0.2:
+        keys[r.randrange(len(keys))] = r.choice(forbidden)
+    elif len(keys) > 1 and roll < 0.3:
+        keys[r.randrange(1, len(keys))] = keys[0]
+    th = r.choice([2, 2, 3, count - 1, count, count + 1, 1, 0, r.randrange(256)]) % 256
+    interval = r.choice([86_400, 86_399, 30 * 86_400, 30 * 86_400 + 1, 7 * 86_400, 0, -1,
+                         -(1 << 63), (1 << 63) - 1, r.randrange(-(1 << 63), 1 << 63)])
+    b = bytes([count % 256]) + b"".join(keys) + bytes([th]) + interval.to_bytes(8, "little", signed=True)
+    cut = r.random()
+    if cut < 0.15:
+        b = b[:r.randrange(0, len(b) + 1)]
+    elif cut < 0.3:
+        b += bytes(r.randrange(256) for _ in range(r.randrange(1, 20)))
+    elif cut < 0.35:
+        b = _mutate(r, b)
+    return f"GP {_h(b)} {forbidden[0].hex()} {forbidden[1].hex()}"
 
 
 def gen_floor(r: random.Random) -> str:
@@ -210,6 +243,8 @@ def gen_floor(r: random.Random) -> str:
         return (f"FR {r.choice(['S', 'P'])} {r.randrange(3)} {r.randrange(3)} {r.randrange(2)} "
                 f"{r.randrange(2)} {now} {eta} {exp}")
     if k == 6:
+        if r.random() < 0.3:
+            return gen_guardian_set(r)
         if r.random() < 0.2:
             return f"GV {r.randrange(12)} {r.randrange(12)}"
         if r.random() < 0.5:   # realistic guardian sets, so both outcomes are common

@@ -39,8 +39,8 @@ use bulkhead_core::floor::{
     RestoreSource, BUFFER_DATA_OFFSET, PROGRAMDATA_DATA_OFFSET,
 };
 use bulkhead_core::governance::{
-    can_eject, can_execute, guardian_set_ok, quorum, GovError, Schedule, CHANGE_EXPIRY_S,
-    MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
+    can_eject, can_execute, quorum, signer_bits, GovError, GuardianSet, GuardianSetError, Schedule,
+    SignerError, CHANGE_EXPIRY_S,
 };
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
 use pinocchio::error::ProgramError;
@@ -205,15 +205,14 @@ fn live_guardian(c: &Config, a: &AccountView, now_s: i64) -> Result<usize, Progr
 /// Bitmap of guardians among `signers`. Each must sign and be a current
 /// guardian; bits are only ever set for occupied slots.
 fn guardian_signers(c: &Config, signers: &[AccountView]) -> Result<u8, ProgramError> {
-    let mut bits = 0u8;
-    for s in signers {
-        require_signer(s)?;
-        let i = c
-            .guardian_index(&key(s))
-            .ok_or(FloorError::NotLiveGuardian)?;
-        bits |= 1 << i;
-    }
-    Ok(bits)
+    let pairs = signers.iter().map(|s| (key(s), s.is_signer()));
+    signer_bits(&c.guardians, c.guardian_count, pairs).map_err(|e| {
+        match e {
+            SignerError::NotSigner => FloorError::MissingSignature,
+            SignerError::NotGuardian => FloorError::NotLiveGuardian,
+        }
+        .into()
+    })
 }
 
 /// A buffer whose authority is Floor's authority PDA: nobody can write to it
@@ -352,42 +351,23 @@ fn check_program_accounts(
     Ok(())
 }
 
-/// A validated guardian set: list, count, threshold, heartbeat interval, and
-/// the number of argument bytes it used.
-type GuardianSet = ([[u8; 32]; MAX_GUARDIANS], u8, u8, i64, usize);
-
-/// Parses `[count u8][count × 32][threshold u8][interval i64]`.
+/// Parses `[count u8][count × 32][threshold u8][interval i64]` with the
+/// core's `GuardianSet::parse` (the Vault parses with the same function), and
+/// returns the set and the number of argument bytes it used.
 fn parse_guardian_set(
     args: &[u8],
     owner: &[u8; 32],
     recovery: &[u8; 32],
-) -> Result<GuardianSet, ProgramError> {
-    let count = *args.first().ok_or(FloorError::InvalidInstruction)? as usize;
-    if !(MIN_GUARDIAN_THRESHOLD as usize..=MAX_GUARDIANS).contains(&count) {
-        return Err(FloorError::InvalidGuardians.into());
-    }
-    let need = 1 + 32 * count + 1 + 8;
-    if args.len() < need {
-        return Err(FloorError::InvalidInstruction.into());
-    }
-    let mut g = [[0u8; 32]; MAX_GUARDIANS];
-    for i in 0..count {
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&args[1 + 32 * i..1 + 32 * i + 32]);
-        if k == [0; 32] || &k == owner || &k == recovery || g[..i].contains(&k) {
-            return Err(FloorError::InvalidGuardians.into());
+) -> Result<(GuardianSet, usize), ProgramError> {
+    GuardianSet::parse(args, [owner, recovery]).map_err(|e| {
+        match e {
+            GuardianSetError::Truncated => FloorError::InvalidInstruction,
+            GuardianSetError::BadCount | GuardianSetError::BadKey => FloorError::InvalidGuardians,
+            GuardianSetError::BadThreshold => FloorError::InvalidThreshold,
+            GuardianSetError::BadInterval => FloorError::InvalidInterval,
         }
-        g[i] = k;
-    }
-    let threshold = args[1 + 32 * count];
-    if !guardian_set_ok(count as u8, threshold) {
-        return Err(FloorError::InvalidThreshold.into());
-    }
-    let interval = i64_arg(args, 2 + 32 * count)?;
-    if !(MIN_HEARTBEAT_INTERVAL_S..=MAX_HEARTBEAT_INTERVAL_S).contains(&interval) {
-        return Err(FloorError::InvalidInterval.into());
-    }
-    Ok((g, count as u8, threshold, interval, need))
+        .into()
+    })
 }
 
 fn i64_arg(args: &[u8], at: usize) -> Result<i64, ProgramError> {
@@ -439,8 +419,7 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
     if owner == [0; 32] {
         return Err(FloorError::InvalidGuardians.into());
     }
-    let (guardians, count, threshold, interval, used) =
-        parse_guardian_set(args.get(32..).unwrap_or(&[]), &owner, &[0; 32])?;
+    let (set, used) = parse_guardian_set(args.get(32..).unwrap_or(&[]), &owner, &[0; 32])?;
     let delay = i64_arg(args, 32 + used)?;
     // Optional recovery key after the delay (absent or all zero: none).
     // Absent: none. Present, all 32 bytes: a cut-off key is an error, not none.
@@ -451,8 +430,7 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
     };
     // No key holds two roles: a guardian that is also the recovery key would
     // never veto its own new owner (docs/09, finding 62).
-    if recovery == owner || (recovery != [0; 32] && guardians[..count as usize].contains(&recovery))
-    {
+    if recovery == owner || (recovery != [0; 32] && set.contains(&recovery)) {
         return Err(FloorError::InvalidGuardians.into());
     }
     check_delay(delay)?;
@@ -589,16 +567,16 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
         program: program_key,
         programdata: key(programdata),
         owner,
-        guardians,
+        guardians: set.keys,
         last_heartbeat: [t; MAX_GUARDIANS],
-        guardian_count: count,
-        threshold,
+        guardian_count: set.count,
+        threshold: set.threshold,
         status: STATUS_LIVE,
         elf_is_v3,
         config_bump,
         authority_bump,
         snapshot_valid: 0,
-        heartbeat_interval_s: interval,
+        heartbeat_interval_s: set.interval_s,
         upgrade_delay_s: delay,
         abort_buffer: [0; 32],
         snapshot_buffer: [0; 32],
@@ -881,15 +859,12 @@ fn propose(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> P
         // The owner is never a guardian (as `parse_guardian_set` keeps it
         // from the other side), or the owner's limits fall away (finding 57).
         kind::SET_OWNER => {
-            if target == [0; 32]
-                || target == c.recovery
-                || c.guardians[..c.guardian_count as usize].contains(&target)
-            {
+            if target == [0; 32] || target == c.recovery || c.guardian_index(&target).is_some() {
                 return Err(FloorError::InvalidInstruction.into());
             }
         }
         kind::SET_RECOVERY => {
-            if target == c.owner || c.guardians[..c.guardian_count as usize].contains(&target) {
+            if target == c.owner || c.guardian_index(&target).is_some() {
                 return Err(FloorError::InvalidInstruction.into());
             }
         }
@@ -1227,25 +1202,23 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
             payload[..len].copy_from_slice(&c.pending_payload[..len]);
             match c.pending_kind {
                 kind::SET_GUARDIANS => {
-                    let (g, n, th, interval, _) =
-                        parse_guardian_set(&payload[..len], &c.owner, &c.recovery)?;
-                    c.guardians = g;
-                    c.guardian_count = n;
-                    c.threshold = th;
-                    c.heartbeat_interval_s = interval;
+                    let (set, _) = parse_guardian_set(&payload[..len], &c.owner, &c.recovery)?;
+                    c.guardians = set.keys;
+                    c.guardian_count = set.count;
+                    c.threshold = set.threshold;
+                    c.heartbeat_interval_s = set.interval_s;
                     c.last_heartbeat = [t; MAX_GUARDIANS]; // the new set starts alive
                 }
                 kind::SET_OWNER => {
                     if c.pending_target == c.recovery
-                        || c.guardians[..c.guardian_count as usize].contains(&c.pending_target)
+                        || c.guardian_index(&c.pending_target).is_some()
                     {
                         return Err(FloorError::InvalidInstruction.into());
                     }
                     c.owner = c.pending_target;
                 }
                 kind::SET_RECOVERY => {
-                    if c.pending_target == c.owner
-                        || c.guardians[..c.guardian_count as usize].contains(&c.pending_target)
+                    if c.pending_target == c.owner || c.guardian_index(&c.pending_target).is_some()
                     {
                         return Err(FloorError::InvalidInstruction.into());
                     }
@@ -1440,7 +1413,7 @@ fn replace_recovery(
         return Err(FloorError::NotOwner.into());
     }
     let recovery = k32_arg(args, 0)?;
-    if recovery == c.owner || c.guardians[..c.guardian_count as usize].contains(&recovery) {
+    if recovery == c.owner || c.guardian_index(&recovery).is_some() {
         return Err(FloorError::InvalidInstruction.into());
     }
     let alive = c.alive_mask(now()?);

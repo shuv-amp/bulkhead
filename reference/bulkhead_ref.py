@@ -563,6 +563,34 @@ def guardian_set_ok(count: int, threshold: int) -> bool:
     return count <= 8 and MIN_GUARDIAN_THRESHOLD <= threshold < count
 
 
+def guardian_set_parse(b: bytes, forbidden: list):
+    """`[count][count x 32 key][threshold][interval i64 LE]` -> (keys, count, threshold,
+    interval, used) or the name of the first rule it breaks, checked in this order:
+    a missing count byte, the count (2..8), the full length, each key (not zero, not
+    forbidden, not repeated), the threshold (guardian_set_ok), the interval (1-30 days)."""
+    if len(b) < 1:
+        return "Truncated"
+    count = b[0]
+    if not 2 <= count <= 8:
+        return "BadCount"
+    used = 1 + 32 * count + 1 + 8
+    if len(b) < used:
+        return "Truncated"
+    keys = [bytes(b[1 + 32 * i:33 + 32 * i]) for i in range(count)]
+    seen = set()
+    for k in keys:
+        if k == bytes(32) or k in forbidden or k in seen:
+            return "BadKey"
+        seen.add(k)
+    threshold = b[1 + 32 * count]
+    if not guardian_set_ok(count, threshold):
+        return "BadThreshold"
+    interval = int.from_bytes(b[2 + 32 * count:used], "little", signed=True)
+    if not MIN_HEARTBEAT_INTERVAL_S <= interval <= MAX_HEARTBEAT_INTERVAL_S:
+        return "BadInterval"
+    return (keys, count, threshold, interval, used)
+
+
 def can_eject(approvals: int, alive: int, threshold: int, target: int, count: int) -> bool:
     """A live quorum of the other guardians ejects `target`; >= threshold must remain."""
     if not (0 <= target < count <= 8) or threshold < MIN_GUARDIAN_THRESHOLD:

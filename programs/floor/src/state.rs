@@ -8,7 +8,7 @@ use crate::error::FloorError;
 use pinocchio::error::ProgramError;
 
 pub const DISCRIMINATOR: [u8; 8] = *b"FLOORv01";
-pub const MAX_GUARDIANS: usize = 8;
+pub use bulkhead_core::governance::MAX_GUARDIANS;
 /// Largest proposal payload (a full guardian set: 1 + 8·32 + 1 + 8).
 pub const MAX_PAYLOAD: usize = 266;
 
@@ -217,24 +217,17 @@ impl Config {
 
     /// Index of `key` among the current guardians.
     pub fn guardian_index(&self, key: &[u8; 32]) -> Option<usize> {
-        self.guardians[..self.guardian_count as usize]
-            .iter()
-            .position(|g| g == key)
+        bulkhead_core::governance::guardian_index(&self.guardians, self.guardian_count, key)
     }
 
     /// Bitmap of guardians that heart-beat within the interval (current slots only).
     pub fn alive_mask(&self, now_s: i64) -> u8 {
-        let mut mask = 0u8;
-        for i in 0..self.guardian_count as usize {
-            if bulkhead_core::governance::guardian_alive(
-                self.last_heartbeat[i],
-                self.heartbeat_interval_s,
-                now_s,
-            ) {
-                mask |= 1 << i;
-            }
-        }
-        mask
+        bulkhead_core::governance::alive_mask(
+            &self.last_heartbeat,
+            self.guardian_count,
+            self.heartbeat_interval_s,
+            now_s,
+        )
     }
 
     pub fn clear_pending(&mut self) {

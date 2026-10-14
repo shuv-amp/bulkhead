@@ -28,8 +28,8 @@ use crate::floor::{
     snapshot_matches, RestoreSource,
 };
 use crate::governance::{
-    can_eject, can_execute, freeze_until, guardian_alive, guardian_set_ok, quorum, schedule,
-    Abdications,
+    alive_mask, can_eject, can_execute, freeze_until, guardian_alive, guardian_set_ok, quorum,
+    schedule, signer_bits, Abdications,
 };
 use crate::limiter::{
     clamp_capacity, lane_always_closed, params_from_config, request, reset_backlog, Bucket,
@@ -328,6 +328,28 @@ fn accepted_sets_can_eject_anyone() {
     assert!(guardian_set_ok(count, th) == reachable);
     if guardian_set_ok(count, th) {
         assert!(count >= 3 && th >= 2);
+    }
+}
+
+/// FULL. The guardian bitmaps never set a bit for an empty slot: liveness
+/// over any heartbeats, count and times, and the bits of up to 3 signers
+/// whose keys may be any guardian slot, any empty slot or no slot at all.
+#[kani::proof]
+#[kani::unwind(34)]
+fn guardian_bitmaps_stay_within_the_set() {
+    let (beats, count, interval, now): ([i64; 8], u8, i64, i64) =
+        (kani::any(), kani::any(), kani::any(), kani::any());
+    let members = if count >= 8 { 0xFF } else { (1u8 << count) - 1 };
+    assert!(alive_mask(&beats, count, interval, now) & !members == 0);
+    let mut keys = [[0u8; 32]; 8];
+    for (i, k) in keys.iter_mut().enumerate() {
+        *k = [i as u8 + 1; 32];
+    }
+    let signer = || -> ([u8; 32], bool) { ([kani::any::<u8>(); 32], kani::any()) };
+    let signers = [signer(), signer(), signer()];
+    if let Ok(bits) = signer_bits(&keys, count, signers) {
+        assert!(bits & !members == 0);
+        assert!(signers.iter().all(|(_, signed)| *signed));
     }
 }
 
