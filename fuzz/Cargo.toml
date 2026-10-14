@@ -12,8 +12,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 bulkhead-core = { path = "../crates/bulkhead-core" }
-bulkhead-vault = { path = "../programs/vault" }
-bulkhead-floor = { path = "../programs/floor" }
+bulkhead-vault = { path = "../programs/vault", features = ["no-entrypoint"] }
+bulkhead-floor = { path = "../programs/floor", features = ["no-entrypoint"] }
 
 # Its own workspace: cargo-fuzz needs nightly and sanitizer flags.
 [workspace]

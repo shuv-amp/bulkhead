@@ -50,9 +50,9 @@ use pinocchio::instruction::{InstructionAccount, InstructionView};
 use pinocchio::sysvars::{clock::Clock, rent::Rent, Sysvar};
 use pinocchio::{AccountView, Address, ProgramResult};
 
-pinocchio::program_entrypoint!(process_instruction);
-pinocchio::no_allocator!();
-pinocchio::nostd_panic_handler!();
+// The entrypoint, allocator and panic handler are at the end of this file,
+// behind `no-entrypoint`: tests and fuzz link this crate as a library, and
+// two crates' `entrypoint` symbols cannot share one binary.
 
 pub const SYSTEM_PROGRAM: Address = Address::new_from_array([0; 32]);
 
@@ -443,3 +443,10 @@ pub(crate) fn parse_guardian_set(
     }
     Ok((g, count as u8, threshold, interval))
 }
+
+#[cfg(not(feature = "no-entrypoint"))]
+pinocchio::program_entrypoint!(process_instruction);
+#[cfg(not(feature = "no-entrypoint"))]
+pinocchio::no_allocator!();
+#[cfg(not(feature = "no-entrypoint"))]
+pinocchio::nostd_panic_handler!();

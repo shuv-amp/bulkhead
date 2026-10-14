@@ -38,4 +38,8 @@ for i in "${!targets[@]}"; do
     grep -A20 -m1 'panicked\|ERROR: libFuzzer' "$logs/$t.log" || tail -20 "$logs/$t.log"
   fi
 done
+# The fuzz crate is its own workspace: lint it here, after fuzzing, so a lint
+# never stops a fuzz run and a change to fuzz/ alone is still linted (the CI
+# fuzz job runs this script).
+(cargo +"$TOOLCHAIN" clippy --all-targets -- -D warnings) || failed=1
 exit "$failed"

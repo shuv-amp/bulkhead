@@ -3806,11 +3806,13 @@ fn a_reset_on_a_clock_that_stepped_back_grants_nothing_extra() {
 /// through the Vault's own types, so this test pins both directions to those
 /// offsets, field by field: `load` reads each field where the readers do (on a
 /// pattern where any misread shows), and `store` writes it there. A layout
-/// change must change both sides. (The backing account has no off-chain reader
-/// yet; its layout is the one `05` documents.)
+/// change must change both sides. Booleans are checked as the readers decode
+/// them (`=== 1`) in what `store` writes. (`decodeChange` and `assetVersion`
+/// are pinned too; the backing account has no off-chain reader yet, and its
+/// layout is the one `05` documents.)
 #[test]
 fn account_layouts_match_what_off_chain_readers_decode() {
-    use bulkhead_vault::{Backing, Protocol, Ticket, Vault};
+    use bulkhead_vault::{Asset, Backing, Change, Protocol, Ticket, Vault};
     fn k(d: &[u8], o: usize) -> [u8; 32] {
         d[o..o + 32].try_into().unwrap()
     }
@@ -3844,6 +3846,7 @@ fn account_layouts_match_what_off_chain_readers_decode() {
         }
         assert_eq!(k(d, 553), p.recovery);
     }
+    assert_eq!((&stored[0..8], stored[426], stored[532]), (&Protocol::DISC[..], p.sealed as u8, p.seal_vetoed as u8));
 
     let d = patterned(Vault::LEN, &Vault::DISC);
     let v = Vault::load(&d).unwrap();
@@ -3873,6 +3876,7 @@ fn account_layouts_match_what_off_chain_readers_decode() {
         assert_eq!(i64::from_le_bytes(n(d, 389)), v.low.window);
         assert_eq!(k(d, 397), v.exit_proposer);
     }
+    assert_eq!((&stored[0..8], stored[216], stored[368]), (&Vault::DISC[..], v.ref_initialized as u8, v.exit_vetoed as u8));
 
     let d = patterned(Ticket::LEN, &Ticket::DISC);
     let t = Ticket::load(&d).unwrap();
@@ -3884,6 +3888,34 @@ fn account_layouts_match_what_off_chain_readers_decode() {
         assert_eq!((u64::from_le_bytes(n(d, 168)), u64::from_le_bytes(n(d, 176))), (t.id, t.amount));
         assert_eq!((i64::from_le_bytes(n(d, 184)), i64::from_le_bytes(n(d, 192))), (t.created_s, t.eta_s));
     }
+    assert_eq!(&stored[0..8], &Ticket::DISC[..]);
+
+    let mut d = patterned(Change::LEN, &Change::DISC);
+    d[140..142].copy_from_slice(&200u16.to_le_bytes()); // payload length: at most 300
+    let c = Change::load(&d).unwrap();
+    let mut stored = vec![0u8; Change::LEN];
+    c.store(&mut stored).unwrap();
+    for d in [&d, &stored] {
+        assert_eq!((k(d, 8), u64::from_le_bytes(n(d, 40)), d[48]), (c.protocol, c.id, c.kind));
+        assert_eq!((d[49] != 0, d[50] != 0, d[51]), (c.vetoed, c.executed, c.bump));
+        assert_eq!((k(d, 52), k(d, 84)), (c.target, c.proposer));
+        assert_eq!((i64::from_le_bytes(n(d, 116)), i64::from_le_bytes(n(d, 124))), (c.created_s, c.executable_s));
+        assert_eq!(i64::from_le_bytes(n(d, 132)), c.expires_s);
+        assert_eq!(u16::from_le_bytes(n(d, 140)), c.payload_len);
+        assert_eq!(&d[142..342], &c.payload[..200]);
+        assert_eq!(u32::from_le_bytes(n(d, 442)), c.base_version);
+    }
+    assert_eq!((&stored[0..8], stored[49], stored[50]), (&Change::DISC[..], c.vetoed as u8, c.executed as u8));
+
+    let d = patterned(Asset::LEN, &Asset::DISC);
+    let a = Asset::load(&d).unwrap();
+    let mut stored = vec![0u8; Asset::LEN];
+    a.store(&mut stored).unwrap();
+    for d in [&d, &stored] {
+        assert_eq!((k(d, 8), k(d, 40)), (a.protocol, a.mint));
+        assert_eq!((d[125], d[126], u32::from_le_bytes(n(d, 127))), (a.decimals, a.bump, a.version));
+    }
+    assert_eq!(&stored[0..8], &Asset::DISC[..]);
 
     let d = patterned(Backing::LEN, &Backing::DISC);
     let b = Backing::load(&d).unwrap();
@@ -3895,4 +3927,5 @@ fn account_layouts_match_what_off_chain_readers_decode() {
             assert_eq!((k(d, 73 + 48 * i), i128::from_le_bytes(n(d, 105 + 48 * i))), (*mint, *net), "slot {i}");
         }
     }
+    assert_eq!(&stored[0..8], &Backing::DISC[..]);
 }

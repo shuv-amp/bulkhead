@@ -229,7 +229,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Nightly toolchain
-        run: rustup toolchain install "$NIGHTLY" --profile minimal
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component clippy
       - name: Cache cargo-fuzz
         id: cargo-fuzz
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

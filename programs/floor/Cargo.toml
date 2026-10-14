@@ -9,6 +9,11 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+# Leave out the program entrypoint: for host crates (tests, fuzz) that link
+# this one as a library.
+no-entrypoint = []
+
 [dependencies]
 bulkhead-core = { path = "../../crates/bulkhead-core" }
 pinocchio = { version = "=0.11.2", default-features = false, features = ["cpi", "copy", "sha2"] }
