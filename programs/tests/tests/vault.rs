@@ -4090,14 +4090,14 @@ impl Ledgered {
     }
 
     /// Measures one release (built as `withdraw(i, amount)`): sizes, a direct
-    /// quote_release, then the real release under the default budget (and
-    /// under 1.4M if the default is not enough).
+    /// quote_release, then the real release under the default budget (200,000
+    /// per instruction; LiteSVM sets no other limit), which it must fit.
     fn measure(&mut self, label: &str, i: usize, amount: u64) -> Cost {
         let ix = self.withdraw(i, amount);
         let b = self.borrower.insecure_clone();
         let payer = self.env.payer.pubkey();
         // Harbor: vault program, caller, user; Vault: 10 fixed; pairs; user [s].
-        let price_accounts = ix.accounts.len() - 3 - 10 - 1;
+        let pair_accounts = ix.accounts.len() - 3 - 10 - 1;
 
         // Sizes: as sent (relayer pays, two signatures) and user-pays (one).
         let msg2 = solana_message::Message::new(std::slice::from_ref(&ix), Some(&payer));
@@ -4122,29 +4122,21 @@ impl Ledgered {
         let quote_cu = q.compute_units_consumed;
         let quoted = outcome(&q);
 
-        // The release itself, default budget (200k per instruction).
+        // The release itself, under the default budget.
         let prefix = format!("Program {} consumed ", self.m.vault_program);
-        let inner = |logs: &[String]| -> u64 {
-            logs.iter()
-                .rev()
-                .find_map(|l| l.strip_prefix(&prefix)?.split(' ').next()?.parse().ok())
-                .unwrap_or(0)
-        };
-        let (cu, vault_cu, default_ok, o) = match self.env.send(std::slice::from_ref(&ix), &[&b]) {
-            Ok(m) => (m.compute_units_consumed, inner(&m.logs), true, outcome(&m)),
-            Err(e) => {
-                println!("  default budget FAILED: {:?} after {} CU", e.err, e.meta.compute_units_consumed);
-                let m = self.env.ok(&[cu_limit_ix(1_400_000), ix.clone()], &[&b]);
-                (m.compute_units_consumed, inner(&m.logs), false, outcome(&m))
-            }
-        };
+        let m = self.env.ok(std::slice::from_ref(&ix), &[&b]);
+        let (cu, o) = (m.compute_units_consumed, outcome(&m));
+        let vault_cu: u64 = m
+            .logs
+            .iter()
+            .rev()
+            .find_map(|l| l.strip_prefix(&prefix)?.split(' ').next()?.parse().ok())
+            .unwrap_or(0);
         assert_eq!((o.backed, o.instant, o.queued), (quoted.backed, quoted.instant, quoted.queued), "quote and release agree");
         println!(
-            "[{label}] slots={} price accounts={} | CU: harbor tx {cu}, vault inside CPI {vault_cu}, direct quote_release {quote_cu} | \
-             default 200k budget: {} | backed={} instant={} queued={}",
+            "[{label}] slots={} (asset, price) accounts={pair_accounts} | CU: harbor tx {cu}, vault inside CPI {vault_cu}, \
+             direct quote_release {quote_cu} | backed={} instant={} queued={}",
             self.slots,
-            price_accounts,
-            if default_ok { "OK" } else { "EXCEEDED (passed at 1.4M)" },
             o.backed / USDC,
             o.instant / USDC,
             o.queued / USDC,
@@ -4156,29 +4148,28 @@ impl Ledgered {
             PACKET as i64 - s1 as i64,
             PACKET as i64 - s1cb as i64,
         );
-        Cost { o, cu, default_ok, price_accounts, keys2: k2, size2: s2, size1: s1 }
+        Cost { o, cu, pair_accounts, keys2: k2, size2: s2, size1: s1 }
     }
 }
 
-/// What one release cost: the outcome, the transaction's compute (and whether
-/// the default 200,000 per instruction sufficed), the (asset, price) accounts,
-/// and the legacy transaction's keys and size with a relayer paying (two
-/// signatures) and the user paying (one).
+/// What one release cost: the outcome, the transaction's compute, the (asset,
+/// price) accounts it named, and the legacy transaction's keys and size with a
+/// relayer paying (two signatures) and the user paying (one).
 struct Cost {
     o: Outcome,
     cu: u64,
-    default_ok: bool,
-    price_accounts: usize,
+    pair_accounts: usize,
     keys2: usize,
     size2: usize,
     size1: usize,
 }
 
-/// Every case: well under the default compute budget, and exactly 14 fixed keys
-/// plus the (asset, price) pairs.
-fn assert_cheap(c: &Cost) {
-    assert!(c.default_ok && c.cu < 100_000, "{} CU", c.cu);
-    assert_eq!(c.keys2, 14 + c.price_accounts);
+/// Every case: under 85,000 CU (the worst measured is about 77k), and, through
+/// Harbor, 14 fixed keys plus `mints` (asset, price) pairs, all distinct.
+fn assert_cheap(c: &Cost, mints: usize) {
+    assert!(c.cu < 85_000, "{} CU", c.cu);
+    assert_eq!(c.pair_accounts, 2 * mints, "one (asset, price) pair per mint");
+    assert_eq!(c.keys2, 14 + 2 * mints);
 }
 
 /// The cost of `release` for an owner whose ledger holds `slots` positions;
@@ -4191,28 +4182,40 @@ fn release_cost_report(slots: usize) -> (usize, usize) {
     // A further backed loan of the borrowed mint: `valid(amount)` holds at once.
     let c = l.measure("borrow more, fully backed", loan, 100 * USDC);
     assert_eq!(c.o.backed, 100 * USDC);
-    assert_cheap(&c);
+    assert_cheap(&c, slots);
     assert!(c.size2 <= PACKET, "a borrow fits a legacy transaction: {} B", c.size2);
     // Withdrawing collateral while a loan is open: priced, not G2.
     let c = l.measure("withdraw collateral (priced)", 0, 100 * USDC);
     assert_eq!(c.o.backed, 100 * USDC);
-    assert_cheap(&c);
+    assert_cheap(&c, slots);
     // Over-asking: the binary search runs and the rest queues as a ticket.
     let c = l.measure("over-ask: search + queued ticket", loan, 200_000 * USDC);
     assert!(c.o.backed > 0 && c.o.backed < 200_000 * USDC && c.o.queued > 0);
-    assert_cheap(&c);
-    // A mint not in the ledger: one more pair than the ledger holds (under a
-    // ledger that is not full, it opens a new position).
+    assert_cheap(&c, slots);
+
+    // A mint not in the ledger, on a fresh ledger with borrowing room: one
+    // more pair than the ledger holds. Below a full ledger the payout is a
+    // new, backed position; at a full ledger there is no slot for it, so
+    // nothing can be backed, prices or not.
+    let mut l = Ledgered::new(slots);
+    // A borrow with placeholder price accounts is not a backed loan: nothing
+    // can be priced, so it is all unbacked (`07` §2).
+    l.placeholder_prices = true;
+    let c = l.measure("borrow with placeholder prices", loan, 100 * USDC);
+    assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 100 * USDC), "placeholders back nothing");
+    l.placeholder_prices = false;
     let c = l.measure("withdraw a mint outside the ledger", slots, 10 * USDC);
-    assert_cheap(&c);
+    assert_cheap(&c, slots + 1);
     let outside = (c.size2, c.size1);
-    // Outside a full ledger nothing can be backed, so no price is read: the
-    // price accounts may all be one placeholder (`07` §2), and the payout
-    // then fits a legacy transaction even with a relayer paying.
-    if slots == MAX_SLOTS_T {
+    if slots < MAX_SLOTS_T {
+        assert_eq!(c.o.backed, 10 * USDC, "a new position, backed");
+    } else {
+        assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 10 * USDC), "no slot: nothing backed");
+        // So no price is read: the price accounts may all be one placeholder
+        // (`07` §2), and the payout then fits a legacy transaction.
         l.placeholder_prices = true;
         let c = l.measure("the same, placeholder prices", slots, 10 * USDC);
-        assert!(c.default_ok && c.o.backed == 0 && c.o.instant + c.o.queued == 10 * USDC);
+        assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 10 * USDC));
         assert!(c.size2 <= PACKET, "placeholders: {} B", c.size2);
     }
     outside
