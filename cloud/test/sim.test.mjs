@@ -305,7 +305,7 @@ const data = (name, ...fields) => `Program data: ${[b64(Buffer.from(name)), ...f
 const inFloor = (...lines) => [`Program ${FLOOR} invoke [1]`, ...lines, `Program ${FLOOR} success`];
 
 test("Floor's stop, ejection, restore and approval are decoded from their real layouts, for watched programs only (finding 76, 7)", () => {
-  // programs/floor/src/lib.rs: ABORTED [program, who, snapshot_valid u8, t i64],
+  // programs/floor/src/stop.rs: ABORTED [program, who, snapshot_valid u8, t i64],
   // EJECTED [program, removed], RESTORED [program, signers u8],
   // APPROVED [program, pending_id u64, approvals u8].
   const logs = inFloor(
