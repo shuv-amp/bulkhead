@@ -16,6 +16,7 @@ if [ $# -gt 0 ]; then targets=("$@"); else
   targets=()
   for f in fuzz_targets/*.rs; do targets+=("$(basename "$f" .rs)"); done
 fi
+cargo +"$TOOLCHAIN" clippy --all-targets -- -D warnings
 cargo +"$TOOLCHAIN" fuzz build -O
 logs="$(mktemp -d)"
 pids=()

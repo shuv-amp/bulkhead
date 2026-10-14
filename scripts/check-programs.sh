@@ -13,6 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 scripts/build-programs.sh
+echo "== clippy (LiteSVM harness, its own workspace)"
+(cd programs/tests && cargo clippy --release --tests -- -D warnings)
 echo "== LiteSVM program tests"
 (cd programs/tests && cargo test --release)
 if [ "${E2E:-0}" = 1 ]; then

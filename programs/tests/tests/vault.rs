@@ -483,8 +483,7 @@ fn a_ticket_settled_while_the_vault_is_short_fails_with_insufficient_balance() {
 #[test]
 fn the_reference_timestamp_never_moves_back() {
     let ref_updated_s = |w: &World| {
-        let d = w.env.account(&w.usdc.vault).data;
-        i64::from_le_bytes(d[208..216].try_into().unwrap())
+        read_vault(&w.env, &w.usdc.vault).ref_updated_s
     };
     let mut w = World::new();
     let whale = w.user();
@@ -944,8 +943,7 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_ABOVE_MAXIMUM);
     let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(30 * DAY).to_le_bytes(), None);
     w.env.ok(&[ix], &[&w.m.admin]);
-    let d = w.env.account(&w.m.protocol).data;
-    assert_eq!(i64::from_le_bytes(d[436..444].try_into().unwrap()), 30 * DAY, "raised at once, to the cap");
+    assert_eq!(read_protocol(&w.env, &w.m.protocol).loosen_delay_s, 30 * DAY, "raised at once, to the cap");
     let harbor = Address::new_unique();
     w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
     let ix = w.m.register_ix(&w.env, harbor, 30 * DAY + 1);
@@ -1185,7 +1183,7 @@ fn a_release_cannot_pay_the_lifeboat() {
     w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
     w.refresh_prices();
     let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
-    let mv = w.m.vault_ix(24, &(1 * USDC).to_le_bytes(), vec![
+    let mv = w.m.vault_ix(24, &USDC.to_le_bytes(), vec![
         AccountMeta::new_readonly(w.m.protocol, false),
         AccountMeta::new(w.usdc.vault, false),
         AccountMeta::new(w.usdc.vault_tokens, false),
@@ -1202,7 +1200,7 @@ fn a_release_cannot_pay_the_lifeboat() {
     // exit would not see them.
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &lifeboat, &w.usdc.vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
-    assert_eq!(w.env.balance(&lifeboat), 1 * USDC);
+    assert_eq!(w.env.balance(&lifeboat), USDC);
 }
 
 #[test]
@@ -1329,7 +1327,7 @@ fn the_lifeboat_refuses_a_mint_that_charges_or_can_charge_a_transfer_fee() {
     assert_eq!(w.env.balance(&lifeboat), 10 * USDC);
 
     // A fee authority could raise the fee at any time: refused again.
-    mint.data[170..202].copy_from_slice(Keypair::new().pubkey().as_ref());
+    mint.data[170..202].copy_from_slice(Keypair::new().pubkey().as_ref()); // TransferFeeConfig: fee config authority
     w.env.svm.set_account(w.usdc.mint, mint).unwrap();
     w.env.advance(1);
     assert_eq!(w.env.fails(&[mv(&w, 10 * USDC)], &[&w.m.admin]), verr::FEE_BEARING_MINT);
@@ -1632,7 +1630,7 @@ fn nothing_loosens_while_the_seal_is_under_review() {
     w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
     w.env.advance(3 * DAY - 1);
     let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
-    assert_eq!(w.env.fails(&[seal.clone()], &[]), verr::SEAL_NOT_EXECUTABLE);
+    assert_eq!(w.env.fails(std::slice::from_ref(&seal), &[]), verr::SEAL_NOT_EXECUTABLE);
     w.env.advance(1);
     w.env.ok(&[seal], &[]);
 }
@@ -1806,8 +1804,7 @@ fn a_change_to_one_thing_does_not_stale_a_change_to_another() {
     w.env.advance(3 * DAY);
     let protocol = w.m.protocol;
     w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
-    let d = w.env.account(&protocol).data;
-    assert_eq!(&d[8 + 64..8 + 96], new_admin.as_ref(), "the admin changed");
+    assert_eq!(read_protocol(&w.env, &protocol).admin, new_admin.to_bytes(), "the admin changed");
 }
 
 #[test]
@@ -1868,8 +1865,7 @@ fn cancel_change_ix(w: &World, id: u64, signer: &Address) -> Instruction {
 }
 
 fn protocol_admin(w: &World) -> Address {
-    let d = w.env.account(&w.m.protocol).data;
-    Address::from(<[u8; 32]>::try_from(&d[8 + 64..8 + 96]).unwrap())
+    Address::from(read_protocol(&w.env, &w.m.protocol).admin)
 }
 
 #[test]
@@ -3365,7 +3361,7 @@ fn a_lifeboat_exit_proposed_by_a_replaced_admin_does_not_execute() {
         AccountMeta::new_readonly(w.usdc.token_program, false),
         AccountMeta::new_readonly(destination, true),
     ]);
-    assert_eq!(w.env.fails(&[exit.clone()], &[&w.m.destination]), verr::CHANGE_STALE);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_STALE);
     assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
     // The new admin's own exit executes: the rule refuses only a replaced proposer.
     let propose = w.m.vault_ix(26, &(1_000_000 * USDC).to_le_bytes(), vec![
@@ -3476,8 +3472,9 @@ fn the_callers_own_signature_is_not_consent_to_a_loan() {
         Address::find_program_address(&[b"backing", w.m.protocol.as_ref(), caller.as_ref()], &w.m.vault_program),
     );
     let mut acct = w.env.svm.get_account(&from).unwrap();
-    acct.data[40..72].copy_from_slice(caller.as_ref());
-    acct.data[72] = bump;
+    let mut b = read_backing(&w.env, &from);
+    (b.owner, b.bump) = (caller.to_bytes(), bump);
+    b.store(&mut acct.data).unwrap();
     w.env.svm.set_account(to, acct).unwrap();
     let mut gone = w.env.svm.get_account(&from).unwrap();
     gone.data.fill(0);
@@ -3494,9 +3491,7 @@ fn the_callers_own_signature_is_not_consent_to_a_loan() {
 
 /// `propose_change` signed by `proposer` (the admin or the recovery key).
 fn propose_as(w: &World, proposer: &Address, kind: u8, target: &Address) -> (Instruction, u64) {
-    let d = w.env.account(&w.m.protocol).data;
-    let o = 8 + 96 + 256 + 64 + 4 + 24 + 8 + 8;
-    let id = u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+    let id = read_protocol(&w.env, &w.m.protocol).next_change_id;
     let mut args = vec![kind];
     args.extend_from_slice(target.as_ref());
     let ix = w.m.vault_ix(18, &args, vec![
@@ -3718,7 +3713,7 @@ fn an_exit_stale_after_a_rotation_revives_only_if_the_same_admin_returns() {
         AccountMeta::new_readonly(w.usdc.token_program, false),
         AccountMeta::new_readonly(destination, true),
     ]);
-    assert_eq!(w.env.fails(&[exit.clone()], &[&w.m.destination]), verr::CHANGE_STALE);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_STALE);
     // B rotates back to A; A's old exit, never re-proposed, executes.
     let mut ix = w.m.propose_change_ix(&w.env, 3, &a, &[], None);
     ix.accounts[1].pubkey = b.pubkey();

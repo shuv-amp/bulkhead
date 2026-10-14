@@ -550,48 +550,46 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
             }
             // Anyone executes a pending loosening: too early, expired, stale
             // (the limits changed since it was proposed), or applied.
-            37..=39 => {
-                if !md.pending.is_empty() {
-                    let k = rng.below(md.pending.len() as u64) as usize;
-                    let (&id, &(next, base, executable, expires)) = md.pending.iter().nth(k).unwrap();
-                    let exec = m.vault_ix(20, &[], vec![
-                        AccountMeta::new(m.protocol, false),
-                        AccountMeta::new(m.change_address(id), false),
-                        AccountMeta::new(usdc.vault, false),
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new_readonly(usdc.mint, false),
-                        AccountMeta::new_readonly(usdc.token_program, false),
-                        AccountMeta::new_readonly(SYSTEM, false),
-                    ]);
-                    let r = env.send(&[exec], &[]);
-                    let expected = if now < executable {
-                        Some(verr::CHANGE_NOT_EXECUTABLE)
-                    } else if now >= expires {
-                        Some(verr::CHANGE_EXPIRED)
-                    } else if base != md.limits_version {
-                        Some(verr::CHANGE_STALE)
-                    } else {
-                        None
-                    };
-                    match expected {
-                        None => {
-                            r.unwrap_or_else(|e| panic!("{}: {:?}", at("execute change"), e.err));
-                            rescale_windows(&mut md.limiter, &params_from_config(&md.cfg, 0), &params_from_config(&next, 0), now * 1_000);
-                            md.cfg = next;
-                            md.limits_version += 1;
+            37..=39 if !md.pending.is_empty() => {
+                let k = rng.below(md.pending.len() as u64) as usize;
+                let (&id, &(next, base, executable, expires)) = md.pending.iter().nth(k).unwrap();
+                let exec = m.vault_ix(20, &[], vec![
+                    AccountMeta::new(m.protocol, false),
+                    AccountMeta::new(m.change_address(id), false),
+                    AccountMeta::new(usdc.vault, false),
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new_readonly(usdc.mint, false),
+                    AccountMeta::new_readonly(usdc.token_program, false),
+                    AccountMeta::new_readonly(SYSTEM, false),
+                ]);
+                let r = env.send(&[exec], &[]);
+                let expected = if now < executable {
+                    Some(verr::CHANGE_NOT_EXECUTABLE)
+                } else if now >= expires {
+                    Some(verr::CHANGE_EXPIRED)
+                } else if base != md.limits_version {
+                    Some(verr::CHANGE_STALE)
+                } else {
+                    None
+                };
+                match expected {
+                    None => {
+                        r.unwrap_or_else(|e| panic!("{}: {:?}", at("execute change"), e.err));
+                        rescale_windows(&mut md.limiter, &params_from_config(&md.cfg, 0), &params_from_config(&next, 0), now * 1_000);
+                        md.cfg = next;
+                        md.limits_version += 1;
+                        md.pending.remove(&id);
+                        count("loosen_executed");
+                    }
+                    Some(code) => {
+                        assert_eq!(r.map_err(|f| custom_code(&f)).err(), Some(Some(code)), "{}", at("execute change refused"));
+                        count(match code {
+                            verr::CHANGE_STALE => "loosen_stale",
+                            verr::CHANGE_EXPIRED => "loosen_expired",
+                            _ => "loosen_early",
+                        });
+                        if code != verr::CHANGE_NOT_EXECUTABLE {
                             md.pending.remove(&id);
-                            count("loosen_executed");
-                        }
-                        Some(code) => {
-                            assert_eq!(r.map_err(|f| custom_code(&f)).err(), Some(Some(code)), "{}", at("execute change refused"));
-                            count(match code {
-                                verr::CHANGE_STALE => "loosen_stale",
-                                verr::CHANGE_EXPIRED => "loosen_expired",
-                                _ => "loosen_early",
-                            });
-                            if code != verr::CHANGE_NOT_EXECUTABLE {
-                                md.pending.remove(&id);
-                            }
                         }
                     }
                 }
@@ -624,16 +622,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
         assert_eq!(held, md.lifeboat, "{}", at("lifeboat balance"));
     }
     for u in &users {
-        let d = env.account(&m.backing(&u.pubkey())).data;
-        let mut chain = Vec::new();
-        for i in 0..8 {
-            let o = 8 + 64 + 1 + 48 * i;
-            let mint: [u8; 32] = d[o..o + 32].try_into().unwrap();
-            let net = i128::from_le_bytes(d[o + 32..o + 48].try_into().unwrap());
-            if net != 0 {
-                chain.push((mint, net));
-            }
-        }
+        let chain = ledger_of(&env, &m.backing(&u.pubkey()));
         let model: Vec<([u8; 32], i128)> = md.ledgers[&u.pubkey().to_bytes()].positions().map(|p| (p.mint, p.net)).collect();
         assert_eq!(chain, model, "seed {seed}: ledger of {}", u.pubkey());
     }

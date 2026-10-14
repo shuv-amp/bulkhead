@@ -606,39 +606,11 @@ impl Floor {
     }
 }
 
-/// Floor's config fields the tests read (offsets: programs/floor/src/state.rs).
-pub struct ConfigView {
-    pub guardian_count: u8,
-    pub status: u8,
-    pub elf_is_v3: u8,
-    pub snapshot_valid: u8,
-    pub upgrade_delay_s: i64,
-    pub abort_buffer: [u8; 32],
-    pub snapshot_buffer: [u8; 32],
-    pub pending_kind: u8,
-    pub pending_vetoed: u8,
-    pub pending_id: u64,
-    pub pending_eta: i64,
-}
+/// Floor's config, decoded by Floor's own `Config::load`.
+pub type ConfigView = bulkhead_floor::Config;
 
 pub fn read_config(env: &Env, f: &Floor) -> ConfigView {
-    let d = env.account(&f.config).data;
-    assert_eq!(&d[0..8], b"FLOORv01");
-    let i64_at = |o: usize| i64::from_le_bytes(d[o..o + 8].try_into().unwrap());
-    let k32 = |o: usize| -> [u8; 32] { d[o..o + 32].try_into().unwrap() };
-    ConfigView {
-        guardian_count: d[424],
-        status: d[426],
-        elf_is_v3: d[427],
-        snapshot_valid: d[430],
-        upgrade_delay_s: i64_at(440),
-        abort_buffer: k32(448),
-        snapshot_buffer: k32(480),
-        pending_kind: d[520],
-        pending_vetoed: d[521],
-        pending_id: u64::from_le_bytes(d[528..536].try_into().unwrap()),
-        pending_eta: i64_at(568),
-    }
+    bulkhead_floor::Config::load(&env.account(&f.config).data).expect("a Floor config")
 }
 
 /// A protected program with Floor registered: 3 guardians, threshold 2,

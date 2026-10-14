@@ -788,7 +788,7 @@ fn a_named_veto_does_not_apply_to_a_different_proposal() {
         &[f.propose(&p.owner.pubkey(), UPGRADE, &buf, &[], Some(&buf))],
         &[&p.owner],
     );
-    let id = u64::from_le_bytes(env.account(&f.config).data[528..536].try_into().unwrap());
+    let id = read_config(&env, f).pending_id;
     assert_eq!(
         env.fails(&[f.veto_id(&p.g[0].pubkey(), Some(id + 1))], &[&p.g[0]]),
         err::NO_PROPOSAL
@@ -817,9 +817,8 @@ fn an_older_guardian_set_cannot_bring_back_an_ejected_guardian() {
     env.advance(3 * DAY + 1);
     // Whatever is still pending, executing it must not bring g2 back.
     let _ = env.send(&[f.execute_config()], &[]);
-    let d = env.account(&f.config).data;
-    let n = d[424] as usize;
-    let back = (0..n).any(|i| d[104 + 32 * i..136 + 32 * i] == gs[2].to_bytes());
+    let c = read_config(&env, f);
+    let back = c.guardians[..c.guardian_count as usize].contains(&gs[2].to_bytes());
     assert!(!back, "the ejected guardian came back through an older proposal");
 }
 
@@ -827,7 +826,7 @@ const SET_OWNER: u8 = 5;
 const SET_RECOVERY: u8 = 7;
 
 fn floor_owner(env: &Env, f: &Floor) -> [u8; 32] {
-    env.account(&f.config).data[72..104].try_into().unwrap()
+    read_config(env, f).owner
 }
 
 /// The owner sets a recovery key: a delayed change like any other.
@@ -1183,7 +1182,7 @@ fn a_stolen_floor_recovery_key_is_replaced_by_the_owner_with_a_live_quorum() {
     assert_eq!(read_config(&env, f).pending_kind, 0);
     assert_eq!(env.fails(&[f.propose(&stolen.pubkey(), SET_OWNER, &thief, &[], None)], &[&stolen]), err::NOT_OWNER);
     env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
-    assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref(), "the new recovery key");
+    assert_eq!(read_config(&env, f).recovery, fresh.to_bytes(), "the new recovery key");
 }
 
 /// Finding 66: anyone may re-pin, so a stop naming an earlier pin must still
@@ -1316,7 +1315,7 @@ fn a_guardian_is_never_the_recovery_key() {
     let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(fresh.as_ref());
     env.ok(&[ix], &[&team]);
-    assert_eq!(&env.account(&f.config).data[852..884], fresh.as_ref());
+    assert_eq!(read_config(&env, &f).recovery, fresh.to_bytes());
 }
 
 /// A recovery key cut short at registration is an error, not "no recovery key".
