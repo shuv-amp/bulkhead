@@ -1479,3 +1479,40 @@ fn a_strangers_re_pin_cannot_make_a_release_fail() {
     }
     assert!(env.svm.get_account(&copy).is_some_and(|a| a.lamports > 0), "the stranger's copy keeps its rent");
 }
+
+/// Floor's config layout is a contract with off-chain readers that decode it
+/// by byte offset (`decodeFloor` in `cloud/lib/solana.mjs`: the guardian and
+/// the status page). Tests decode through `Config::load`, so this test pins
+/// both directions to those offsets, field by field: `load` reads each field
+/// where the readers do (on a pattern where any misread shows), and `store`
+/// writes it there. A layout change must change both sides.
+#[test]
+fn the_config_layout_matches_what_off_chain_readers_decode() {
+    use bulkhead_floor::{Config, CONFIG_LEN};
+    let mut d = patterned(CONFIG_LEN, b"FLOORv01");
+    d[424] = 8; // guardian count: load refuses more than 8
+    d[584..586].copy_from_slice(&200u16.to_le_bytes()); // payload length: at most 266
+    let c = Config::load(&d).unwrap();
+    let mut stored = vec![0u8; CONFIG_LEN];
+    c.store(&mut stored).unwrap();
+    for d in [&d, &stored] {
+        let k = |o: usize| -> [u8; 32] { d[o..o + 32].try_into().unwrap() };
+        let i64_at = |o: usize| i64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+        assert_eq!(&d[0..8], b"FLOORv01");
+        assert_eq!((k(8), k(40), k(72)), (c.program, c.programdata, c.owner));
+        assert_eq!(d[424], c.guardian_count);
+        for i in 0..8 {
+            assert_eq!(k(104 + 32 * i), c.guardians[i], "guardian {i}");
+            assert_eq!(i64_at(360 + 8 * i), c.last_heartbeat[i], "heartbeat {i}");
+        }
+        assert_eq!((d[425], d[426], d[427], d[430]), (c.threshold, c.status, c.elf_is_v3, c.snapshot_valid));
+        assert_eq!((i64_at(432), i64_at(440)), (c.heartbeat_interval_s, c.upgrade_delay_s));
+        assert_eq!((k(448), k(480)), (c.abort_buffer, c.snapshot_buffer));
+        assert_eq!((d[520], d[521], d[522]), (c.pending_kind, c.pending_vetoed, c.pending_approvals));
+        assert_eq!(u64::from_le_bytes(d[528..536].try_into().unwrap()), c.pending_id);
+        assert_eq!((k(536), i64_at(568), i64_at(576)), (c.pending_target, c.pending_eta, c.pending_expires));
+        assert_eq!(u16::from_le_bytes([d[584], d[585]]), c.pending_payload_len);
+        assert_eq!(&d[586..786], &c.pending_payload[..200]);
+        assert_eq!((k(852), d[884]), (c.recovery, c.pending_by_recovery));
+    }
+}

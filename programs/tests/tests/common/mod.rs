@@ -607,10 +607,19 @@ impl Floor {
 }
 
 /// Floor's config, decoded by Floor's own `Config::load`.
-pub type ConfigView = bulkhead_floor::Config;
-
-pub fn read_config(env: &Env, f: &Floor) -> ConfigView {
+pub fn read_config(env: &Env, f: &Floor) -> bulkhead_floor::Config {
     bulkhead_floor::Config::load(&env.account(&f.config).data).expect("a Floor config")
+}
+
+/// `len` bytes starting with `disc`, then a pattern in which no field-sized
+/// window repeats nearby (byte i is `i mod 251 + 1`, never zero), so a field
+/// read even one byte off decodes to a different value. Layout tests decode it
+/// with a program's `load` and compare every field with the offsets the
+/// off-chain readers use.
+pub fn patterned(len: usize, disc: &[u8; 8]) -> Vec<u8> {
+    let mut d: Vec<u8> = (0..len).map(|i| (i % 251) as u8 + 1).collect();
+    d[..8].copy_from_slice(disc);
+    d
 }
 
 /// A protected program with Floor registered: 3 guardians, threshold 2,
