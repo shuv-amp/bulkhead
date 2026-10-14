@@ -165,6 +165,9 @@ Measured 8 Oct 2026 by `compute_units_are_within_the_spec_targets` (`programs/te
 | `release` that becomes a ticket | 18,844 | — |
 | `settle_ticket` | 5,732 | ≤ 20k |
 | `attest` | 5,554 | — |
+| `release` with a full ledger (8 mints): a borrow, a priced withdrawal, a search that queues the rest | 38,155 / 37,933 / 76,887 (through Harbor; 14 Oct, `a_full_ledger_release_is_cheap_but_a_ninth_mint_needs_v0`). Net of PDA bump searches (1,500 CU per step below 255: Harbor's caller, the ticket's when part queues). Not a ceiling: the search grows with log₂ of the amount (`07` §2: set compute limits from a simulation) | < 80k net, asserted |
 | Ten payouts in one transaction (S8) | < 1.4M (the transaction limit) | — |
+
+**Transaction size, not compute, bounds a `release`** (finding 104). It names 11 fixed Vault accounts, then an (asset, price) pair for the paid mint and each other mint in the owner's ledger. Through Harbor (14 fixed keys: the Vault's 11, the Harbor and Vault programs, and the user) with a relayer paying, a borrow against a full ledger is 1,176 of a legacy transaction's 1,232 bytes, and paying a ninth mint is 1,242 bytes: it does not fit. Integrators whose users hold many mints build `release` as a v0 transaction with an address lookup table (`07` §2).
 
 Framework decision (D13, revised 27 Sep): **Pinocchio for both programs.** Floor showed the approach works: 56 KB, a 10k-CU stop, zero framework code. Both programs share one dependency (the verified core) and one test harness. The cost is manual account checks, and each has a negative test.

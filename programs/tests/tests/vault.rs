@@ -3945,3 +3945,319 @@ fn account_layouts_match_what_off_chain_readers_decode() {
     }
     assert_eq!(&stored[0..8], &Backing::DISC[..]);
 }
+
+// ---------------------------------------------------------------------------
+// Measurement: the cost of a release for an owner whose ledger is full
+// (MAX_SLOTS = 8). `release` needs (asset PDA, price account) for the paid
+// mint and every other mint in the recipient owner's ledger, so the account
+// list, the transaction size and the compute grow with the ledger. Reports
+// CU (Harbor CPI path, the Vault's own share, and a direct quote_release),
+// unique keys, and the legacy transaction size against the 1,232-byte limit.
+// LiteSVM here has no explicit compute budget: the limit comes from the
+// transaction (200,000 per instruction by default, at most 1,400,000).
+// ---------------------------------------------------------------------------
+
+const PACKET: usize = 1_232;
+const MAX_SLOTS_T: usize = bulkhead_core::consts::MAX_SLOTS;
+
+fn compact_len(n: usize) -> usize {
+    if n < 0x80 {
+        1
+    } else if n < 0x4000 {
+        2
+    } else {
+        3
+    }
+}
+
+/// Wire size of a legacy transaction carrying `msg`: signatures, then the
+/// message (header, keys, blockhash, compiled instructions).
+fn legacy_tx_size(msg: &solana_message::Message) -> usize {
+    let sigs = msg.header.num_required_signatures as usize;
+    let mut s = compact_len(sigs) + 64 * sigs;
+    s += 3 + compact_len(msg.account_keys.len()) + 32 * msg.account_keys.len() + 32;
+    s += compact_len(msg.instructions.len());
+    for ci in &msg.instructions {
+        s += 1 + compact_len(ci.accounts.len()) + ci.accounts.len() + compact_len(ci.data.len()) + ci.data.len();
+    }
+    s
+}
+
+fn compute_budget_program() -> Address {
+    Address::from_str_const("ComputeBudget111111111111111111111111111111")
+}
+fn cu_limit_ix(units: u32) -> Instruction {
+    let mut data = vec![2u8];
+    data.extend_from_slice(&units.to_le_bytes());
+    Instruction { program_id: compute_budget_program(), accounts: vec![], data }
+}
+fn cu_price_ix(micro_lamports: u64) -> Instruction {
+    let mut data = vec![3u8];
+    data.extend_from_slice(&micro_lamports.to_le_bytes());
+    Instruction { program_id: compute_budget_program(), accounts: vec![], data }
+}
+
+/// `ix` with every `from` key replaced by `to` (the user paying their own fees).
+fn rekey(ix: &Instruction, from: &Address, to: &Address) -> Instruction {
+    let mut ix = ix.clone();
+    for a in ix.accounts.iter_mut() {
+        if &a.pubkey == from {
+            a.pubkey = *to;
+        }
+    }
+    ix
+}
+
+struct Ledgered {
+    env: Env,
+    m: Market,
+    vs: Vec<VaultRef>,
+    borrower: Keypair,
+    slots: usize,
+    placeholder_prices: bool,
+}
+
+impl Ledgered {
+    /// `slots - 1` collateral mints and one borrowed mint in the borrower's
+    /// ledger, plus one more priced mint the borrower never touched.
+    fn new(slots: usize) -> Ledgered {
+        let mut env = Env::new();
+        let m = Market::new(&mut env);
+        let vs: Vec<VaultRef> = (0..=slots)
+            .map(|i| m.create_vault(&mut env, 6, Limits::default_limits(), [0x40 + i as u8; 32], None))
+            .collect();
+        for v in &vs {
+            let ix = m.upsert_asset_ix(&env, v, &asset_bytes(true, 9_000, 10_100, 20_000, 60, 100, v.feed));
+            env.ok(&[ix], &[&m.admin]);
+        }
+        let lender = Keypair::new();
+        env.fund(&lender);
+        let borrower = Keypair::new();
+        env.fund(&borrower);
+        let mut l = Ledgered { env, m, vs, borrower, slots, placeholder_prices: false };
+        // Liquidity in the loan mint and in the untouched mint.
+        l.deposit(slots - 1, &lender, 1_000_000 * USDC);
+        l.deposit(slots, &lender, 1_000_000 * USDC);
+        let b = l.borrower.insecure_clone();
+        for i in 0..slots - 1 {
+            l.deposit(i, &b, 10_000 * USDC);
+        }
+        l.env.ok(&[l.m.propose_seal_ix()], &[&l.m.admin]);
+        l.env.advance(3 * DAY);
+        let refs: Vec<&VaultRef> = l.vs.iter().collect();
+        let ix = l.m.execute_seal_ix(&refs);
+        l.env.ok(&[ix], &[]);
+        l.refresh_prices();
+        // Open the loan: the ledger now holds `slots` positions.
+        let ix = l.withdraw(slots - 1, 100 * USDC);
+        let o = outcome(&l.env.ok(&[ix], &[&b]));
+        assert_eq!(o.backed, 100 * USDC, "a signed, collateralised loan is backed");
+        l
+    }
+
+    fn deposit(&mut self, i: usize, user: &Keypair, amount: u64) {
+        let v = &self.vs[i];
+        let acc = self.env.token_account(&v.mint, &user.pubkey(), &v.token_program);
+        self.env.mint_to(&v.mint, &v.mint_authority, &acc, amount, &v.token_program);
+        let ix = self.m.deposit_ix(&self.env, v, &user.pubkey(), &acc, amount);
+        self.env.ok(&[ix], &[user]);
+    }
+
+    fn refresh_prices(&mut self) {
+        let t = self.env.time;
+        for v in &self.vs {
+            self.env.set_price(&v.price, v.feed, 100_000_000, 20_000, -8, 100_000_000, t);
+        }
+    }
+
+    /// Pairs for mint `i`, then every other ledger mint in ledger order.
+    fn pairs(&self, i: usize) -> Vec<(Address, Address)> {
+        // Placeholder prices: every price account is the system program.
+        let price = |j: usize| if self.placeholder_prices { SYSTEM } else { self.vs[j].price };
+        let mut p = vec![(self.vs[i].asset, price(i))];
+        for j in 0..self.slots {
+            if j != i {
+                p.push((self.vs[j].asset, price(j)));
+            }
+        }
+        p
+    }
+
+    fn withdraw(&mut self, i: usize, amount: u64) -> Instruction {
+        let to = self.env.token_account(&self.vs[i].mint, &self.borrower.pubkey(), &self.vs[i].token_program);
+        let pairs = self.pairs(i);
+        self.m.withdraw_ix(&self.env, &self.vs[i], &self.borrower.pubkey(), &to, amount, &pairs)
+    }
+
+    /// Measures one release (built as `withdraw(i, amount)`): sizes, a direct
+    /// quote_release, then the real release under the default budget (200,000
+    /// per instruction; LiteSVM sets no other limit), which it must fit.
+    fn measure(&mut self, label: &str, i: usize, amount: u64) -> Cost {
+        let ix = self.withdraw(i, amount);
+        let b = self.borrower.insecure_clone();
+        let payer = self.env.payer.pubkey();
+        // Harbor: vault program, caller, user; Vault: 10 fixed; pairs; user [s].
+        let pair_accounts = ix.accounts.len() - 3 - 10 - 1;
+
+        // Sizes: as sent (relayer pays, two signatures) and user-pays (one).
+        let msg2 = solana_message::Message::new(std::slice::from_ref(&ix), Some(&payer));
+        let own = rekey(&ix, &payer, &b.pubkey());
+        let msg1 = solana_message::Message::new(std::slice::from_ref(&own), Some(&b.pubkey()));
+        let msg1cb = solana_message::Message::new(&[cu_limit_ix(400_000), cu_price_ix(1), own], Some(&b.pubkey()));
+        let (k2, s2) = (msg2.account_keys.len(), legacy_tx_size(&msg2));
+        let (k1, s1) = (msg1.account_keys.len(), legacy_tx_size(&msg1));
+        let (k1cb, s1cb) = (msg1cb.account_keys.len(), legacy_tx_size(&msg1cb));
+        // Cross-check the hand count against the SDK's own serialization.
+        for msg in [&msg2, &msg1, &msg1cb] {
+            let sigs = msg.header.num_required_signatures as usize;
+            assert_eq!(legacy_tx_size(msg), compact_len(sigs) + 64 * sigs + msg.serialize().len());
+        }
+
+        // Direct Vault call: quote_release runs the same computation, no writes.
+        let mut qacc = vec![AccountMeta::new_readonly(self.m.caller, false)];
+        qacc.extend(ix.accounts[3..].iter().cloned());
+        let nonce = u64::from_le_bytes(ix.data[9..17].try_into().unwrap());
+        // The ticket PDA's bump: `release` derives it on chain only when part
+        // of the payout queues, and each step below 255 costs extra compute.
+        let (_, ticket_bump) = Address::find_program_address(
+            &[b"ticket", self.m.protocol.as_ref(), payer.as_ref(), &nonce.to_le_bytes()],
+            &self.m.vault_program,
+        );
+        // Harbor derives its caller PDA on every call, at the same cost per
+        // step. Harbor's program id differs between machines, and with it
+        // this bump and the protocol PDA in the ticket's seeds.
+        let (_, caller_bump) = Address::find_program_address(&[b"bulkhead-caller"], &self.m.harbor);
+        let quote = self.m.vault_ix(23, &release_args(amount, nonce), qacc);
+        let q = self.env.ok(&[quote], &[&b]);
+        let quote_cu = q.compute_units_consumed;
+        let quoted = outcome(&q);
+
+        // The release itself, under the default budget.
+        let prefix = format!("Program {} consumed ", self.m.vault_program);
+        let m = self.env.ok(std::slice::from_ref(&ix), &[&b]);
+        let (cu, o) = (m.compute_units_consumed, outcome(&m));
+        let vault_cu: u64 = m
+            .logs
+            .iter()
+            .rev()
+            .find_map(|l| l.strip_prefix(&prefix)?.split(' ').next()?.parse().ok())
+            .unwrap_or(0);
+        assert_eq!((o.backed, o.instant, o.queued), (quoted.backed, quoted.instant, quoted.queued), "quote and release agree");
+        println!(
+            "[{label}] slots={} (asset, price) accounts={pair_accounts} | CU: harbor tx {cu}, vault inside CPI {vault_cu}, \
+             direct quote_release {quote_cu} | backed={} instant={} queued={} | ticket bump {ticket_bump}, caller bump {caller_bump}",
+            self.slots,
+            o.backed / USDC,
+            o.instant / USDC,
+            o.queued / USDC,
+        );
+        println!(
+            "    relayer+user (2 sigs): {k2} keys, {s2} B, margin {} B | user pays (1 sig): {k1} keys, {s1} B, margin {} B | \
+             user pays + CU limit/price ixs: {k1cb} keys, {s1cb} B, margin {} B",
+            PACKET as i64 - s2 as i64,
+            PACKET as i64 - s1 as i64,
+            PACKET as i64 - s1cb as i64,
+        );
+        // Harbor's caller search runs on every call; the ticket's only when a
+        // ticket is created.
+        let ticket_steps = if o.queued > 0 { 255 - ticket_bump as u64 } else { 0 };
+        let bump_steps = 255 - caller_bump as u64 + ticket_steps;
+        Cost { o, cu, bump_steps, pair_accounts, keys2: k2, size2: s2, size1: s1 }
+    }
+}
+
+/// What one release cost: the outcome, the transaction's compute and the
+/// PDA bump-search steps in it (Harbor's caller, and the ticket's), the (asset, price) accounts it named,
+/// and the legacy transaction's keys and size with a relayer paying (two
+/// signatures) and the user paying (one).
+struct Cost {
+    o: Outcome,
+    cu: u64,
+    bump_steps: u64,
+    pair_accounts: usize,
+    keys2: usize,
+    size2: usize,
+    size1: usize,
+}
+
+/// Every case: under 80,000 CU (about 77k in the worst case measured) apart from two PDA bump
+/// searches, each 1,500 CU per step the bump sits below 255: Harbor's caller
+/// PDA (its program id decides it) and, when a ticket is created, the ticket's
+/// (the protocol, payer and nonce decide it; half of all tickets need none); and, through Harbor,
+/// 14 fixed keys plus `mints` (asset, price) pairs, all distinct.
+fn assert_cheap(c: &Cost, mints: usize) {
+    let net = c.cu - 1_500 * c.bump_steps;
+    assert!(net < 80_000, "{} CU, {} of them bump searches", c.cu, c.cu - net);
+    assert_eq!(c.pair_accounts, 2 * mints, "one (asset, price) pair per mint");
+    assert_eq!(c.keys2, 14 + 2 * mints);
+}
+
+/// The cost of `release` for an owner whose ledger holds `slots` positions;
+/// returns the size, with a relayer paying, of paying a mint outside the
+/// ledger (one more pair than the ledger holds).
+fn release_cost_report(slots: usize) -> (usize, usize) {
+    let mut l = Ledgered::new(slots);
+    let loan = slots - 1;
+    println!("== ledger with {slots} positions ({} collateral mints, 1 borrowed) ==", slots - 1);
+    // A further backed loan of the borrowed mint: `valid(amount)` holds at once.
+    let c = l.measure("borrow more, fully backed", loan, 100 * USDC);
+    assert_eq!(c.o.backed, 100 * USDC);
+    assert_cheap(&c, slots);
+    assert!(c.size2 <= PACKET, "a borrow fits a legacy transaction: {} B", c.size2);
+    // Withdrawing collateral while a loan is open: priced, not G2.
+    let c = l.measure("withdraw collateral (priced)", 0, 100 * USDC);
+    assert_eq!(c.o.backed, 100 * USDC);
+    assert_cheap(&c, slots);
+    // Over-asking: the binary search runs and the rest queues as a ticket.
+    let c = l.measure("over-ask: search + queued ticket", loan, 200_000 * USDC);
+    assert!(c.o.backed > 0 && c.o.backed < 200_000 * USDC && c.o.queued > 0);
+    assert_cheap(&c, slots);
+
+    // A mint not in the ledger, on a fresh ledger with borrowing room: one
+    // more pair than the ledger holds. Below a full ledger the payout is a
+    // new, backed position; at a full ledger there is no slot for it, so
+    // nothing can be backed, prices or not.
+    let mut l = Ledgered::new(slots);
+    // A borrow with placeholder price accounts is not a backed loan: nothing
+    // can be priced, so it is all unbacked (`07` §2).
+    l.placeholder_prices = true;
+    let c = l.measure("borrow with placeholder prices", loan, 100 * USDC);
+    assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 100 * USDC), "placeholders back nothing");
+    l.placeholder_prices = false;
+    let c = l.measure("withdraw a mint outside the ledger", slots, 10 * USDC);
+    assert_cheap(&c, slots + 1);
+    let outside = (c.size2, c.size1);
+    if slots < MAX_SLOTS_T {
+        assert_eq!(c.o.backed, 10 * USDC, "a new position, backed");
+    } else {
+        assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 10 * USDC), "no slot: nothing backed");
+        // So no price can change the outcome: the price accounts may all be one placeholder
+        // (`07` §2), and the payout then fits a legacy transaction.
+        l.placeholder_prices = true;
+        let c = l.measure("the same, placeholder prices", slots, 10 * USDC);
+        assert_eq!((c.o.backed, c.o.instant + c.o.queued), (0, 10 * USDC));
+        assert!(c.size2 <= PACKET, "placeholders: {} B", c.size2);
+    }
+    outside
+}
+
+/// Finding 104: in these cases compute is not the limit (about 77k CU net of PDA
+/// bump searches; it grows with the search, so integrators simulate), the size is.
+/// With a full ledger (8 mints), a borrow still fits a legacy transaction (1,176
+/// of 1,232 bytes with a relayer paying), but paying a ninth mint does not
+/// (1,242 bytes) unless the user pays the fees; an integrator's own accounts
+/// make it worse. Such borrowers need a v0 transaction with an address lookup
+/// table (`07` §2). If this changes, update `07` and `09`.
+#[test]
+fn a_full_ledger_release_is_cheap_but_a_ninth_mint_needs_v0() {
+    assert_eq!(MAX_SLOTS_T, 8);
+    let (relayer, user) = release_cost_report(MAX_SLOTS_T);
+    assert!(relayer > PACKET, "a ninth mint no longer overflows a legacy transaction: {relayer} B");
+    assert!(user <= PACKET, "user pays: {user} B");
+}
+
+#[test]
+fn a_four_mint_ledger_release_fits_with_room() {
+    let (relayer, _) = release_cost_report(4);
+    assert!(relayer + 200 <= PACKET, "{relayer} B");
+}
