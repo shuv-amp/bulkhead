@@ -3806,8 +3806,8 @@ fn a_reset_on_a_clock_that_stepped_back_grants_nothing_extra() {
 /// through the Vault's own types, so this test pins both directions to those
 /// offsets, field by field: `load` reads each field where the readers do (on a
 /// pattern where any misread shows), and `store` writes it there. A layout
-/// change must change both sides. Booleans are checked as the readers decode
-/// them (`=== 1`) in what `store` writes. (`decodeChange` and `assetVersion`
+/// change must change both sides. Booleans are exact bytes, 1 and then 0, as
+/// the readers decode them (`=== 1`). (`decodeChange` and `assetVersion`
 /// are pinned too; the backing account has no off-chain reader yet, and its
 /// layout is the one `05` documents.)
 #[test]
@@ -3820,63 +3820,74 @@ fn account_layouts_match_what_off_chain_readers_decode() {
         d[o..o + N].try_into().unwrap()
     }
 
-    let mut d = patterned(Protocol::LEN, &Protocol::DISC);
-    d[424] = 8; // guardian count: load refuses more than 8
-    let p = Protocol::load(&d).unwrap();
-    let mut stored = vec![0u8; Protocol::LEN];
-    p.store(&mut stored).unwrap();
-    for d in [&d, &stored] {
-        assert_eq!((k(d, 8), k(d, 40), k(d, 72)), (p.protocol_program, p.caller, p.admin));
-        for i in 0..8 {
-            assert_eq!(k(d, 104 + 32 * i), p.guardians[i], "guardian {i}");
-            assert_eq!(i64::from_le_bytes(n(d, 360 + 8 * i)), p.last_heartbeat[i], "heartbeat {i}");
+    // Each struct with booleans is checked with every boolean byte 1, then 0:
+    // the readers decode `=== 1`, so a store that wrote anything else for
+    // true, or a constant, must fail.
+    for flag in [1u8, 0] {
+        let mut d = patterned(Protocol::LEN, &Protocol::DISC);
+        d[424] = 8; // guardian count: load refuses more than 8
+        (d[426], d[532]) = (flag, flag);
+        let p = Protocol::load(&d).unwrap();
+        assert_eq!((p.sealed, p.seal_vetoed), (flag == 1, flag == 1));
+        let mut stored = vec![0u8; Protocol::LEN];
+        p.store(&mut stored).unwrap();
+        for d in [&d, &stored] {
+            assert_eq!((k(d, 8), k(d, 40), k(d, 72)), (p.protocol_program, p.caller, p.admin));
+            for i in 0..8 {
+                assert_eq!(k(d, 104 + 32 * i), p.guardians[i], "guardian {i}");
+                assert_eq!(i64::from_le_bytes(n(d, 360 + 8 * i)), p.last_heartbeat[i], "heartbeat {i}");
+            }
+            assert_eq!((d[424], d[425], d[426], d[427]), (p.guardian_count, p.threshold, p.sealed as u8, p.bump));
+            assert_eq!(i64::from_le_bytes(n(d, 428)), p.heartbeat_interval_s);
+            assert_eq!(i64::from_le_bytes(n(d, 436)), p.loosen_delay_s);
+            assert_eq!(i64::from_le_bytes(n(d, 444)), p.frozen_until);
+            assert_eq!((u32::from_le_bytes(n(d, 452)), u32::from_le_bytes(n(d, 456))), (p.abdications, p.vault_count));
+            assert_eq!((u64::from_le_bytes(n(d, 460)), u64::from_le_bytes(n(d, 468))), (p.next_ticket_id, p.next_change_id));
+            assert_eq!(k(d, 476), p.lifeboat_destination);
+            assert_eq!(i64::from_le_bytes(n(d, 508)), p.destination_set_s);
+            assert_eq!((i64::from_le_bytes(n(d, 516)), i64::from_le_bytes(n(d, 524))), (p.seal_executable_s, p.seal_expires_s));
+            assert_eq!(d[532], p.seal_vetoed as u8);
+            for (i, v) in p.versions.iter().enumerate() {
+                assert_eq!(u32::from_le_bytes(n(d, 533 + 4 * i)), *v, "version {i}");
+            }
+            assert_eq!(k(d, 553), p.recovery);
         }
-        assert_eq!((d[424], d[425], d[426] != 0, d[427]), (p.guardian_count, p.threshold, p.sealed, p.bump));
-        assert_eq!(i64::from_le_bytes(n(d, 428)), p.heartbeat_interval_s);
-        assert_eq!(i64::from_le_bytes(n(d, 436)), p.loosen_delay_s);
-        assert_eq!(i64::from_le_bytes(n(d, 444)), p.frozen_until);
-        assert_eq!((u32::from_le_bytes(n(d, 452)), u32::from_le_bytes(n(d, 456))), (p.abdications, p.vault_count));
-        assert_eq!((u64::from_le_bytes(n(d, 460)), u64::from_le_bytes(n(d, 468))), (p.next_ticket_id, p.next_change_id));
-        assert_eq!(k(d, 476), p.lifeboat_destination);
-        assert_eq!(i64::from_le_bytes(n(d, 508)), p.destination_set_s);
-        assert_eq!((i64::from_le_bytes(n(d, 516)), i64::from_le_bytes(n(d, 524))), (p.seal_executable_s, p.seal_expires_s));
-        assert_eq!(d[532] != 0, p.seal_vetoed);
-        for (i, v) in p.versions.iter().enumerate() {
-            assert_eq!(u32::from_le_bytes(n(d, 533 + 4 * i)), *v, "version {i}");
-        }
-        assert_eq!(k(d, 553), p.recovery);
+        assert_eq!(&stored[0..8], &Protocol::DISC[..]);
     }
-    assert_eq!((&stored[0..8], stored[426], stored[532]), (&Protocol::DISC[..], p.sealed as u8, p.seal_vetoed as u8));
 
-    let d = patterned(Vault::LEN, &Vault::DISC);
-    let v = Vault::load(&d).unwrap();
-    let mut stored = vec![0u8; Vault::LEN];
-    v.store(&mut stored).unwrap();
-    let l = &v.limits;
-    for d in [&d, &stored] {
-        assert_eq!((k(d, 8), k(d, 40), k(d, 72), k(d, 104)), (v.protocol, v.mint, v.token_program, v.token_account));
-        assert_eq!((u16::from_le_bytes(n(d, 136)), u32::from_le_bytes(n(d, 138))), (l.short_bps, l.short_window_s));
-        assert_eq!((u16::from_le_bytes(n(d, 142)), u32::from_le_bytes(n(d, 144))), (l.long_bps, l.long_window_s));
-        assert_eq!(u32::from_le_bytes(n(d, 148)), l.min_queue_delay_s);
-        assert_eq!((u64::from_le_bytes(n(d, 152)), u64::from_le_bytes(n(d, 160))), (l.short_floor, l.long_floor));
-        assert_eq!((u64::from_le_bytes(n(d, 168)), u64::from_le_bytes(n(d, 176))), (l.short_cap, l.long_cap));
-        assert_eq!((i64::from_le_bytes(n(d, 184)), i64::from_le_bytes(n(d, 192))), (v.tat_short_ms, v.tat_long_ms));
-        assert_eq!((u64::from_le_bytes(n(d, 200)), i64::from_le_bytes(n(d, 208))), (v.ref_balance, v.ref_updated_s));
-        assert_eq!((d[216] != 0, d[217], d[218], d[219]), (v.ref_initialized, v.decimals, v.bump, v.token_bump));
-        assert_eq!((u32::from_le_bytes(n(d, 220)), u64::from_le_bytes(n(d, 224))), (v.pending_tickets, v.queued_amount));
-        assert_eq!((i64::from_le_bytes(n(d, 232)), u64::from_le_bytes(n(d, 240))), (v.frozen_until, v.imported));
-        assert_eq!((u128::from_le_bytes(n(d, 248)), u128::from_le_bytes(n(d, 264))), (v.total_in, v.backed_out));
-        assert_eq!((u128::from_le_bytes(n(d, 280)), u128::from_le_bytes(n(d, 296))), (v.unbacked_out, v.settled));
-        assert_eq!(u128::from_le_bytes(n(d, 312)), v.cancelled);
-        assert_eq!((u64::from_le_bytes(n(d, 328)), u64::from_le_bytes(n(d, 336))), (v.lifeboat_amount, v.exit_amount));
-        assert_eq!((i64::from_le_bytes(n(d, 344)), i64::from_le_bytes(n(d, 352))), (v.exit_proposed_s, v.exit_executable_s));
-        assert_eq!((i64::from_le_bytes(n(d, 360)), d[368] != 0), (v.exit_expires_s, v.exit_vetoed));
-        assert_eq!(u32::from_le_bytes(n(d, 369)), v.limits_version);
-        assert_eq!((u64::from_le_bytes(n(d, 373)), u64::from_le_bytes(n(d, 381))), (v.low.prev, v.low.cur));
-        assert_eq!(i64::from_le_bytes(n(d, 389)), v.low.window);
-        assert_eq!(k(d, 397), v.exit_proposer);
+    for flag in [1u8, 0] {
+        let mut d = patterned(Vault::LEN, &Vault::DISC);
+        (d[216], d[368]) = (flag, flag);
+        let v = Vault::load(&d).unwrap();
+        assert_eq!((v.ref_initialized, v.exit_vetoed), (flag == 1, flag == 1));
+        let mut stored = vec![0u8; Vault::LEN];
+        v.store(&mut stored).unwrap();
+        let l = &v.limits;
+        for d in [&d, &stored] {
+            assert_eq!((k(d, 8), k(d, 40), k(d, 72), k(d, 104)), (v.protocol, v.mint, v.token_program, v.token_account));
+            assert_eq!((u16::from_le_bytes(n(d, 136)), u32::from_le_bytes(n(d, 138))), (l.short_bps, l.short_window_s));
+            assert_eq!((u16::from_le_bytes(n(d, 142)), u32::from_le_bytes(n(d, 144))), (l.long_bps, l.long_window_s));
+            assert_eq!(u32::from_le_bytes(n(d, 148)), l.min_queue_delay_s);
+            assert_eq!((u64::from_le_bytes(n(d, 152)), u64::from_le_bytes(n(d, 160))), (l.short_floor, l.long_floor));
+            assert_eq!((u64::from_le_bytes(n(d, 168)), u64::from_le_bytes(n(d, 176))), (l.short_cap, l.long_cap));
+            assert_eq!((i64::from_le_bytes(n(d, 184)), i64::from_le_bytes(n(d, 192))), (v.tat_short_ms, v.tat_long_ms));
+            assert_eq!((u64::from_le_bytes(n(d, 200)), i64::from_le_bytes(n(d, 208))), (v.ref_balance, v.ref_updated_s));
+            assert_eq!((d[216], d[217], d[218], d[219]), (v.ref_initialized as u8, v.decimals, v.bump, v.token_bump));
+            assert_eq!((u32::from_le_bytes(n(d, 220)), u64::from_le_bytes(n(d, 224))), (v.pending_tickets, v.queued_amount));
+            assert_eq!((i64::from_le_bytes(n(d, 232)), u64::from_le_bytes(n(d, 240))), (v.frozen_until, v.imported));
+            assert_eq!((u128::from_le_bytes(n(d, 248)), u128::from_le_bytes(n(d, 264))), (v.total_in, v.backed_out));
+            assert_eq!((u128::from_le_bytes(n(d, 280)), u128::from_le_bytes(n(d, 296))), (v.unbacked_out, v.settled));
+            assert_eq!(u128::from_le_bytes(n(d, 312)), v.cancelled);
+            assert_eq!((u64::from_le_bytes(n(d, 328)), u64::from_le_bytes(n(d, 336))), (v.lifeboat_amount, v.exit_amount));
+            assert_eq!((i64::from_le_bytes(n(d, 344)), i64::from_le_bytes(n(d, 352))), (v.exit_proposed_s, v.exit_executable_s));
+            assert_eq!((i64::from_le_bytes(n(d, 360)), d[368]), (v.exit_expires_s, v.exit_vetoed as u8));
+            assert_eq!(u32::from_le_bytes(n(d, 369)), v.limits_version);
+            assert_eq!((u64::from_le_bytes(n(d, 373)), u64::from_le_bytes(n(d, 381))), (v.low.prev, v.low.cur));
+            assert_eq!(i64::from_le_bytes(n(d, 389)), v.low.window);
+            assert_eq!(k(d, 397), v.exit_proposer);
+        }
+        assert_eq!(&stored[0..8], &Vault::DISC[..]);
     }
-    assert_eq!((&stored[0..8], stored[216], stored[368]), (&Vault::DISC[..], v.ref_initialized as u8, v.exit_vetoed as u8));
 
     let d = patterned(Ticket::LEN, &Ticket::DISC);
     let t = Ticket::load(&d).unwrap();
@@ -3890,22 +3901,26 @@ fn account_layouts_match_what_off_chain_readers_decode() {
     }
     assert_eq!(&stored[0..8], &Ticket::DISC[..]);
 
-    let mut d = patterned(Change::LEN, &Change::DISC);
-    d[140..142].copy_from_slice(&200u16.to_le_bytes()); // payload length: at most 300
-    let c = Change::load(&d).unwrap();
-    let mut stored = vec![0u8; Change::LEN];
-    c.store(&mut stored).unwrap();
-    for d in [&d, &stored] {
-        assert_eq!((k(d, 8), u64::from_le_bytes(n(d, 40)), d[48]), (c.protocol, c.id, c.kind));
-        assert_eq!((d[49] != 0, d[50] != 0, d[51]), (c.vetoed, c.executed, c.bump));
-        assert_eq!((k(d, 52), k(d, 84)), (c.target, c.proposer));
-        assert_eq!((i64::from_le_bytes(n(d, 116)), i64::from_le_bytes(n(d, 124))), (c.created_s, c.executable_s));
-        assert_eq!(i64::from_le_bytes(n(d, 132)), c.expires_s);
-        assert_eq!(u16::from_le_bytes(n(d, 140)), c.payload_len);
-        assert_eq!(&d[142..342], &c.payload[..200]);
-        assert_eq!(u32::from_le_bytes(n(d, 442)), c.base_version);
+    for flag in [1u8, 0] {
+        let mut d = patterned(Change::LEN, &Change::DISC);
+        d[140..142].copy_from_slice(&200u16.to_le_bytes()); // payload length: at most 300
+        (d[49], d[50]) = (flag, flag);
+        let c = Change::load(&d).unwrap();
+        assert_eq!((c.vetoed, c.executed), (flag == 1, flag == 1));
+        let mut stored = vec![0u8; Change::LEN];
+        c.store(&mut stored).unwrap();
+        for d in [&d, &stored] {
+            assert_eq!((k(d, 8), u64::from_le_bytes(n(d, 40)), d[48]), (c.protocol, c.id, c.kind));
+            assert_eq!((d[49], d[50], d[51]), (c.vetoed as u8, c.executed as u8, c.bump));
+            assert_eq!((k(d, 52), k(d, 84)), (c.target, c.proposer));
+            assert_eq!((i64::from_le_bytes(n(d, 116)), i64::from_le_bytes(n(d, 124))), (c.created_s, c.executable_s));
+            assert_eq!(i64::from_le_bytes(n(d, 132)), c.expires_s);
+            assert_eq!(u16::from_le_bytes(n(d, 140)), c.payload_len);
+            assert_eq!(&d[142..342], &c.payload[..200]);
+            assert_eq!(u32::from_le_bytes(n(d, 442)), c.base_version);
+        }
+        assert_eq!(&stored[0..8], &Change::DISC[..]);
     }
-    assert_eq!((&stored[0..8], stored[49], stored[50]), (&Change::DISC[..], c.vetoed as u8, c.executed as u8));
 
     let d = patterned(Asset::LEN, &Asset::DISC);
     let a = Asset::load(&d).unwrap();

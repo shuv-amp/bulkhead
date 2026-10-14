@@ -268,9 +268,15 @@ jobs:
           name: fuzz-artifacts
           path: fuzz/artifacts
           retention-days: 30
+      # The fuzz crate is its own workspace, linted here (a change to fuzz/
+      # alone runs only this job). Last, so a lint never skips the corpus
+      # steps or reads as a crash; it runs whatever the fuzz result was.
+      - name: Clippy (the fuzz crate)
+        if: ${{ !cancelled() }}
+        run: cd fuzz && cargo +"$NIGHTLY" clippy --all-targets -- -D warnings
 
   kani:
-    # Bounded model checking of the core's 15 harnesses (proofs.rs). Kani is
+    # Bounded model checking of the core's 16 harnesses (proofs.rs). Kani is
     # installed at a pinned version from crates.io, not through an action.
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.kani == 'true'
