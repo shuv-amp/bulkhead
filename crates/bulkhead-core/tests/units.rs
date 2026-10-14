@@ -850,3 +850,125 @@ fn guardian_set_shape_is_exact() {
         );
     }
 }
+
+// --- guardian sets (one parser for Floor and the Vault) ---------------------
+
+use bulkhead_core::governance::{
+    alive_mask, guardian_index, signer_bits, GuardianSet, GuardianSetError, SignerError,
+};
+
+/// `[count][keys][threshold][interval]` for keys `1..=count` (as bytes).
+fn encoded_set(count: u8, threshold: u8, interval: i64) -> Vec<u8> {
+    let mut b = vec![count];
+    for i in 1..=count {
+        b.extend_from_slice(&[i; 32]);
+    }
+    b.push(threshold);
+    b.extend_from_slice(&interval.to_le_bytes());
+    b
+}
+
+#[test]
+fn a_guardian_set_parses_exactly() {
+    const DAY: i64 = 86_400;
+    let none = [0u8; 32];
+    let owner = [0xAA; 32];
+    let mut b = encoded_set(3, 2, 7 * DAY);
+    b.extend_from_slice(&[0xEE; 5]); // what follows the set is not its business
+    let (s, used) = GuardianSet::parse(&b, [&owner, &none]).unwrap();
+    assert_eq!(
+        (s.count, s.threshold, s.interval_s, used),
+        (3, 2, 7 * DAY, 1 + 96 + 1 + 8)
+    );
+    assert_eq!(&s.keys[..3], &[[1; 32], [2; 32], [3; 32]]);
+    assert!(s.keys[3..].iter().all(|k| *k == [0; 32]));
+    // Both interval bounds are accepted, one second past either is not.
+    for (iv, ok) in [
+        (DAY, true),
+        (30 * DAY, true),
+        (DAY - 1, false),
+        (30 * DAY + 1, false),
+    ] {
+        let r = GuardianSet::parse(&encoded_set(3, 2, iv), [&owner, &none]);
+        assert_eq!(r.is_ok(), ok, "interval {iv}");
+        if !ok {
+            assert_eq!(r.unwrap_err(), GuardianSetError::BadInterval);
+        }
+    }
+}
+
+#[test]
+fn a_guardian_set_is_refused_for_each_rule_in_order() {
+    use GuardianSetError::*;
+    const WEEK: i64 = 7 * 86_400;
+    let (none, owner) = ([0u8; 32], [0xAA; 32]);
+    let parse =
+        |b: &[u8], recovery: &[u8; 32]| GuardianSet::parse(b, [&owner, recovery]).map(|_| ());
+    assert_eq!(parse(&[], &none), Err(Truncated));
+    assert_eq!(parse(&encoded_set(1, 2, WEEK), &none), Err(BadCount));
+    assert_eq!(parse(&encoded_set(9, 2, WEEK), &none), Err(BadCount));
+    let full = encoded_set(3, 2, WEEK);
+    assert_eq!(parse(&full[..full.len() - 1], &none), Err(Truncated));
+    for (i, bad) in [(0usize, [0u8; 32]), (1, owner), (2, [1; 32])] {
+        let mut b = full.clone();
+        b[1 + 32 * i..33 + 32 * i].copy_from_slice(&bad); // zero, the owner, a repeat
+        assert_eq!(parse(&b, &none), Err(BadKey), "key {i}");
+    }
+    assert_eq!(parse(&full, &[2; 32]), Err(BadKey), "the recovery key");
+    assert_eq!(
+        parse(&encoded_set(3, 3, WEEK), &none),
+        Err(BadThreshold),
+        "n-of-n"
+    );
+    assert_eq!(parse(&encoded_set(3, 1, WEEK), &none), Err(BadThreshold));
+    // The whole encoding must be present before any key is judged: a short
+    // payload with a bad key is Truncated (the Vault used to say BadKey).
+    let mut b = full.clone();
+    b[1..33].copy_from_slice(&[0; 32]);
+    assert_eq!(parse(&b[..b.len() - 1], &none), Err(Truncated));
+}
+
+#[test]
+fn guardian_bitmaps_only_name_current_guardians() {
+    let keys = [
+        [1u8; 32], [2; 32], [3; 32], [0; 32], [0; 32], [0; 32], [0; 32], [0; 32],
+    ];
+    assert_eq!(guardian_index(&keys, 3, &[3; 32]), Some(2));
+    assert_eq!(guardian_index(&keys, 2, &[3; 32]), None, "beyond the count");
+    assert_eq!(
+        guardian_index(&keys, 3, &[0; 32]),
+        None,
+        "an empty slot is nobody"
+    );
+    let (t, iv) = (1_000_000, 86_400);
+    let beats = [t, t - iv, t - iv - 1, t, t, t, t, t];
+    assert_eq!(
+        alive_mask(&beats, 3, iv, t),
+        0b011,
+        "slot 2 is a second late; slots 3.. are empty"
+    );
+    assert_eq!(
+        alive_mask(&beats, 9, iv, t),
+        alive_mask(&beats, 8, iv, t),
+        "a count above 8 reads 8 slots"
+    );
+    let s = |k: u8, signed: bool| ([k; 32], signed);
+    assert_eq!(
+        signer_bits(&keys, 3, [s(1, true), s(3, true), s(1, true)]),
+        Ok(0b101)
+    );
+    assert_eq!(
+        signer_bits(&keys, 3, [s(1, true), s(2, false)]),
+        Err(SignerError::NotSigner)
+    );
+    assert_eq!(
+        signer_bits(&keys, 3, [s(4, true)]),
+        Err(SignerError::NotGuardian)
+    );
+    assert_eq!(
+        signer_bits(&keys, 2, [s(3, true)]),
+        Err(SignerError::NotGuardian),
+        "beyond the count"
+    );
+    assert_eq!(signer_bits(&keys, 3, []), Ok(0));
+}

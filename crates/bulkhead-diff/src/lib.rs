@@ -325,6 +325,28 @@ impl Session {
                     governance::can_eject(ap, al, th, target, count) as u8
                 ))
             }
+            "GP" => {
+                let bytes = decode_hex_or_empty(t.next()?)?;
+                let f1: [u8; 32] = decode_hex_or_empty(t.next()?)?
+                    .try_into()
+                    .map_err(|_| "forbidden key: 32 bytes".to_string())?;
+                let f2: [u8; 32] = decode_hex_or_empty(t.next()?)?
+                    .try_into()
+                    .map_err(|_| "forbidden key: 32 bytes".to_string())?;
+                Ok(match governance::GuardianSet::parse(&bytes, [&f1, &f2]) {
+                    Err(e) => format!("GP {e:?}"),
+                    Ok((s, used)) => {
+                        let keys: String = s.keys[..s.count as usize]
+                            .iter()
+                            .flat_map(|k| k.iter().map(|b| format!("{b:02x}")))
+                            .collect();
+                        format!(
+                            "GP {keys} {} {} {} {used}",
+                            s.count, s.threshold, s.interval_s
+                        )
+                    }
+                })
+            }
             "GV" => {
                 let (count, th): (u8, u8) = (t.p()?, t.p()?);
                 Ok(format!(

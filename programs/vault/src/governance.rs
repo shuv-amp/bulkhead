@@ -192,11 +192,11 @@ fn apply(
                 program_id, accounts, payer_i, protocol_i, target_i, mint_i, token_i, &a,
             )
         }
-        Parsed::Guardians((g, n, th, interval)) => {
-            p.guardians = g;
-            p.guardian_count = n;
-            p.threshold = th;
-            p.heartbeat_interval_s = interval;
+        Parsed::Guardians(set) => {
+            p.guardians = set.keys;
+            p.guardian_count = set.count;
+            p.threshold = set.threshold;
+            p.heartbeat_interval_s = set.interval_s;
             p.last_heartbeat = [t; MAX_GUARDIANS];
             p.versions[0] = p.versions[0].wrapping_add(1);
             Ok(())

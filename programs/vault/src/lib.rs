@@ -40,9 +40,7 @@ pub use pyth::{parse as parse_price_update, PriceUpdate};
 pub use token::{mint_policy_decimals, token_account_fields, transfer_fee_possible};
 
 use bulkhead_core::ema::ema_update;
-use bulkhead_core::governance::{
-    guardian_set_ok, MAX_HEARTBEAT_INTERVAL_S, MIN_GUARDIAN_THRESHOLD, MIN_HEARTBEAT_INTERVAL_S,
-};
+use bulkhead_core::governance::{signer_bits, GuardianSet, GuardianSetError, SignerError};
 use bulkhead_core::limiter::capacity_base;
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
 use pinocchio::error::ProgramError;
@@ -383,13 +381,14 @@ pub(crate) fn unbacked_base(v: &Vault, balance: u64) -> u64 {
 
 /// Guardian bitmap of `signers`: each must sign and be a current guardian.
 pub(crate) fn guardian_signers(p: &Protocol, signers: &[AccountView]) -> Result<u8, ProgramError> {
-    let mut bits = 0u8;
-    for s in signers {
-        require_signer(s)?;
-        let i = p.guardian_index(&key(s)).ok_or(VaultError::NotGuardian)?;
-        bits |= 1 << i;
-    }
-    Ok(bits)
+    let pairs = signers.iter().map(|s| (key(s), s.is_signer()));
+    signer_bits(&p.guardians, p.guardian_count, pairs).map_err(|e| {
+        match e {
+            SignerError::NotSigner => VaultError::MissingSignature,
+            SignerError::NotGuardian => VaultError::NotGuardian,
+        }
+        .into()
+    })
 }
 
 /// Index of a signing, live guardian.
@@ -414,34 +413,22 @@ pub(crate) fn require_admin(p: &Protocol, a: &AccountView) -> ProgramResult {
     Ok(())
 }
 
-/// Parses and validates a guardian set: `[count][count × 32][threshold][interval i64]`.
-pub(crate) type GuardianSet = ([[u8; 32]; MAX_GUARDIANS], u8, u8, i64);
-
+/// Parses and validates a guardian set, `[count][count × 32][threshold][interval
+/// i64]`, at the reader's position with the core's `GuardianSet::parse` (Floor
+/// parses with the same function). A short payload is `InvalidInstruction`,
+/// any other fault `InvalidGuardians`.
 pub(crate) fn parse_guardian_set(
     r: &mut state::R,
     admin: &[u8; 32],
     recovery: &[u8; 32],
 ) -> Result<GuardianSet, ProgramError> {
-    let count = r.u8()? as usize;
-    if !(MIN_GUARDIAN_THRESHOLD as usize..=MAX_GUARDIANS).contains(&count) {
-        return Err(VaultError::InvalidGuardians.into());
-    }
-    let mut g = [[0u8; 32]; MAX_GUARDIANS];
-    for i in 0..count {
-        let k = r.key()?;
-        if k == [0; 32] || &k == admin || &k == recovery || g[..i].contains(&k) {
-            return Err(VaultError::InvalidGuardians.into());
-        }
-        g[i] = k;
-    }
-    let threshold = r.u8()?;
-    let interval = r.i64()?;
-    if !guardian_set_ok(count as u8, threshold)
-        || !(MIN_HEARTBEAT_INTERVAL_S..=MAX_HEARTBEAT_INTERVAL_S).contains(&interval)
-    {
-        return Err(VaultError::InvalidGuardians.into());
-    }
-    Ok((g, count as u8, threshold, interval))
+    let (set, used) =
+        GuardianSet::parse(r.remaining(), [admin, recovery]).map_err(|e| match e {
+            GuardianSetError::Truncated => VaultError::InvalidInstruction,
+            _ => VaultError::InvalidGuardians,
+        })?;
+    r.skip(used)?;
+    Ok(set)
 }
 
 #[cfg(not(feature = "no-entrypoint"))]

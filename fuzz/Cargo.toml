@@ -24,6 +24,12 @@ debug = 1
 overflow-checks = true
 
 [[bin]]
+name = "guardian_set"
+path = "fuzz_targets/guardian_set.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "mint_policy"
 path = "fuzz_targets/mint_policy.rs"
 test = false
