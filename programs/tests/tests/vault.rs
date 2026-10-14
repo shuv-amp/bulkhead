@@ -3806,8 +3806,9 @@ fn a_reset_on_a_clock_that_stepped_back_grants_nothing_extra() {
 /// through the Vault's own types, so this test pins both directions to those
 /// offsets, field by field: `load` reads each field where the readers do (on a
 /// pattern where any misread shows), and `store` writes it there. A layout
-/// change must change both sides. Booleans are exact bytes, 1 and then 0, as
-/// the readers decode them (`=== 1`). (`decodeChange` and `assetVersion`
+/// change must change both sides. Booleans: `store` must write exactly 1 or
+/// 0, the only bytes on which `load` (`!= 0`) and the readers (`=== 1`)
+/// agree; the program is the only writer of these accounts. (`decodeChange` and `assetVersion`
 /// are pinned too; the backing account has no off-chain reader yet, and its
 /// layout is the one `05` documents.)
 #[test]
@@ -3820,15 +3821,15 @@ fn account_layouts_match_what_off_chain_readers_decode() {
         d[o..o + N].try_into().unwrap()
     }
 
-    // Each struct with booleans is checked with every boolean byte 1, then 0:
-    // the readers decode `=== 1`, so a store that wrote anything else for
-    // true, or a constant, must fail.
-    for flag in [1u8, 0] {
+    // Each struct's two booleans are set to (1, 0), then (0, 1): every field
+    // takes both values, and a swap of the two fields shows. A store that
+    // wrote anything but 1 for true, or a constant, fails.
+    for (a, b) in [(1u8, 0u8), (0, 1)] {
         let mut d = patterned(Protocol::LEN, &Protocol::DISC);
         d[424] = 8; // guardian count: load refuses more than 8
-        (d[426], d[532]) = (flag, flag);
+        (d[426], d[532]) = (a, b);
         let p = Protocol::load(&d).unwrap();
-        assert_eq!((p.sealed, p.seal_vetoed), (flag == 1, flag == 1));
+        assert_eq!((p.sealed, p.seal_vetoed), (a == 1, b == 1));
         let mut stored = vec![0u8; Protocol::LEN];
         p.store(&mut stored).unwrap();
         for d in [&d, &stored] {
@@ -3855,11 +3856,11 @@ fn account_layouts_match_what_off_chain_readers_decode() {
         assert_eq!(&stored[0..8], &Protocol::DISC[..]);
     }
 
-    for flag in [1u8, 0] {
+    for (a, b) in [(1u8, 0u8), (0, 1)] {
         let mut d = patterned(Vault::LEN, &Vault::DISC);
-        (d[216], d[368]) = (flag, flag);
+        (d[216], d[368]) = (a, b);
         let v = Vault::load(&d).unwrap();
-        assert_eq!((v.ref_initialized, v.exit_vetoed), (flag == 1, flag == 1));
+        assert_eq!((v.ref_initialized, v.exit_vetoed), (a == 1, b == 1));
         let mut stored = vec![0u8; Vault::LEN];
         v.store(&mut stored).unwrap();
         let l = &v.limits;
@@ -3901,12 +3902,12 @@ fn account_layouts_match_what_off_chain_readers_decode() {
     }
     assert_eq!(&stored[0..8], &Ticket::DISC[..]);
 
-    for flag in [1u8, 0] {
+    for (a, b) in [(1u8, 0u8), (0, 1)] {
         let mut d = patterned(Change::LEN, &Change::DISC);
         d[140..142].copy_from_slice(&200u16.to_le_bytes()); // payload length: at most 300
-        (d[49], d[50]) = (flag, flag);
+        (d[49], d[50]) = (a, b);
         let c = Change::load(&d).unwrap();
-        assert_eq!((c.vetoed, c.executed), (flag == 1, flag == 1));
+        assert_eq!((c.vetoed, c.executed), (a == 1, b == 1));
         let mut stored = vec![0u8; Change::LEN];
         c.store(&mut stored).unwrap();
         for d in [&d, &stored] {
