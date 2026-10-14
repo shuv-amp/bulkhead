@@ -74,9 +74,7 @@ pub fn register_protocol(
     let recovery = if r.is_empty() { [0; 32] } else { r.key()? };
     // No key holds two roles: a guardian that is also the recovery key would
     // never veto its own new admin (docs/09, finding 62).
-    if recovery == admin
-        || (recovery != [0; 32] && set.keys[..set.count as usize].contains(&recovery))
-    {
+    if recovery == admin || (recovery != [0; 32] && set.contains(&recovery)) {
         return Err(VaultError::InvalidGuardians.into());
     }
     if loosen_delay < MIN_LOOSEN_DELAY_S {

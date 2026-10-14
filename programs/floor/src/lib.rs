@@ -430,9 +430,7 @@ fn register(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) -> 
     };
     // No key holds two roles: a guardian that is also the recovery key would
     // never veto its own new owner (docs/09, finding 62).
-    if recovery == owner
-        || (recovery != [0; 32] && set.keys[..set.count as usize].contains(&recovery))
-    {
+    if recovery == owner || (recovery != [0; 32] && set.contains(&recovery)) {
         return Err(FloorError::InvalidGuardians.into());
     }
     check_delay(delay)?;

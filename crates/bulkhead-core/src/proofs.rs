@@ -240,7 +240,7 @@ fn elf_gate_is_total() {
 /// (copy the buffer to the front, zero-fill the rest): `snapshot_matches` is
 /// true exactly when upgrading from the buffer leaves the region unchanged.
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(10)]
 fn snapshot_matches_iff_upgrade_is_identity() {
     let buf: [u8; 6] = kani::any();
     let region: [u8; 8] = kani::any();

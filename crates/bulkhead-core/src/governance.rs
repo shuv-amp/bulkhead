@@ -163,6 +163,11 @@ pub enum GuardianSetError {
 }
 
 impl GuardianSet {
+    /// Whether `key` is one of the set's guardians.
+    pub fn contains(&self, key: &[u8; 32]) -> bool {
+        guardian_index(&self.keys, self.count, key).is_some()
+    }
+
     /// Encoded length of a set of `count` keys.
     pub const fn encoded_len(count: usize) -> usize {
         1 + 32 * count + 1 + 8
@@ -214,9 +219,10 @@ impl GuardianSet {
     }
 }
 
-/// Index of `key` among the first `count` guardians.
+/// Index of `key` among the first `count` guardians (a count above the slots
+/// there are reads every slot, as `alive_mask` does).
 pub fn guardian_index(keys: &[[u8; 32]], count: u8, key: &[u8; 32]) -> Option<usize> {
-    keys.get(..count as usize)?.iter().position(|g| g == key)
+    keys.iter().take(count as usize).position(|g| g == key)
 }
 
 /// Bitmap of the first `count` guardians that heart-beat within `interval_s`

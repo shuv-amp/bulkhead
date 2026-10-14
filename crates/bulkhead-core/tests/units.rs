@@ -881,6 +881,7 @@ fn a_guardian_set_parses_exactly() {
         (3, 2, 7 * DAY, 1 + 96 + 1 + 8)
     );
     assert_eq!(&s.keys[..3], &[[1; 32], [2; 32], [3; 32]]);
+    assert!(s.contains(&[2; 32]) && !s.contains(&[4; 32]) && !s.contains(&[0; 32]));
     assert!(s.keys[3..].iter().all(|k| *k == [0; 32]));
     // Both interval bounds are accepted, one second past either is not.
     for (iv, ok) in [
@@ -939,6 +940,11 @@ fn guardian_bitmaps_only_name_current_guardians() {
         guardian_index(&keys, 3, &[0; 32]),
         None,
         "an empty slot is nobody"
+    );
+    assert_eq!(
+        guardian_index(&keys, 9, &[3; 32]),
+        Some(2),
+        "a count above 8 reads 8 slots, as alive_mask does"
     );
     let (t, iv) = (1_000_000, 86_400);
     let beats = [t, t - iv, t - iv - 1, t, t, t, t, t];

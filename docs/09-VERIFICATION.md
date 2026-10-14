@@ -25,7 +25,7 @@ The programs are checked against the core as a model (§7). Two implementations 
 | **Property tests** | 26 tests, seeded SplitMix64; `BULKHEAD_CASES` scales depth; coverage floors (proportional to depth) make vacuous passes fail | Pass at 1.5k, 3k, 20k and 100k cases each |
 | **Exhaustive checks** | 6 tests: every input of a small domain for the arithmetic properties (§5.2) | ~584M inputs |
 | **Floor core tests** | 10 tests: the sBPF v3 strict ELF rules restated, murmur3 published vectors, loader-v3 headers, snapshot identity | Pass |
-| **Targeted unit tests** | 20 tests: 18 each written to kill a surviving mutant (§6, finding 45), `capacity_base`, and the saturation case the limiter fuzzer found (finding 40) | Pass |
+| **Targeted unit tests** | 25 tests: 18 each written to kill a surviving mutant (§6, finding 45), `capacity_base`, the saturation case the limiter fuzzer found (finding 40), the guardian-set shape and the n-of-n refusal (finding 96), one request queuing a long window plus the delay (finding 102), and the guardian-set parser at every boundary and in its error order, with the bitmaps (finding 103) | Pass |
 | **Adversarial tests** | 7 tests (`crates/bulkhead-core/tests/adversarial.rs`): the attacks of `15` run through the real core, before and after each fix | Pass |
 | **Crash scenario** | 2 tests (`crates/bulkhead-core/tests/cascade.rs`): an honest liquidation cascade on a synthetic −30% day, through the real ledger, pricing and limiter; pins the numbers `08` S11 reports | Pass |
 | **Bounded proofs (Kani)** | 17 harnesses: logic at full width, 3 at small width (§5) | **17/17 verified** (14 Oct) |
@@ -208,7 +208,7 @@ cloud/e2e/s1.sh <url> <market>                    # S1 with the guardian on any 
 | 102 | 14 Oct | The same review | **The README promised a per-hour cap the limiter does not enforce.** "At most 4% leaves in any hour and 10% in any day" reads as payouts per wall-clock window, but G1 (`03` §2.5) counts payouts by when they were requested. Tickets reserve capacity as they are requested and can share an ETA of `now + D`: at the defaults one request of 625,000 USDC on a 10M vault (6.25%, `C_l·(W_l+D)/W_l`) is paid in one go 6h later. G1 as stated holds; the sentence did not. | Stated; the claim corrected (README, `02` §1, `03` §2.6). The queue's promise is 6h in public in which any guardian can cancel. Capping payouts per wall-clock window needs a settle-time bucket, a mechanism decision left to the team. Test: `one_request_can_queue_a_long_window_plus_the_delay` (core). |
 | 103 | 14 Oct | A Kani harness written for the shared guardian-set code (PR B of the code-quality plan) | **Guardian liveness could panic on far-apart times.** `guardian_alive` checked `now ≥ last` and then computed `now − last` in i64: with a negative heartbeat time (`now = 0`, `last = i64::MIN`) the gap overflows, and with overflow checks on that is a panic. Not reachable on chain: every heartbeat is the cluster clock or 0, which is why the G5 harness, which assumes non-negative times, never saw it. The differential's `GH` inputs never left that range either. | Fixed (core; in the programs from PR B, not yet on devnet). The gap is a checked subtraction, and an overflow means not alive, which is what the unbounded Python reference already returns. The `GH` generator now draws times across all of i64; the previous core crashes the Rust worker on them (exit 101), and the fix agrees with Python on every line. |
 
-Same review, not changed: the guardian-set checks are written once in each program (a shared, Kani-proved version in the core is the better shape, a larger change left for the audit); `Change` payloads are now copied in one slice instead of byte by byte (fewer compute units), and the Ticket layout comment names the real seeds.
+Same review, not changed then: the guardian-set checks were written once in each program. Since PR B (finding 103), both use one `GuardianSet` in the core, covered by the `guardian_set` fuzz target, the `GP` differential and unit tests (its bitmaps are Kani-proved; a Kani proof of the parser did not finish, §5.3). `Change` payloads are now copied in one slice instead of byte by byte (fewer compute units), and the Ticket layout comment names the real seeds.
 
 A method that finds a real bug in its own authors' code within minutes, twice, is the best argument for keeping it in CI.
 
@@ -225,7 +225,7 @@ Domains:
 
 ### 5.1 Kani harnesses (17) and results
 
-Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 8 Oct 2026. `cargo kani -p bulkhead-core -j 2` (as CI): **Complete - 15 successfully verified harnesses, 0 failures, 15 total** (354 s). Stating the exact G1 cost step and the exact EMA step in Kani was tried on 8 Oct and did not finish (§5.3); they are property tests.
+Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 14 Oct 2026. `cargo kani -j 2 --output-format=terse` in `crates/bulkhead-core` (as CI): **Complete - 17 successfully verified harnesses, 0 failures, 17 total** (227 s of verification). Stating the exact G1 cost step and the exact EMA step in Kani was tried on 8 Oct and did not finish (§5.3); they are property tests.
 
 | Harness | Domain | Property | Time |
 |---|---|---|---|
@@ -233,7 +233,7 @@ Kani 0.68.0, CBMC 6.11.0, Kissat for arithmetic harnesses, Apple M3, 8 Oct 2026.
 | `governance_g5_building_blocks` | FULL | Freeze never shortens and adds ≤ 24h; quorum never counts a dead guardian; liveness needs a recent heartbeat; abdication never clears a bit | 0.2 s |
 | `eject_rules_hold` | FULL | Ejection only of a current guardian, never by its own vote, only by a live quorum of the others (bits above the count ignored), never below the threshold, never with a threshold under 2 | 0.1 s |
 | `accepted_sets_can_eject_anyone` | FULL | A guardian set is accepted (`guardian_set_ok`) exactly when every guardian in it can be ejected by a live quorum of the others; an accepted set has ≥ 3 keys (finding 96) | < 1 s |
-| `guardian_bitmaps_stay_within_the_set` | FULL | `alive_mask` and `signer_bits` never set a bit for an empty slot, for any heartbeats, count and times, and up to 3 signers whose keys may be any slot or none | 76 s |
+| `guardian_bitmaps_stay_within_the_set` | FULL | `alive_mask` and `signer_bits` never set a bit for an empty slot, for any heartbeats, count and times, and up to 3 signers whose keys may be any slot or none | 19 s |
 | `elf_gate_is_total` | FULL (every 64-byte header) | Exactly the BPF-machine ELFs with `e_flags == 3` pass the SIMD-0500 gate | 0.3 s |
 | `snapshot_matches_iff_upgrade_is_identity` | FULL (every byte; buffer ≤ 6, region ≤ 8) | `snapshot_matches` is true exactly when upgrading from the buffer (copy + zero-fill, as loader-v3 does) leaves the region unchanged | 0.7 s |
 | `restore_rules_are_exact` | FULL | Snapshot: exactly a live quorum. Proposed: quorum on the exact buffer, or no veto and `eta ≤ now < expires`. | 0.1 s |

@@ -40,9 +40,12 @@ fn reference(b: &[u8], forbidden: [&[u8; 32]; 2]) -> Result<(usize, u8, i64, usi
 }
 
 // Raw bytes: [flags][forbidden 1: 32][forbidden 2: 32][the set...]. Flag bit 0
-// shapes the set into one that can be accepted (count, threshold, interval
-// in range), so the accept path is reached; bit 1 makes the second forbidden
-// key one of the set's keys.
+// shapes the set into one that can be accepted (count, threshold, interval in
+// range), keeping any bytes after it, as the programs always parse with more
+// data following; a short input is padded with bytes that differ by position,
+// so the padding makes no repeated keys. Flag bit 1 makes the second forbidden
+// key the set's key number `flags >> 2` (mod the count), so a forbidden key in
+// any position is reached.
 fuzz_target!(|data: &[u8]| {
     if data.len() < 66 {
         return;
@@ -55,14 +58,22 @@ fuzz_target!(|data: &[u8]| {
         let count = 3 + b[0] % 6;
         b[0] = count;
         let n = count as usize;
-        b.resize(GuardianSet::encoded_len(n), 1);
+        let need = GuardianSet::encoded_len(n);
+        while b.len() < need {
+            let i = b.len();
+            b.push((i as u8).wrapping_mul(37).wrapping_add(11));
+        }
         b[1 + 32 * n] = 2 + b[1 + 32 * n] % (count - 2);
         let raw = u64::from_le_bytes(b[2 + 32 * n..10 + 32 * n].try_into().unwrap());
         let interval = DAY + (raw % (29 * DAY as u64 + 1)) as i64;
         b[2 + 32 * n..10 + 32 * n].copy_from_slice(&interval.to_le_bytes());
     }
-    if flags & 2 == 2 && b.len() >= 33 {
-        f2.copy_from_slice(&b[1..33]);
+    if flags & 2 == 2 && !b.is_empty() {
+        let n = (b[0] as usize).clamp(1, 8);
+        let at = 1 + 32 * ((flags >> 2) as usize % n);
+        if b.len() >= at + 32 {
+            f2.copy_from_slice(&b[at..at + 32]);
+        }
     }
     let got = GuardianSet::parse(&b, [&f1, &f2]);
     let want = reference(&b, [&f1, &f2]);
