@@ -368,16 +368,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
     }
     // Every owner's ledger on-chain equals the model's.
     for u in &users {
-        let d = env.account(&m.backing(&u.pubkey())).data;
-        let mut chain = Vec::new();
-        for i in 0..8 {
-            let o = 8 + 64 + 1 + 48 * i;
-            let mint: [u8; 32] = d[o..o + 32].try_into().unwrap();
-            let net = i128::from_le_bytes(d[o + 32..o + 48].try_into().unwrap());
-            if net != 0 {
-                chain.push((mint, net));
-            }
-        }
+        let chain = ledger_of(&env, &m.backing(&u.pubkey()));
         let model: Vec<([u8; 32], i128)> = md.ledgers[&u.pubkey().to_bytes()].positions().map(|p| (p.mint, p.net)).collect();
         assert_eq!(chain, model, "seed {seed}: ledger of {}", u.pubkey());
     }

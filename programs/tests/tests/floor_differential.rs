@@ -309,10 +309,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                 let r = env.send(&[ix], &[gk[k]]);
                 let ok = md.live_guardian(k, now).is_some()
                     && md.pending.is_some()
-                    && match variant {
-                        0 | 1 => true,
-                        _ => false,
-                    };
+                    && matches!(variant, 0 | 1);
                 if ok {
                     md.pending.as_mut().unwrap().vetoed = true;
                 }
@@ -679,26 +676,22 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         env.next_slot();
 
         // The whole config the model tracks.
-        let d = env.account(&f.config).data;
-        let i64_at = |o: usize| i64::from_le_bytes(d[o..o + 8].try_into().unwrap());
-        let k32 = |o: usize| -> [u8; 32] { d[o..o + 32].try_into().unwrap() };
-        let n = d[424] as usize;
-        let chain_guardians: Vec<[u8; 32]> = (0..n).map(|i| k32(104 + 32 * i)).collect();
+        let c = read_config(&env, f);
+        let n = c.guardian_count as usize;
         let model_guardians: Vec<[u8; 32]> = md.guardians.iter().map(|&k| gk[k].pubkey().to_bytes()).collect();
-        assert_eq!(chain_guardians, model_guardians, "{at}: guardians after {op}");
-        let chain_heartbeats: Vec<i64> = (0..n).map(|i| i64_at(360 + 8 * i)).collect();
-        assert_eq!(chain_heartbeats, md.heartbeats, "{at}: heartbeats after {op}");
-        assert_eq!(k32(72), ok_[md.owner].pubkey().to_bytes(), "{at}: owner after {op}");
+        assert_eq!(c.guardians[..n].to_vec(), model_guardians, "{at}: guardians after {op}");
+        assert_eq!(c.last_heartbeat[..n].to_vec(), md.heartbeats, "{at}: heartbeats after {op}");
+        assert_eq!(c.owner, ok_[md.owner].pubkey().to_bytes(), "{at}: owner after {op}");
         let recovery = md.recovery.map(|r| ok_[r].pubkey().to_bytes()).unwrap_or([0; 32]);
-        assert_eq!(k32(852), recovery, "{at}: recovery key after {op}");
-        assert_eq!(d[884] == 1, matches!(&md.pending, Some(pd) if pd.by_recovery), "{at}: proposed by the recovery key after {op}");
-        assert_eq!((d[425], d[426] == 1, d[430] == 1, i64_at(432), i64_at(440)), (md.threshold, md.aborted, md.snapshot_valid, md.interval, md.delay), "{at}: threshold, status, snapshot validity, interval, delay after {op}");
-        assert_eq!((k32(448) != [0; 32], k32(480) != [0; 32]), (md.abort_staged, md.snapshot.is_some()), "{at}: armed after {op}");
-        assert_eq!(u64::from_le_bytes(d[528..536].try_into().unwrap()), md.last_id, "{at}: proposal id after {op}");
+        assert_eq!(c.recovery, recovery, "{at}: recovery key after {op}");
+        assert_eq!(c.pending_by_recovery == 1, matches!(&md.pending, Some(pd) if pd.by_recovery), "{at}: proposed by the recovery key after {op}");
+        assert_eq!((c.threshold, c.status == 1, c.snapshot_valid == 1, c.heartbeat_interval_s, c.upgrade_delay_s), (md.threshold, md.aborted, md.snapshot_valid, md.interval, md.delay), "{at}: threshold, status, snapshot validity, interval, delay after {op}");
+        assert_eq!((c.abort_buffer != [0; 32], c.snapshot_buffer != [0; 32]), (md.abort_staged, md.snapshot.is_some()), "{at}: armed after {op}");
+        assert_eq!(c.pending_id, md.last_id, "{at}: proposal id after {op}");
         match &md.pending {
-            None => assert_eq!(d[520], 0, "{at}: nothing pending after {op}"),
+            None => assert_eq!(c.pending_kind, 0, "{at}: nothing pending after {op}"),
             Some(pd) => assert_eq!(
-                (d[520], d[521] == 1, d[522], k32(536), i64_at(568), i64_at(576)),
+                (c.pending_kind, c.pending_vetoed == 1, c.pending_approvals, c.pending_target, c.pending_eta, c.pending_expires),
                 (pd.kind, pd.vetoed, pd.approvals, pd.target, pd.eta, pd.expires),
                 "{at}: pending after {op}"
             ),

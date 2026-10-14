@@ -15,6 +15,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 scripts/build-programs.sh
 echo "== LiteSVM program tests"
 (cd programs/tests && cargo test --release)
+# After the tests, so a lint never hides a test result.
+echo "== clippy (the LiteSVM harness: its own workspace)"
+(cd programs/tests && cargo clippy --release --tests -- -D warnings)
 if [ "${E2E:-0}" = 1 ]; then
   echo "== end to end (solana-test-validator, Cloud guardian, attacker)"
   cloud/e2e/run.sh

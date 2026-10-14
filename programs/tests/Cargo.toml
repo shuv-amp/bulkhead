@@ -12,6 +12,10 @@ description = "LiteSVM tests: the real agave loader and runtime running Floor an
 
 [dependencies]
 bulkhead-core = { path = "../../crates/bulkhead-core" }
+# The programs' own account types, so tests decode accounts the way the
+# programs do instead of copying byte offsets.
+bulkhead-floor = { path = "../floor", features = ["no-entrypoint"] }
+bulkhead-vault = { path = "../vault", features = ["no-entrypoint"] }
 litesvm = "=0.16.0"
 solana-keypair = "3.1"
 solana-signer = "3.0"

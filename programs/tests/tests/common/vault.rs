@@ -444,11 +444,7 @@ impl Market {
     }
 
     pub fn next_ticket(&self, env: &Env) -> (u64, Address) {
-        let d = env.account(&self.protocol).data;
-        // next_ticket_id: after disc 8, keys 96, guardians 256, heartbeats 64,
-        // 4 bytes, 3 × i64, abdications u32, vault_count u32.
-        let o = 8 + 96 + 256 + 64 + 4 + 24 + 8;
-        let id = u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+        let id = read_protocol(env, &self.protocol).next_ticket_id;
         // The helpers use the next id as the payer's nonce: unique per protocol.
         (id, self.ticket_pda(&env.payer.pubkey(), id))
     }
@@ -611,9 +607,7 @@ impl Market {
     }
 
     pub fn propose_change_ix(&self, env: &Env, kind: u8, target: &Address, payload: &[u8], target_account: Option<&Address>) -> Instruction {
-        let d = env.account(&self.protocol).data;
-        let o = 8 + 96 + 256 + 64 + 4 + 24 + 8 + 8;
-        let id = u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+        let id = read_protocol(env, &self.protocol).next_change_id;
         let change = pda(&[b"change", self.protocol.as_ref(), &id.to_le_bytes()], &self.vault_program);
         let mut args = vec![kind];
         args.extend_from_slice(target.as_ref());
@@ -664,9 +658,25 @@ pub fn outcome(m: &litesvm::types::TransactionMetadata) -> Outcome {
     Outcome { backed: u(0), instant: u(8), queued: u(16), ticket_id: u(24), eta_s: u(32) as i64 }
 }
 
-/// The id of the ticket at `ticket` (`Ticket::id`, after the discriminator and
-/// five keys): cancel and extend name the ticket they decided on.
+/// The Vault's accounts, decoded by the Vault's own types (never by copied
+/// byte offsets, which a layout change would break silently).
+pub fn read_protocol(env: &Env, protocol: &Address) -> bulkhead_vault::Protocol {
+    bulkhead_vault::Protocol::load(&env.account(protocol).data).expect("a Vault protocol")
+}
+pub fn read_vault(env: &Env, vault: &Address) -> bulkhead_vault::Vault {
+    bulkhead_vault::Vault::load(&env.account(vault).data).expect("a Vault vault")
+}
+pub fn read_backing(env: &Env, backing: &Address) -> bulkhead_vault::Backing {
+    bulkhead_vault::Backing::load(&env.account(backing).data).expect("a Vault backing")
+}
+
+/// The ledger a backing account holds: (mint, net) for every non-empty slot.
+pub fn ledger_of(env: &Env, backing: &Address) -> Vec<([u8; 32], i128)> {
+    read_backing(env, backing).positions.into_iter().filter(|(_, net)| *net != 0).collect()
+}
+
+/// The id of the ticket at `ticket`: cancel and extend name the ticket they
+/// decided on.
 pub fn ticket_id(env: &Env, ticket: &Address) -> u64 {
-    let d = env.account(ticket).data;
-    u64::from_le_bytes(d[168..176].try_into().unwrap())
+    bulkhead_vault::Ticket::load(&env.account(ticket).data).expect("a Vault ticket").id
 }

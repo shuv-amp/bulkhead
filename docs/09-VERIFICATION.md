@@ -76,12 +76,13 @@ The programs are checked against the core as a model (§7). Two implementations 
 ```bash
 scripts/check.sh                       # fmt, clippy, core tests, golden + fixtures, 150k differential, model,
                                        # floor_check self-test, JavaScript tests
-scripts/check-programs.sh              # build the programs, then every LiteSVM test (E2E=1: also cloud/e2e)
+scripts/check-programs.sh              # build the programs, every LiteSVM test, then clippy on the harness (E2E=1: also cloud/e2e)
 BULKHEAD_CASES=100000 cargo test --release -p bulkhead-core    # deeper properties
 python3 reference/diff_runner.py --cases 200000 --seed 7
 scripts/prove.sh                       # Kani, 16 harnesses (~6 min; more in CI)
 scripts/mutants.sh                     # mutation testing, release profile (~45 min)
 scripts/fuzz.sh                        # libFuzzer, every target 60 s in parallel (SECONDS_PER=600 for longer)
+(cd fuzz && cargo clippy --all-targets -- -D warnings)   # lint the fuzz crate (its own workspace; CI's fuzz job)
 scripts/build-programs.sh              # Floor, Vault, Harbor for sBPF v3; checks e_flags == 3
 (cd programs/tests && cargo test --release)            # 123 program tests + the program-vs-model differentials
 (cd programs/tests && BULKHEAD_PROGRAM_SEEDS=24 BULKHEAD_PROGRAM_STEPS=500 cargo test --release --test differential)
@@ -367,9 +368,9 @@ One workflow (`.github/workflows/ci.yml`) runs on every pull request, and at ful
 | Job | When | What |
 |---|---|---|
 | `check` | Always | `scripts/check.sh`: fmt, clippy, the core's tests, golden vectors and fixtures, the Python-vs-Rust differential (300k cases; 3M weekly), the model, the JavaScript tests |
-| `programs` | The programs, the core, Cloud, the reference | Build (sBPF v3), LiteSVM tests, the end-to-end run, the deploy rehearsal; the binaries and `SHA256SUMS` kept 14 days |
+| `programs` | The programs, the core, Cloud, the reference | Build (sBPF v3), LiteSVM tests (including the account-layout contract with `cloud/lib/solana.mjs`), clippy on the test harness, the end-to-end run, the deploy rehearsal; the binaries and `SHA256SUMS` kept 14 days |
 | `scenarios` | The guardian, its libraries, the e2e scripts | `cloud/e2e/guardian-scenarios.sh`: the guardian on a real validator, one scenario per bug it once had (the incident hold across a restart, a restart after a quorum's unfreeze, a dead primary RPC, a thief proposing ahead of an approved change, a replaced recovery key; weekly also a forgotten cursor) |
-| `fuzz` | The fuzz targets, the core, the Vault and Floor | Every libFuzzer target in parallel, 60 s each (25 min weekly); the corpus carries over between runs, and the weekly run minimizes it |
+| `fuzz` | The fuzz targets, the core, the Vault and Floor | Every libFuzzer target in parallel, 60 s each (25 min weekly); clippy on the fuzz crate as the last step; the corpus carries over between runs, and the weekly run minimizes it |
 | `kani` | The core's source | The 16 harnesses, Kani 0.68.0 from crates.io |
 | `mutants` | The core's source | `cargo mutants --in-diff`: every mutant on a changed line must fail a test |
 | `deny` | Any manifest or lockfile; weekly | `scripts/deny.sh` on the three lockfiles |

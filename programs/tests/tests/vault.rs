@@ -483,8 +483,7 @@ fn a_ticket_settled_while_the_vault_is_short_fails_with_insufficient_balance() {
 #[test]
 fn the_reference_timestamp_never_moves_back() {
     let ref_updated_s = |w: &World| {
-        let d = w.env.account(&w.usdc.vault).data;
-        i64::from_le_bytes(d[208..216].try_into().unwrap())
+        read_vault(&w.env, &w.usdc.vault).ref_updated_s
     };
     let mut w = World::new();
     let whale = w.user();
@@ -944,8 +943,7 @@ fn a_delay_below_72h_is_refused_and_an_abdicated_kind_is_gone_forever() {
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::DELAY_ABOVE_MAXIMUM);
     let ix = w.m.propose_change_ix(&w.env, 5, &zero, &(30 * DAY).to_le_bytes(), None);
     w.env.ok(&[ix], &[&w.m.admin]);
-    let d = w.env.account(&w.m.protocol).data;
-    assert_eq!(i64::from_le_bytes(d[436..444].try_into().unwrap()), 30 * DAY, "raised at once, to the cap");
+    assert_eq!(read_protocol(&w.env, &w.m.protocol).loosen_delay_s, 30 * DAY, "raised at once, to the cap");
     let harbor = Address::new_unique();
     w.env.svm.add_program(harbor, &so("bulkhead_harbor")).unwrap();
     let ix = w.m.register_ix(&w.env, harbor, 30 * DAY + 1);
@@ -1185,7 +1183,7 @@ fn a_release_cannot_pay_the_lifeboat() {
     w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
     w.refresh_prices();
     let lifeboat = pda(&[b"lifeboat-tokens", w.m.protocol.as_ref(), w.usdc.mint.as_ref()], &w.m.vault_program);
-    let mv = w.m.vault_ix(24, &(1 * USDC).to_le_bytes(), vec![
+    let mv = w.m.vault_ix(24, &USDC.to_le_bytes(), vec![
         AccountMeta::new_readonly(w.m.protocol, false),
         AccountMeta::new(w.usdc.vault, false),
         AccountMeta::new(w.usdc.vault_tokens, false),
@@ -1202,7 +1200,7 @@ fn a_release_cannot_pay_the_lifeboat() {
     // exit would not see them.
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &lifeboat, &w.usdc.vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
-    assert_eq!(w.env.balance(&lifeboat), 1 * USDC);
+    assert_eq!(w.env.balance(&lifeboat), USDC);
 }
 
 #[test]
@@ -1329,7 +1327,7 @@ fn the_lifeboat_refuses_a_mint_that_charges_or_can_charge_a_transfer_fee() {
     assert_eq!(w.env.balance(&lifeboat), 10 * USDC);
 
     // A fee authority could raise the fee at any time: refused again.
-    mint.data[170..202].copy_from_slice(Keypair::new().pubkey().as_ref());
+    mint.data[170..202].copy_from_slice(Keypair::new().pubkey().as_ref()); // TransferFeeConfig: fee config authority
     w.env.svm.set_account(w.usdc.mint, mint).unwrap();
     w.env.advance(1);
     assert_eq!(w.env.fails(&[mv(&w, 10 * USDC)], &[&w.m.admin]), verr::FEE_BEARING_MINT);
@@ -1632,7 +1630,7 @@ fn nothing_loosens_while_the_seal_is_under_review() {
     w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
     w.env.advance(3 * DAY - 1);
     let seal = w.m.execute_seal_ix(&[&w.usdc, &w.sol]);
-    assert_eq!(w.env.fails(&[seal.clone()], &[]), verr::SEAL_NOT_EXECUTABLE);
+    assert_eq!(w.env.fails(std::slice::from_ref(&seal), &[]), verr::SEAL_NOT_EXECUTABLE);
     w.env.advance(1);
     w.env.ok(&[seal], &[]);
 }
@@ -1806,8 +1804,7 @@ fn a_change_to_one_thing_does_not_stale_a_change_to_another() {
     w.env.advance(3 * DAY);
     let protocol = w.m.protocol;
     w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
-    let d = w.env.account(&protocol).data;
-    assert_eq!(&d[8 + 64..8 + 96], new_admin.as_ref(), "the admin changed");
+    assert_eq!(read_protocol(&w.env, &protocol).admin, new_admin.to_bytes(), "the admin changed");
 }
 
 #[test]
@@ -1868,8 +1865,7 @@ fn cancel_change_ix(w: &World, id: u64, signer: &Address) -> Instruction {
 }
 
 fn protocol_admin(w: &World) -> Address {
-    let d = w.env.account(&w.m.protocol).data;
-    Address::from(<[u8; 32]>::try_from(&d[8 + 64..8 + 96]).unwrap())
+    Address::from(read_protocol(&w.env, &w.m.protocol).admin)
 }
 
 #[test]
@@ -3365,7 +3361,7 @@ fn a_lifeboat_exit_proposed_by_a_replaced_admin_does_not_execute() {
         AccountMeta::new_readonly(w.usdc.token_program, false),
         AccountMeta::new_readonly(destination, true),
     ]);
-    assert_eq!(w.env.fails(&[exit.clone()], &[&w.m.destination]), verr::CHANGE_STALE);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_STALE);
     assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
     // The new admin's own exit executes: the rule refuses only a replaced proposer.
     let propose = w.m.vault_ix(26, &(1_000_000 * USDC).to_le_bytes(), vec![
@@ -3476,8 +3472,9 @@ fn the_callers_own_signature_is_not_consent_to_a_loan() {
         Address::find_program_address(&[b"backing", w.m.protocol.as_ref(), caller.as_ref()], &w.m.vault_program),
     );
     let mut acct = w.env.svm.get_account(&from).unwrap();
-    acct.data[40..72].copy_from_slice(caller.as_ref());
-    acct.data[72] = bump;
+    let mut b = read_backing(&w.env, &from);
+    (b.owner, b.bump) = (caller.to_bytes(), bump);
+    b.store(&mut acct.data).unwrap();
     w.env.svm.set_account(to, acct).unwrap();
     let mut gone = w.env.svm.get_account(&from).unwrap();
     gone.data.fill(0);
@@ -3494,9 +3491,7 @@ fn the_callers_own_signature_is_not_consent_to_a_loan() {
 
 /// `propose_change` signed by `proposer` (the admin or the recovery key).
 fn propose_as(w: &World, proposer: &Address, kind: u8, target: &Address) -> (Instruction, u64) {
-    let d = w.env.account(&w.m.protocol).data;
-    let o = 8 + 96 + 256 + 64 + 4 + 24 + 8 + 8;
-    let id = u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+    let id = read_protocol(&w.env, &w.m.protocol).next_change_id;
     let mut args = vec![kind];
     args.extend_from_slice(target.as_ref());
     let ix = w.m.vault_ix(18, &args, vec![
@@ -3718,7 +3713,7 @@ fn an_exit_stale_after_a_rotation_revives_only_if_the_same_admin_returns() {
         AccountMeta::new_readonly(w.usdc.token_program, false),
         AccountMeta::new_readonly(destination, true),
     ]);
-    assert_eq!(w.env.fails(&[exit.clone()], &[&w.m.destination]), verr::CHANGE_STALE);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_STALE);
     // B rotates back to A; A's old exit, never re-proposed, executes.
     let mut ix = w.m.propose_change_ix(&w.env, 3, &a, &[], None);
     ix.accounts[1].pubkey = b.pubkey();
@@ -3803,4 +3798,150 @@ fn a_reset_on_a_clock_that_stepped_back_grants_nothing_extra() {
     w.env.ok(&[reset], &[&w.m.admin]);
     w.env.advance(3_600); // back where the drain happened
     assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 0, "no room beyond an empty bucket");
+}
+
+/// The Vault's account layouts are a contract with off-chain readers that
+/// decode them by position (`decodeProtocol`, `decodeVault`, `decodeTicket` in
+/// `cloud/lib/solana.mjs`: the guardian and the status page). Tests decode
+/// through the Vault's own types, so this test pins both directions to those
+/// offsets, field by field: `load` reads each field where the readers do (on a
+/// pattern where any misread shows), and `store` writes it there. A layout
+/// change must change both sides. Booleans: `store` must write exactly 1 or
+/// 0, the only bytes on which `load` (`!= 0`) and the readers (`=== 1`)
+/// agree; the program is the only writer of these accounts. (`decodeChange` and `assetVersion`
+/// are pinned too; the backing account has no off-chain reader yet, and its
+/// layout is the one `05` documents.)
+#[test]
+fn account_layouts_match_what_off_chain_readers_decode() {
+    use bulkhead_vault::{Asset, Backing, Change, Protocol, Ticket, Vault};
+    fn k(d: &[u8], o: usize) -> [u8; 32] {
+        d[o..o + 32].try_into().unwrap()
+    }
+    fn n<const N: usize>(d: &[u8], o: usize) -> [u8; N] {
+        d[o..o + N].try_into().unwrap()
+    }
+
+    // Each struct's two booleans are set to (1, 0), then (0, 1): every field
+    // takes both values, and a swap of the two fields shows. A store that
+    // wrote anything but 1 for true, or a constant, fails.
+    for (a, b) in [(1u8, 0u8), (0, 1)] {
+        let mut d = patterned(Protocol::LEN, &Protocol::DISC);
+        d[424] = 8; // guardian count: load refuses more than 8
+        (d[426], d[532]) = (a, b);
+        let p = Protocol::load(&d).unwrap();
+        assert_eq!((p.sealed, p.seal_vetoed), (a == 1, b == 1));
+        let mut stored = vec![0u8; Protocol::LEN];
+        p.store(&mut stored).unwrap();
+        for d in [&d, &stored] {
+            assert_eq!((k(d, 8), k(d, 40), k(d, 72)), (p.protocol_program, p.caller, p.admin));
+            for i in 0..8 {
+                assert_eq!(k(d, 104 + 32 * i), p.guardians[i], "guardian {i}");
+                assert_eq!(i64::from_le_bytes(n(d, 360 + 8 * i)), p.last_heartbeat[i], "heartbeat {i}");
+            }
+            assert_eq!((d[424], d[425], d[426], d[427]), (p.guardian_count, p.threshold, p.sealed as u8, p.bump));
+            assert_eq!(i64::from_le_bytes(n(d, 428)), p.heartbeat_interval_s);
+            assert_eq!(i64::from_le_bytes(n(d, 436)), p.loosen_delay_s);
+            assert_eq!(i64::from_le_bytes(n(d, 444)), p.frozen_until);
+            assert_eq!((u32::from_le_bytes(n(d, 452)), u32::from_le_bytes(n(d, 456))), (p.abdications, p.vault_count));
+            assert_eq!((u64::from_le_bytes(n(d, 460)), u64::from_le_bytes(n(d, 468))), (p.next_ticket_id, p.next_change_id));
+            assert_eq!(k(d, 476), p.lifeboat_destination);
+            assert_eq!(i64::from_le_bytes(n(d, 508)), p.destination_set_s);
+            assert_eq!((i64::from_le_bytes(n(d, 516)), i64::from_le_bytes(n(d, 524))), (p.seal_executable_s, p.seal_expires_s));
+            assert_eq!(d[532], p.seal_vetoed as u8);
+            for (i, v) in p.versions.iter().enumerate() {
+                assert_eq!(u32::from_le_bytes(n(d, 533 + 4 * i)), *v, "version {i}");
+            }
+            assert_eq!(k(d, 553), p.recovery);
+        }
+        assert_eq!(&stored[0..8], &Protocol::DISC[..]);
+    }
+
+    for (a, b) in [(1u8, 0u8), (0, 1)] {
+        let mut d = patterned(Vault::LEN, &Vault::DISC);
+        (d[216], d[368]) = (a, b);
+        let v = Vault::load(&d).unwrap();
+        assert_eq!((v.ref_initialized, v.exit_vetoed), (a == 1, b == 1));
+        let mut stored = vec![0u8; Vault::LEN];
+        v.store(&mut stored).unwrap();
+        let l = &v.limits;
+        for d in [&d, &stored] {
+            assert_eq!((k(d, 8), k(d, 40), k(d, 72), k(d, 104)), (v.protocol, v.mint, v.token_program, v.token_account));
+            assert_eq!((u16::from_le_bytes(n(d, 136)), u32::from_le_bytes(n(d, 138))), (l.short_bps, l.short_window_s));
+            assert_eq!((u16::from_le_bytes(n(d, 142)), u32::from_le_bytes(n(d, 144))), (l.long_bps, l.long_window_s));
+            assert_eq!(u32::from_le_bytes(n(d, 148)), l.min_queue_delay_s);
+            assert_eq!((u64::from_le_bytes(n(d, 152)), u64::from_le_bytes(n(d, 160))), (l.short_floor, l.long_floor));
+            assert_eq!((u64::from_le_bytes(n(d, 168)), u64::from_le_bytes(n(d, 176))), (l.short_cap, l.long_cap));
+            assert_eq!((i64::from_le_bytes(n(d, 184)), i64::from_le_bytes(n(d, 192))), (v.tat_short_ms, v.tat_long_ms));
+            assert_eq!((u64::from_le_bytes(n(d, 200)), i64::from_le_bytes(n(d, 208))), (v.ref_balance, v.ref_updated_s));
+            assert_eq!((d[216], d[217], d[218], d[219]), (v.ref_initialized as u8, v.decimals, v.bump, v.token_bump));
+            assert_eq!((u32::from_le_bytes(n(d, 220)), u64::from_le_bytes(n(d, 224))), (v.pending_tickets, v.queued_amount));
+            assert_eq!((i64::from_le_bytes(n(d, 232)), u64::from_le_bytes(n(d, 240))), (v.frozen_until, v.imported));
+            assert_eq!((u128::from_le_bytes(n(d, 248)), u128::from_le_bytes(n(d, 264))), (v.total_in, v.backed_out));
+            assert_eq!((u128::from_le_bytes(n(d, 280)), u128::from_le_bytes(n(d, 296))), (v.unbacked_out, v.settled));
+            assert_eq!(u128::from_le_bytes(n(d, 312)), v.cancelled);
+            assert_eq!((u64::from_le_bytes(n(d, 328)), u64::from_le_bytes(n(d, 336))), (v.lifeboat_amount, v.exit_amount));
+            assert_eq!((i64::from_le_bytes(n(d, 344)), i64::from_le_bytes(n(d, 352))), (v.exit_proposed_s, v.exit_executable_s));
+            assert_eq!((i64::from_le_bytes(n(d, 360)), d[368]), (v.exit_expires_s, v.exit_vetoed as u8));
+            assert_eq!(u32::from_le_bytes(n(d, 369)), v.limits_version);
+            assert_eq!((u64::from_le_bytes(n(d, 373)), u64::from_le_bytes(n(d, 381))), (v.low.prev, v.low.cur));
+            assert_eq!(i64::from_le_bytes(n(d, 389)), v.low.window);
+            assert_eq!(k(d, 397), v.exit_proposer);
+        }
+        assert_eq!(&stored[0..8], &Vault::DISC[..]);
+    }
+
+    let d = patterned(Ticket::LEN, &Ticket::DISC);
+    let t = Ticket::load(&d).unwrap();
+    let mut stored = vec![0u8; Ticket::LEN];
+    t.store(&mut stored).unwrap();
+    for d in [&d, &stored] {
+        assert_eq!((k(d, 8), k(d, 40), k(d, 72)), (t.protocol, t.vault, t.recipient));
+        assert_eq!((k(d, 104), k(d, 136)), (t.recipient_owner, t.payer));
+        assert_eq!((u64::from_le_bytes(n(d, 168)), u64::from_le_bytes(n(d, 176))), (t.id, t.amount));
+        assert_eq!((i64::from_le_bytes(n(d, 184)), i64::from_le_bytes(n(d, 192))), (t.created_s, t.eta_s));
+    }
+    assert_eq!(&stored[0..8], &Ticket::DISC[..]);
+
+    for (a, b) in [(1u8, 0u8), (0, 1)] {
+        let mut d = patterned(Change::LEN, &Change::DISC);
+        d[140..142].copy_from_slice(&200u16.to_le_bytes()); // payload length: at most 300
+        (d[49], d[50]) = (a, b);
+        let c = Change::load(&d).unwrap();
+        assert_eq!((c.vetoed, c.executed), (a == 1, b == 1));
+        let mut stored = vec![0u8; Change::LEN];
+        c.store(&mut stored).unwrap();
+        for d in [&d, &stored] {
+            assert_eq!((k(d, 8), u64::from_le_bytes(n(d, 40)), d[48]), (c.protocol, c.id, c.kind));
+            assert_eq!((d[49], d[50], d[51]), (c.vetoed as u8, c.executed as u8, c.bump));
+            assert_eq!((k(d, 52), k(d, 84)), (c.target, c.proposer));
+            assert_eq!((i64::from_le_bytes(n(d, 116)), i64::from_le_bytes(n(d, 124))), (c.created_s, c.executable_s));
+            assert_eq!(i64::from_le_bytes(n(d, 132)), c.expires_s);
+            assert_eq!(u16::from_le_bytes(n(d, 140)), c.payload_len);
+            assert_eq!(&d[142..342], &c.payload[..200]);
+            assert_eq!(u32::from_le_bytes(n(d, 442)), c.base_version);
+        }
+        assert_eq!(&stored[0..8], &Change::DISC[..]);
+    }
+
+    let d = patterned(Asset::LEN, &Asset::DISC);
+    let a = Asset::load(&d).unwrap();
+    let mut stored = vec![0u8; Asset::LEN];
+    a.store(&mut stored).unwrap();
+    for d in [&d, &stored] {
+        assert_eq!((k(d, 8), k(d, 40)), (a.protocol, a.mint));
+        assert_eq!((d[125], d[126], u32::from_le_bytes(n(d, 127))), (a.decimals, a.bump, a.version));
+    }
+    assert_eq!(&stored[0..8], &Asset::DISC[..]);
+
+    let d = patterned(Backing::LEN, &Backing::DISC);
+    let b = Backing::load(&d).unwrap();
+    let mut stored = vec![0u8; Backing::LEN];
+    b.store(&mut stored).unwrap();
+    for d in [&d, &stored] {
+        assert_eq!((k(d, 8), k(d, 40), d[72]), (b.protocol, b.owner, b.bump));
+        for (i, (mint, net)) in b.positions.iter().enumerate() {
+            assert_eq!((k(d, 73 + 48 * i), i128::from_le_bytes(n(d, 105 + 48 * i))), (*mint, *net), "slot {i}");
+        }
+    }
+    assert_eq!(&stored[0..8], &Backing::DISC[..]);
 }
