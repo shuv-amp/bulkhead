@@ -826,3 +826,27 @@ fn one_request_can_queue_a_long_window_plus_the_delay() {
         matches!(request(&mut s, &p, t, 625_001, 0), Ok(Decision::Queued { eta_ms }) if eta_ms > t + 21_600_000)
     );
 }
+
+/// Finding 96: the guardian-set shape, at every boundary. At least two to undo
+/// a stop, fewer than all of them (so the others can eject a rogue), at most 8.
+#[test]
+fn guardian_set_shape_is_exact() {
+    use bulkhead_core::governance::guardian_set_ok;
+    for (count, threshold, ok) in [
+        (3, 2, true),
+        (8, 7, true),
+        (8, 2, true),
+        (2, 2, false), // n-of-n
+        (3, 3, false),
+        (8, 8, false),
+        (3, 1, false), // one key alone could undo a stop
+        (9, 8, false), // more than 8 guardians
+        (0, 0, false),
+    ] {
+        assert_eq!(
+            guardian_set_ok(count, threshold),
+            ok,
+            "{threshold}-of-{count}"
+        );
+    }
+}
