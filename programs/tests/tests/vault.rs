@@ -15,8 +15,10 @@ use common::vault::*;
 use common::*;
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
+use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
+use solana_transaction_error::TransactionError;
 
 const USDC: u64 = 1_000_000; // 6 decimals
 const SOL: u64 = 1_000_000_000; // 9 decimals
@@ -684,6 +686,39 @@ fn harbor_will_not_sign_for_a_different_vault_program() {
             );
         }
     }
+}
+
+/// Harbor's withdraw needs the user's signature, not just the user's token
+/// account as recipient. Without it anyone could release a user's balance
+/// on their own timing: the Vault backs the user's own balance, signed or
+/// not.
+#[test]
+fn harbor_withdraw_needs_the_users_signature() {
+    let mut w = World::new();
+    let u = w.user();
+    let acc = w.deposit("usdc", &u, 1_000 * USDC);
+    w.seal();
+    let mut ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    ix.accounts.iter_mut().filter(|a| a.pubkey == u.pubkey()).for_each(|a| a.is_signer = false);
+    let vault_called = format!("Program {} invoke", w.m.vault_program);
+    match w.env.send(&[ix], &[]) {
+        Ok(m) => panic!("expected MissingRequiredSignature, succeeded\n{}", m.logs.join("\n")),
+        Err(e) => {
+            let logs = e.meta.logs.join("\n");
+            assert_eq!(
+                e.err,
+                TransactionError::InstructionError(0, InstructionError::MissingRequiredSignature),
+                "{logs}"
+            );
+            // Harbor refused it: the Vault was never called.
+            assert!(!logs.contains(&vault_called), "{logs}");
+        }
+    }
+    assert_eq!(w.env.balance(&acc), 0);
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    let m = w.env.ok(&[ix], &[&u]);
+    assert!(m.logs.join("\n").contains(&vault_called), "signed, Harbor calls the Vault");
+    assert_eq!(w.env.balance(&acc), 1_000 * USDC, "signed, it pays");
 }
 
 #[test]
