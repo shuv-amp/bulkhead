@@ -19,7 +19,7 @@ Bulkhead was submitted to the Colosseum Crypto World's Fair (Solana track) on 12
 | Floor on a real 1 MB mainnet program's bytes | `scripts/floor-demo.sh <program-id>` (`06 §7`) |
 | The attacker-vs-guardian run, end to end | `E2E=1 scripts/check-programs.sh` |
 | Every test, proof and differential result | `09`; `scripts/check.sh`, `scripts/check-programs.sh`, `scripts/prove.sh` |
-| Every bug the process found in our own code | `09 §4` (95 findings at submission; 96–98 recorded on 13 Oct, each stated with its fix); `16` |
+| Every bug the process found in our own code | `09 §4` (95 findings at submission; 96–103 recorded on 13 and 14 Oct, each fixed or stated); `16` |
 | Every number's source and label (measured, reported, model, assumption) | `01`, `13` |
 
 ## 3. Go-to-market
