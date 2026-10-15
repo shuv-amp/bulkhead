@@ -10,7 +10,7 @@ Floor is a small program (`programs/floor`, Pinocchio, one dependency: `bulkhead
 
 It is a separate program from the Vault so each has a small audit surface and its own blast radius.
 
-Status: built, tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`). Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`). Devnet runs this tree's build (PR #77, 11 Oct; `SECURITY.md`). The full lifecycle has run there (§7). Unaudited.
+Status: built, tests on the real agave loader (LiteSVM with the mainnet feature set), sBPF v3 (`e_flags = 3`). Deployed on devnet on 28 Sep 2026 (`HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E`). Devnet runs the build of PR #77 (11 Oct; `SECURITY.md`); the fixes for findings 96, 99 and 103 came later. The full lifecycle has run there (§7). Unaudited.
 
 ## 1. Why it exists
 
