@@ -5,8 +5,8 @@
 <p align="center">
   <a href="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#live-on-devnet"><img alt="Live on devnet" src="https://img.shields.io/badge/devnet-live-2F5BFF?labelColor=07080b"></a>
-  <a href="docs/09-VERIFICATION.md"><img alt="15 Kani proofs" src="https://img.shields.io/badge/Kani_proofs-15%2F15-2F5BFF?labelColor=07080b"></a>
-  <a href="docs/09-VERIFICATION.md"><img alt="123 program tests" src="https://img.shields.io/badge/program_tests-123%2F123-2F5BFF?labelColor=07080b"></a>
+  <a href="docs/09-VERIFICATION.md"><img alt="17 Kani proofs" src="https://img.shields.io/badge/Kani_proofs-17%2F17-2F5BFF?labelColor=07080b"></a>
+  <a href="docs/09-VERIFICATION.md"><img alt="131 program tests" src="https://img.shields.io/badge/program_tests-131%2F131-2F5BFF?labelColor=07080b"></a>
   <a href="SECURITY.md"><img alt="Not audited" src="https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-c2410c?labelColor=07080b"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-8a8d96?labelColor=07080b"></a>
 </p>
@@ -160,7 +160,7 @@ scripts/check-programs.sh         # the programs on the real runtime: needs the 
 E2E=1 scripts/check-programs.sh   # ...plus the attacker-vs-guardian run and a deploy rehearsal, on local validators
 scripts/prove.sh                  # Kani bounded proofs (~6 min)
 scripts/mutants.sh                # mutation testing (~45 min)
-scripts/fuzz.sh                   # coverage-guided fuzzing, 8 targets (SECONDS_PER=600 for longer)
+scripts/fuzz.sh                   # coverage-guided fuzzing, 9 targets (SECONDS_PER=600 for longer)
 scripts/deny.sh                   # supply chain: RustSec advisories, licences, crate sources
 python3 tools/floor_check.py <program-id>   # who can upgrade any mainnet program; is it ready for SIMD-0500? (--rpc <url> for another cluster)
 scripts/floor-demo.sh <program-id>          # Floor on that program's real bytes, locally: register, stop, restore byte-identical
@@ -181,17 +181,17 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **123/123**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
-| Bounded proofs (Kani) and exhaustive checks | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
-| Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 31 commands now, 300k cases on every pull request and 3M weekly in CI |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **131/131**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
+| Bounded proofs (Kani) and exhaustive checks | **17/17 harnesses verified** on 14 Oct (14 for every value of their types), 227 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
+| Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| Coverage-guided fuzzing (libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
+| Coverage-guided fuzzing (libFuzzer, 9 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser fuzzed in that run at full line coverage. That run had 8 targets: the guardian-set parser's, added 14 Oct, has no recorded 10-minute run or coverage measurement ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
 | Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 26/26, with coverage counters so a vacuous pass fails |
 | Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
 | End to end | [Above](#what-it-does-to-an-attack) |
 | On devnet | All three programs run this tree's build (PR #77, 11 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
-| What this process found in our own code and docs | **98 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and two adversarial reviews' attacks. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–98, from a review after the submission, are stated with their fixes, which ship with the audit build. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | **103 findings**: real bugs, overclaimed guarantees and claims, test gaps, deploy-tooling hazards, and attacks from adversarial reviews. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–103, from reviews after the submission, are fixed in this tree but not yet on devnet, except 100 and 102, which are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## Live on devnet
 
@@ -252,6 +252,7 @@ programs/tests/         LiteSVM: scenarios, negative tests, compute, the program
 cloud/                  zero-dependency JavaScript: client, guardian bot, status page, end-to-end attack,
                         deployment and live-cluster checks
 tools/floor_check.py    read-only report on any upgradeable program
+tools/claims.py         the counts README and docs/ state, checked against the tree (scripts/check.sh)
 reference/              independent Python reference, differential runner, golden vectors, fixtures, Drift model
 evidence/               governance census (script + committed snapshot), model output
 docs/                   the full design (below)

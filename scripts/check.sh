@@ -10,6 +10,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 CASES="${CASES:-50000}"
 
 echo "== fmt";      cargo fmt --all -- --check
+echo "== claims (the counts README and docs/ state, against the tree)"
+python3 tools/claims.py --self-test
+python3 tools/claims.py
 echo "== clippy";   cargo clippy --all-targets --release -- -D warnings
 echo "== tests";    BULKHEAD_CASES="${BULKHEAD_CASES:-5000}" cargo test --release --quiet
 echo "== golden";   python3 reference/golden.py --check
