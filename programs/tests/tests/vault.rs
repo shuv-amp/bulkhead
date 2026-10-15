@@ -2259,6 +2259,35 @@ fn every_account_substitution_is_refused() {
     // own-deposit withdrawal takes any key there (finding 74).
     ok.push(any(H + 12, "owner's signature: consulted only for a loan"));
     s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &ok);
+    // The same withdrawal with the user's signature only at the free slot:
+    // signing is per key, so Harbor still sees account 2 signed, and the
+    // sweep must pick the key from there.
+    w.env.mint_to(
+        &w.usdc.mint,
+        &w.usdc.mint_authority,
+        &whale_acc,
+        1_000 * USDC,
+        &w.usdc.token_program,
+    );
+    let ix =
+        w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 1_000 * USDC);
+    w.env.ok(&[ix], &[&whale]);
+    let mut ix = w.m.withdraw_ix(
+        &w.env,
+        &w.usdc,
+        &whale.pubkey(),
+        &whale_acc,
+        1_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    ix.accounts[2].is_signer = false;
+    assert!(ix.accounts[H + 12].pubkey == whale.pubkey() && ix.accounts[H + 12].is_signer);
+    s.run(&mut w.env, "withdraw (signed at the free slot only)", ix, &[&whale], &ok);
+    // Harbor is right, so no swap succeeds here: check the try was made.
+    assert!(
+        s.unsigned.contains(&("withdraw (signed at the free slot only)".into(), whale.pubkey())),
+        "the sweep must try a key that signs only at a free slot unsigned"
+    );
 
     let payee = w.user();
     let payee_acc = w.account("usdc", &payee.pubkey());
