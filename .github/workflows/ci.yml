@@ -7,7 +7,8 @@ name: ci
 # - a new push to a pull request cancels the run it supersedes;
 # - draft pull requests run only `check`; the rest runs when marked ready;
 # - each job runs only when something it reads changed (scripts/ci-changes.sh);
-#   a skipped job counts as passed, and the weekly run does everything;
+#   a skipped job counts as passed, and a weekly or manual run does everything
+#   but `mutants`, which needs a pull request's changed lines;
 # - nothing runs again on main after a merge: the pull request was tested as
 #   merged with an up-to-date main (the branch ruleset requires it);
 # - dependency builds and the fuzz corpus are cached (actions/cache, within
