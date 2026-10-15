@@ -4007,6 +4007,9 @@ fn a_quote_gives_the_releases_outcome_for_a_loan() {
     assert_eq!(quoted, paid, "signed");
 
     // Signed but this vault frozen: no loan is backed, the ask waits.
+    // Each frozen case first shows the loan is backed without its freeze.
+    let backed_now = |w: &mut World| outcome(&w.env.ok(&[signed_quote(w)], &[&holder])).backed;
+    assert_eq!(backed_now(&mut w), ask, "control: a loan before the vault freeze");
     let g0 = w.m.g[0].pubkey();
     w.env.ok(&[w.m.freeze_ix(&g0, Some(&w.usdc), 60)], &[&w.m.g[0]]);
     let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
@@ -4014,8 +4017,10 @@ fn a_quote_gives_the_releases_outcome_for_a_loan() {
     let paid = outcome(&w.env.ok(&[ix], &[&holder]));
     assert_eq!((quoted.backed, quoted.queued), (0, ask), "vault frozen: queued");
     assert_eq!(quoted, paid, "vault frozen");
+    // Past the vault freeze, and past the 60 s price age.
     w.env.advance(61);
     w.refresh_prices();
+    assert_eq!(backed_now(&mut w), ask, "control: a loan before the protocol freeze");
 
     // Signed but the protocol frozen: the same.
     w.env.ok(&[w.m.freeze_ix(&g0, None, 86_400)], &[&w.m.g[0]]);
