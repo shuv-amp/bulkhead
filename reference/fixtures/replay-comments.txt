@@ -1,0 +1,6 @@
+# --replay must skip what both sides skip: blank lines and comment lines, indented or not.
+# Two commands, so a correct replay reports lines=2 (scripts/check.sh asserts it).
+K 18446744073709551614 13873 1000000000000000000 0
+    # an indented comment
+
+K 12997457081971087901 18905 1000000000000 18446744073709551614

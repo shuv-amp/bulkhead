@@ -376,7 +376,7 @@ def main() -> int:
 
     if args.replay:
         with open(args.replay) as f:
-            lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+            lines = protocol.runnable(f)
     else:
         lines = generate(args.seed, args.cases)
 
