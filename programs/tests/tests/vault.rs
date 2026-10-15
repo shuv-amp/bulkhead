@@ -1670,6 +1670,70 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
 }
 
 #[test]
+fn after_the_seal_the_admin_cannot_import_backing() {
+    // Imported backing is an owner's own money, released without the limiter
+    // (G2). After the seal nothing checks it against a balance, so an admin
+    // key that could import would credit itself and take it unthrottled.
+    let mut w = World::new();
+    let owner = Keypair::new().pubkey();
+    let ix = import_ix(&w, &owner, 1);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1, &w.usdc.token_program);
+    w.seal();
+    let ix = import_ix(&w, &Keypair::new().pubkey(), 1_000_000 * USDC);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY, "a new backing");
+    let ix = import_ix(&w, &owner, 1_000_000 * USDC);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY, "an existing backing");
+}
+
+#[test]
+fn after_the_seal_the_admin_cannot_upsert_an_asset() {
+    // After the seal an asset changes only through `propose_change`, so a
+    // looser haircut waits 72h and guardians can veto it (G4). Before the
+    // seal the same upsert goes through.
+    let mut w = World::new();
+    let no_haircut = asset_bytes(true, 10_000, 10_500, 20_000, 60, 100, SOL_FEED);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &no_haircut);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &sol_cfg());
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.seal();
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &no_haircut);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY, "a loosening");
+    let tighter = asset_bytes(true, 8_000, 10_500, 20_000, 60, 100, SOL_FEED);
+    let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &tighter);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY, "a tightening");
+    // A vault made after the seal (lane closed) has no asset yet: listing it
+    // is a change too.
+    let mut closed = Limits::default_limits();
+    closed.long_bps = 0;
+    let late = w.m.create_vault(&mut w.env, 6, closed, [3; 32], None);
+    let ix = w.m.upsert_asset_ix(&w.env, &late, &asset_bytes(true, 10_000, 10_000, 20_000, 60, 100, [3; 32]));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY, "a new listing");
+}
+
+#[test]
+fn the_seal_checks_each_vault_once() {
+    // The seal checks every vault's claims against its balance. Naming one
+    // vault twice in place of another would skip the other's check, whether
+    // or not the two names are next to each other.
+    let mut w = World::new();
+    let third = w.m.create_vault(&mut w.env, 6, Limits::default_limits(), [3; 32], None);
+    let ix = import_ix(&w, &Keypair::new().pubkey(), 1_000 * USDC);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &w.sol]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "apart");
+    let ix = w.m.execute_seal_ix(&[&w.sol, &w.sol, &third]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "adjacent");
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol, &third]);
+    assert_eq!(w.env.fails(std::slice::from_ref(&ix), &[]), verr::IMPORT_EXCEEDS_BALANCE, "the skipped vault");
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
+    w.env.ok(&[ix], &[]);
+}
+
+#[test]
 fn only_a_live_guardian_cancels_a_ticket_not_the_admin() {
     // A stolen admin key could cancel every honest queued withdrawal, without
     // end and with no counter: each cancel also keeps its reservation, so the
