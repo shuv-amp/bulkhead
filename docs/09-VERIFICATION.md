@@ -378,7 +378,7 @@ One workflow (`.github/workflows/ci.yml`) runs on every pull request, and at ful
 | `scenarios` | The guardian, its libraries, the e2e scripts | `cloud/e2e/guardian-scenarios.sh`: the guardian on a real validator, one scenario per bug it once had (the incident hold across a restart, a restart after a quorum's unfreeze, a dead primary RPC, a thief proposing ahead of an approved change, a replaced recovery key; weekly also a forgotten cursor) |
 | `fuzz` | The fuzz targets, the core, the Vault and Floor | Every libFuzzer target in parallel, 60 s each (25 min weekly); clippy on the fuzz crate as the last step; the corpus carries over between runs, and the weekly run minimizes it |
 | `kani` | The core's source | The 19 harnesses, Kani 0.68.0 from crates.io |
-| `mutants` | The core's source | `cargo mutants --in-diff`: every mutant on a changed line must fail a test |
+| `mutants` | A pull request that changes the core's source, `scripts/mutants.sh` or `.cargo/mutants.toml` (not a weekly or manual run: it mutates a pull request's diff) | `cargo mutants --in-diff`: every mutant on a changed line must fail a test |
 | `deny` | Any manifest or lockfile; weekly | `scripts/deny.sh` on the three lockfiles |
 | `workflows` | `.github/` | actionlint and zizmor |
 | `devnet` | Weekly | `scripts/verify-devnet.sh`, and the verifiable-build image's bytes equal CI's |
