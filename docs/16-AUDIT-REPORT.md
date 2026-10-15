@@ -38,7 +38,7 @@ No finding allows a theft without a key. Every proven issue needed a key comprom
 | 87b | Low | More than 10 vaults can never seal | Fixed: at most 10 before the seal |
 | 87c | Low | Harbor's REGISTER is first-come | Stated, with the remedy (`07` §2) |
 | 89 | Low | A payout to an account the protocol PDA owns | Fixed; an account another Vault PDA owns is stated |
-| AUD-2 | Medium | A lost guardian key plus a rogue guardian lock a 2-of-3 set's governance; in an n-of-n set one rogue guardian alone does (`09`, finding 96) | To decide (§4); n-of-n to be refused in the audit build |
+| AUD-2 | Medium | A lost guardian key plus a rogue guardian lock a 2-of-3 set's governance; in an n-of-n set one rogue guardian alone does (`09`, finding 96) | To decide (§4) for the 2-of-3 case; n-of-n refused since finding 96 (on devnet since 15 Oct, PR #85) |
 | E1–E3 | High (design) | The backed lane has no brake; loan consent is any signature in the transaction; liquidations queue in a crash | To decide (§4) |
 | E4–E8 | Medium–Low | Patient drain and the bot's allowlist; queue griefing; optional caps; instant lifeboat move after the window | Stated (`09`, finding 89); §4 |
 | Others | Info | Freezes do not stop `execute_change` or `execute_exit` (vetoes do); role overlaps the destination may have; re-proposals clear vetoes; delegate deposits; the second Pyth receiver; SIMD-0500 and release to none | Stated in `09` 87–89 |
