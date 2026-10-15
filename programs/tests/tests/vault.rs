@@ -3656,7 +3656,8 @@ fn a_guardian_silent_past_its_interval_cannot_veto_the_seal() {
 /// G5: a quorum counts live guardians only. With g0 silent past its interval,
 /// g0 and g1 (two signatures, threshold 2) are no quorum for any action that
 /// needs one: unfreeze, a lifeboat return, abdicate, tightening an abdicated
-/// kind, replace_recovery, eject. g1 and g2, both live, are.
+/// kind, replace_recovery, eject. g1 and g2, both live, are. For tightening an
+/// abdicated kind, listed but unsigned, they are not (the admin signs).
 #[test]
 fn a_silent_guardian_does_not_count_toward_a_quorum() {
     let mut w = World::new();
@@ -3709,6 +3710,10 @@ fn a_silent_guardian_does_not_count_toward_a_quorum() {
     tighter.short_bps = 100;
     let tighten = |w: &World| w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
     assert_eq!(w.env.fails(&[signed(tighten(&w), &dead)], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "tighten abdicated");
+    // The admin's signature alone does not make listed guardians count.
+    let mut unsigned = tighten(&w);
+    unsigned.accounts.extend(live.iter().map(|g| AccountMeta::new_readonly(*g, false)));
+    assert_eq!(w.env.fails(&[unsigned], &[&w.m.admin]), verr::NO_QUORUM, "tighten abdicated, guardians unsigned");
     w.env.ok(&[signed(tighten(&w), &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
 
     // Replace the recovery key.
