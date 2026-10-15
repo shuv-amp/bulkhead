@@ -1216,8 +1216,10 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
     assert_eq!(w.env.balance(&stray), 0);
-    // The vault token account is one of them, refused by its address and by
-    // its owner: a payout to it would debit the ledger while the tokens stay.
+    // The vault token account is one of them: a payout to it would debit the
+    // ledger while the tokens stay. Its address check (custody.rs) refuses it
+    // first, and the owner check behind it would too, so this case cannot tell
+    // the two apart; the stray account above is what pins the owner check.
     let own = w.usdc.vault_tokens;
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &own, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "the vault's own account");
