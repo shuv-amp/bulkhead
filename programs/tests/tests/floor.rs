@@ -564,11 +564,12 @@ fn release_authority_hands_the_key_back_after_the_delay() {
 /// Handing out the upgrade key is the strongest thing Floor does, so a
 /// release keeps the same clock as an upgrade (G8): not before the delay,
 /// never once vetoed, during the wait or as it falls due, and not once it
-/// has expired. Up to its last second it runs.
+/// has expired. From the second it falls due to its last second it runs.
 #[test]
 fn a_release_waits_the_delay_and_a_veto_or_expiry_stops_it() {
     for (veto_at, wait, code) in [
         (None, 3 * DAY - 1, Some(err::NOT_EXECUTABLE)),
+        (None, 3 * DAY, None),
         (Some(DAY), 3 * DAY, Some(err::VETOED)),
         (Some(3 * DAY), 3 * DAY, Some(err::VETOED)),
         (None, 10 * DAY, Some(err::EXPIRED)),
@@ -625,6 +626,13 @@ fn a_code_change_names_a_buffer_already_frozen_to_floor() {
     // Frozen to Floor, the same buffer is accepted.
     env.set_buffer_authority(&open, &p.owner, &f.authority);
     env.ok(&[f.propose(&owner, RESTORE, &open, &[], Some(&open))], &[&p.owner]);
+    // And an upgrade of a buffer frozen to Floor, while the program runs.
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let fix = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&fix, &p.owner, &p.f.authority);
+    let owner = p.owner.pubkey();
+    env.ok(&[p.f.propose(&owner, UPGRADE, &fix, &[], Some(&fix))], &[&p.owner]);
 }
 
 /// Issue #68: a spare buffer identical to the live code cannot be closed
