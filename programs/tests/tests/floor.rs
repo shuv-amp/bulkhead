@@ -531,6 +531,12 @@ fn release_authority_hands_the_key_back_after_the_delay() {
     // The abort buffer and the pin are closed with it (issue #37): both required.
     let partial = f.execute_release(&p.owner.pubkey(), Some(&new_auth), &held[..1]);
     assert_eq!(env.fails(&[partial], &[&new_key]), err::WRONG_BUFFER);
+    // A copy of the live code stands in for the pin only if it is frozen to
+    // Floor (finding 99), so that Floor closes it in the pin's place. Floor
+    // could not close any other copy.
+    let copy = env.write_buffer(&honest_v1(), &p.owner);
+    let stand_in = f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[p.abort_buffer, copy]);
+    assert_eq!(env.fails(&[stand_in], &[&new_key]), err::WRONG_BUFFER);
     let rent = env.account(&p.abort_buffer).lamports + env.account(&p.snapshot).lamports;
     let config_rent = env.account(&f.config).lamports;
     let before = env.account(&p.owner.pubkey()).lamports;
@@ -553,6 +559,72 @@ fn release_authority_hands_the_key_back_after_the_delay() {
         assert!(env.svm.get_account(&b).map(|a| a.lamports == 0).unwrap_or(true), "buffer closed");
     }
     assert_eq!(env.account(&p.owner.pubkey()).lamports, before + rent + config_rent);
+}
+
+/// Handing out the upgrade key is the strongest thing Floor does, so a
+/// release keeps the same clock as an upgrade (G8): not before the delay,
+/// never once vetoed, during the wait or as it falls due, and not once it
+/// has expired. Up to its last second it runs.
+#[test]
+fn a_release_waits_the_delay_and_a_veto_or_expiry_stops_it() {
+    for (veto_at, wait, code) in [
+        (None, 3 * DAY - 1, Some(err::NOT_EXECUTABLE)),
+        (Some(DAY), 3 * DAY, Some(err::VETOED)),
+        (Some(3 * DAY), 3 * DAY, Some(err::VETOED)),
+        (None, 10 * DAY, Some(err::EXPIRED)),
+        (None, 10 * DAY - 1, None),
+    ] {
+        let mut env = Env::new();
+        let p = protect(&mut env, &honest_v1());
+        let f = &p.f;
+        let new_key = Keypair::new();
+        let new_auth = new_key.pubkey();
+        env.ok(
+            &[f.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &new_auth, &[], None)],
+            &[&p.owner],
+        );
+        if let Some(at) = veto_at {
+            env.advance(at);
+            env.ok(&[f.veto(&p.g[1].pubkey())], &[&p.g[1]]);
+        }
+        env.advance(wait - veto_at.unwrap_or(0));
+        let ix = f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[p.abort_buffer, p.snapshot]);
+        let got = env.send(&[ix], &[&new_key]).map_err(|e| custom_code(&e)).err();
+        assert_eq!(got, code.map(Some), "veto at {veto_at:?}, waited {wait}s");
+        if code.is_none() {
+            assert_eq!(env.upgrade_authority(&f.programdata), Some(new_auth.to_bytes()));
+        }
+    }
+}
+
+/// The buffer a code change names is frozen to Floor when it is proposed.
+/// Otherwise the proposer could rewrite it after the guardians read it, and
+/// freeze it only just before it executes: the bytes that deploy would not be
+/// the ones they reviewed or approved (G8, "that exact buffer").
+#[test]
+fn a_code_change_names_a_buffer_already_frozen_to_floor() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let owner = p.owner.pubkey();
+    let open = env.write_buffer(&honest_fix(), &p.owner);
+    let ix = f.propose(&owner, UPGRADE, &open, &[], Some(&open));
+    assert_eq!(env.fails(&[ix], &[&p.owner]), err::BUFFER_NOT_FROZEN);
+    // Frozen to the Floor of another program is not frozen to this one.
+    let other = protect(&mut env, &honest_v1());
+    let elsewhere = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&elsewhere, &p.owner, &other.f.authority);
+    let ix = f.propose(&owner, UPGRADE, &elsewhere, &[], Some(&elsewhere));
+    assert_eq!(env.fails(&[ix], &[&p.owner]), err::BUFFER_NOT_FROZEN);
+    // A restore, which a quorum can install at once, is held to the same rule.
+    env.ok(&[f.abort(&p.g[0].pubkey(), &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    for b in [open, elsewhere] {
+        let ix = f.propose(&owner, RESTORE, &b, &[], Some(&b));
+        assert_eq!(env.fails(&[ix], &[&p.owner]), err::BUFFER_NOT_FROZEN);
+    }
+    // Frozen to Floor, the same buffer is accepted.
+    env.set_buffer_authority(&open, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, RESTORE, &open, &[], Some(&open))], &[&p.owner]);
 }
 
 /// Issue #68: a spare buffer identical to the live code cannot be closed
