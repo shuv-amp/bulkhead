@@ -56,8 +56,9 @@ test("JS limiter views match Python and Rust on 40,000 edge cases and every avai
   const counts = {};
   const bucketPair = (t) => ({ short: { capacity: BigInt(t[1]), windowMs: BigInt(t[2]) }, long: { capacity: BigInt(t[3]), windowMs: BigInt(t[4]) } });
   let session = null;
-  // A failure prints its line with the session before it: a replayable
-  // fixture for diff_runner.py --replay.
+  // A failure prints its line with the session before it: a fixture for
+  // diff_runner.py --replay. Not for an `A*` line: that state is built on the
+  // Python side only, and neither protocol.Session nor the worker reads `A*`.
   let replay = [];
   for (const [line, want, rust, source] of cases) {
     const t = line.split(" ");
@@ -106,7 +107,12 @@ test("JS limiter views match Python and Rust on 40,000 edge cases and every avai
         break;
       }
     }
-    if (got !== want) assert.fail(`JS ${got} vs Python ${want}:\n${replay.join("\n")}`);
+    if (got !== want) {
+      const how = t[0] === "A*"
+        ? "an arbitrary state, Python only (not replayable): A* c1 w1 c2 w2 tat1 tat2 now"
+        : "replay with diff_runner.py --replay";
+      assert.fail(`JS ${got} vs Python ${want} (${how}):\n${replay.join("\n")}`);
+    }
     const k = `${source} ${t[0]}`;
     counts[k] = (counts[k] ?? 0) + 1;
   }
