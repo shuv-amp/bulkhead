@@ -862,21 +862,28 @@ fn one_request_can_queue_up_to_the_horizon() {
     assert_eq!(s, LimiterState::default(), "a refusal changes nothing");
 }
 
-/// Finding 96: the guardian-set shape, at every boundary. At least two to undo
-/// a stop, fewer than all of them (so the others can eject a rogue), at most 8.
+/// Findings 96 and 107: the guardian-set shape, at every boundary. At least two
+/// to undo a stop, two keys more than that (so after any two faults short of a
+/// rogue quorum the others can eject a rogue), at most 8.
 #[test]
 fn guardian_set_shape_is_exact() {
     use bulkhead_core::governance::guardian_set_ok;
     for (count, threshold, ok) in [
-        (3, 2, true),
-        (8, 7, true),
+        (4, 2, true),
+        (5, 3, true),
+        (8, 6, true),
         (8, 2, true),
+        (3, 2, false), // threshold + 1: a lost key and a rogue lock it
+        (4, 3, false),
+        (8, 7, false),
         (2, 2, false), // n-of-n
         (3, 3, false),
         (8, 8, false),
         (3, 1, false), // one key alone could undo a stop
+        (4, 1, false),
         (9, 8, false), // more than 8 guardians
         (0, 0, false),
+        (8, 255, false), // threshold + 2 saturates, never wraps
     ] {
         assert_eq!(
             guardian_set_ok(count, threshold),
@@ -908,16 +915,16 @@ fn a_guardian_set_parses_exactly() {
     const DAY: i64 = 86_400;
     let none = [0u8; 32];
     let owner = [0xAA; 32];
-    let mut b = encoded_set(3, 2, 7 * DAY);
+    let mut b = encoded_set(4, 2, 7 * DAY);
     b.extend_from_slice(&[0xEE; 5]); // what follows the set is not its business
     let (s, used) = GuardianSet::parse(&b, [&owner, &none]).unwrap();
     assert_eq!(
         (s.count, s.threshold, s.interval_s, used),
-        (3, 2, 7 * DAY, 1 + 96 + 1 + 8)
+        (4, 2, 7 * DAY, 1 + 128 + 1 + 8)
     );
-    assert_eq!(&s.keys[..3], &[[1; 32], [2; 32], [3; 32]]);
-    assert!(s.contains(&[2; 32]) && !s.contains(&[4; 32]) && !s.contains(&[0; 32]));
-    assert!(s.keys[3..].iter().all(|k| *k == [0; 32]));
+    assert_eq!(&s.keys[..4], &[[1; 32], [2; 32], [3; 32], [4; 32]]);
+    assert!(s.contains(&[2; 32]) && !s.contains(&[5; 32]) && !s.contains(&[0; 32]));
+    assert!(s.keys[4..].iter().all(|k| *k == [0; 32]));
     // Both interval bounds are accepted, one second past either is not.
     for (iv, ok) in [
         (DAY, true),
@@ -925,7 +932,7 @@ fn a_guardian_set_parses_exactly() {
         (DAY - 1, false),
         (30 * DAY + 1, false),
     ] {
-        let r = GuardianSet::parse(&encoded_set(3, 2, iv), [&owner, &none]);
+        let r = GuardianSet::parse(&encoded_set(4, 2, iv), [&owner, &none]);
         assert_eq!(r.is_ok(), ok, "interval {iv}");
         if !ok {
             assert_eq!(r.unwrap_err(), GuardianSetError::BadInterval);
@@ -943,7 +950,7 @@ fn a_guardian_set_is_refused_for_each_rule_in_order() {
     assert_eq!(parse(&[], &none), Err(Truncated));
     assert_eq!(parse(&encoded_set(1, 2, WEEK), &none), Err(BadCount));
     assert_eq!(parse(&encoded_set(9, 2, WEEK), &none), Err(BadCount));
-    let full = encoded_set(3, 2, WEEK);
+    let full = encoded_set(4, 2, WEEK);
     assert_eq!(parse(&full[..full.len() - 1], &none), Err(Truncated));
     for (i, bad) in [(0usize, [0u8; 32]), (1, owner), (2, [1; 32])] {
         let mut b = full.clone();
@@ -957,6 +964,15 @@ fn a_guardian_set_is_refused_for_each_rule_in_order() {
         "n-of-n"
     );
     assert_eq!(parse(&encoded_set(3, 1, WEEK), &none), Err(BadThreshold));
+    // A set too small for any threshold is BadThreshold, not BadCount: the
+    // count rule is only the bitmap's size (finding 107 changed the threshold).
+    for count in [2, 3] {
+        assert_eq!(
+            parse(&encoded_set(count, 2, WEEK), &none),
+            Err(BadThreshold),
+            "2-of-{count}"
+        );
+    }
     // The whole encoding must be present before any key is judged: a short
     // payload with a bad key is Truncated (the Vault used to say BadKey).
     let mut b = full.clone();

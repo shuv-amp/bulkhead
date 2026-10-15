@@ -556,11 +556,14 @@ def quorum(approvals: int, alive: int, threshold: int) -> bool:
 
 
 MIN_GUARDIAN_THRESHOLD = 2
+GUARDIAN_MARGIN = 2
 
 
 def guardian_set_ok(count: int, threshold: int) -> bool:
-    """At least two to undo a stop, fewer than all, so the others can eject a rogue (finding 96)."""
-    return count <= 8 and MIN_GUARDIAN_THRESHOLD <= threshold < count
+    """At least two to undo a stop, and two keys more than that, so after any two
+    faults (lost or rogue) short of a rogue quorum the honest guardians still eject
+    a rogue (findings 96, 107)."""
+    return count <= 8 and MIN_GUARDIAN_THRESHOLD <= threshold <= count - GUARDIAN_MARGIN
 
 
 def guardian_set_parse(b: bytes, forbidden: list):
