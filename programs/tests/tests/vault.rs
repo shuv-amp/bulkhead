@@ -4015,6 +4015,7 @@ fn a_quote_gives_the_releases_outcome_for_a_loan() {
     assert_eq!((quoted.backed, quoted.queued), (0, ask), "vault frozen: queued");
     assert_eq!(quoted, paid, "vault frozen");
     w.env.advance(61);
+    w.refresh_prices();
 
     // Signed but the protocol frozen: the same.
     w.env.ok(&[w.m.freeze_ix(&g0, None, 86_400)], &[&w.m.g[0]]);
