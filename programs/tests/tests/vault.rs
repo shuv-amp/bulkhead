@@ -3781,8 +3781,15 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
     assert_eq!(o.backed, 0, "unsigned: not a loan");
     assert_eq!(o.instant + o.queued, 50_000 * USDC, "all of it unbacked");
+    // Nor is the holder's key listed without a signature: consent is the
+    // signature, not the account.
+    let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
+    ix.accounts.push(AccountMeta::new_readonly(holder.pubkey(), false));
+    let o2 = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(o2.backed, 0, "listed, unsigned: not a loan");
+    assert_eq!(o2.instant + o2.queued, 50_000 * USDC, "all of it unbacked");
     let paid = w.env.balance(&holder_usdc);
-    assert_eq!(paid, o.instant);
+    assert_eq!(paid, o.instant + o2.instant);
     let g0 = w.m.g[0].pubkey();
     let freeze = w.m.freeze_ix(&g0, None, 86_400);
     w.env.ok(&[freeze], &[&w.m.g[0]]);
