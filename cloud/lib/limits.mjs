@@ -1,8 +1,9 @@
 // The worst-case figures from raw account data, for pages that hold no key
 // (simulating `attest` needs a funded fee payer). A JavaScript statement of
 // four core functions (crates/bulkhead-core/src/{ema,limiter}.rs), checked
-// against the Python reference on random edge cases (cloud/test/limits.test.mjs)
-// and against the program's own `attest` in the end-to-end run.
+// against the Python reference and the Rust core on random edge cases
+// (cloud/test/limits.test.mjs) and against the program's own `attest` in the
+// end-to-end run.
 // All arithmetic is BigInt: the core uses u64/u128/i64.
 
 const U64_MAX = (1n << 64n) - 1n;
