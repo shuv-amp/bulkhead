@@ -155,7 +155,7 @@ Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and th
 
 ## 10. Compute (measured on the real runtime, through Harbor's CPI)
 
-Measured 8 Oct 2026 by `compute_units_are_within_the_spec_targets` (`programs/tests/tests/vault.rs`), on a macOS (arm64) build of this tree. The canonical Linux build orders functions differently, so its figures can differ slightly.
+Measured 8 Oct 2026 by `compute_units_are_within_the_spec_targets` (`programs/tests/tests/vault.rs`), on a macOS (arm64) build of that day's tree (#35, `25b5a87`); the Vault has changed since. Two figures are later and name their source: a first deposit's cost at a low bump (finding 75) and the full-ledger row (its own test, 14 Oct). The canonical Linux build orders functions differently, so its figures can differ slightly.
 
 | Path | Compute units | Target |
 |---|---|---|
