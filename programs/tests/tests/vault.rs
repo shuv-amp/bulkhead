@@ -3530,7 +3530,8 @@ fn a_lifeboat_exit_goes_only_to_a_destination_committed_72h_before_it() {
     let to = w.account("usdc", &next.pubkey());
     let exit = r2_execute_exit(&w, &next.pubkey(), &to);
     assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&next]), verr::DESTINATION_NOT_SETTLED);
-    // Nor to the destination it was proposed for, now replaced.
+    // Nor to the destination it was proposed for, now replaced: the age check
+    // runs before the recipient check, so any recipient is refused here.
     let old = w.m.destination.pubkey();
     let old_acc = w.account("usdc", &old);
     let to_old = r2_execute_exit(&w, &old, &old_acc);
