@@ -259,9 +259,9 @@ RULES = [
     (N + r" findings", ["findings"]),
     # The findings since the submission, as a range ending at the latest.
     (WHOLE + r"96[–-](\d+) were found after the submission", ["findings"]),
-    # 12 only. A lookbehind, since a match that overlaps the kept
-    # "95 findings at submission" just before it would be skipped.
-    (r"(?<=submission;)\s+96[–-](\d+) recorded", ["findings"]),
+    # 12 only. The match overlaps the kept "95 findings at submission" before
+    # it; only that statement's own number is exempt, so 96–N is checked.
+    (r"submission;\s+96[–-](\d+) recorded", ["findings"]),
 ]
 RULES = [(re.compile(pattern.replace(" ", r"\s+").replace(r"(\d+)", D), re.I), keys) for pattern, keys in RULES]
 
