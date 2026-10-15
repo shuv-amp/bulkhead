@@ -6,7 +6,7 @@
   <a href="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#live-on-devnet"><img alt="Live on devnet" src="https://img.shields.io/badge/devnet-live-2F5BFF?labelColor=07080b"></a>
   <a href="docs/09-VERIFICATION.md"><img alt="17 Kani proofs" src="https://img.shields.io/badge/Kani_proofs-17%2F17-2F5BFF?labelColor=07080b"></a>
-  <a href="docs/09-VERIFICATION.md"><img alt="133 program tests" src="https://img.shields.io/badge/program_tests-133%2F133-2F5BFF?labelColor=07080b"></a>
+  <a href="docs/09-VERIFICATION.md"><img alt="136 program tests" src="https://img.shields.io/badge/program_tests-136%2F136-2F5BFF?labelColor=07080b"></a>
   <a href="SECURITY.md"><img alt="Not audited" src="https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-c2410c?labelColor=07080b"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-8a8d96?labelColor=07080b"></a>
 </p>
@@ -181,7 +181,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **133/133**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **136/136**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
 | Bounded proofs (Kani) and exhaustive checks | **17/17 harnesses verified** on 14 Oct (14 for every value of their types), 227 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
 | Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
