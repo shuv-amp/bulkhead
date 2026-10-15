@@ -72,6 +72,74 @@ def gen_limiter_session(r: random.Random) -> list:
     return lines
 
 
+# The core's whole domain for the limiter views, which gen_pure and
+# gen_limiter_session sample only in realistic ranges (extreme_diff.py and
+# cloud/test/limits.test.mjs). A LimitConfig window is u32 seconds; windows
+# are drawn up to that, both whole seconds and any millisecond count (the
+# core's Bucket takes any window in ms).
+WINDOW_MAX_MS = ((1 << 32) - 1) * 1000
+HORIZON_MS = 604_800_000  # QUEUE_HORIZON_S: the program's horizon is a constant
+
+
+def full_u64(r: random.Random) -> int:
+    return r.choice([0, 1, U64, U64 - 1, U64 // 10_000, r.randrange(0, U64 + 1), r.randrange(0, 10**12)])
+
+
+def full_window_ms(r: random.Random) -> int:
+    return r.choice([1, 1000, WINDOW_MAX_MS, r.randrange(1, 1 << 32) * 1000, r.randrange(1, WINDOW_MAX_MS + 1)])
+
+
+def gen_full_range(r: random.Random) -> str:
+    """K, M, E or EL: u16 bps, u64 balances and capacities, windows up to
+    u32::MAX seconds, any i64 duration, times far either side of zero (and
+    EMA steps inside one TAU, where the step is a fraction)."""
+    k = r.randrange(4)
+    if k == 0:
+        return f"K {full_u64(r)} {r.choice([0, 1, 10000, 10001, 65535, r.randrange(0, 1 << 16)])} {full_u64(r)} {full_u64(r)}"
+    if k == 1:
+        t = r.choice([-I64 - 1, -1, 0, 1, I64, r.randrange(-I64 - 1, I64 + 1)])
+        return f"M {full_u64(r)} {full_window_ms(r)} {full_u64(r)} {full_window_ms(r)} {t}"
+    if k == 2:
+        last = r.randrange(-(1 << 40), 1 << 40)
+        dt = r.choice([r.randrange(-(1 << 40), 1 << 40), r.randrange(1, 86_400), 1, 86_399, 86_400])
+        return f"E {full_u64(r)} {last} {full_u64(r)} {last + dt} {r.randrange(2)}"
+    now = r.randrange(-(1 << 50), 1 << 50)
+    w = now // 1800 + r.choice([-2, -1, 0, 1, 2, 3, r.randrange(-(1 << 30), 1 << 30)])
+    return f"EL {full_u64(r)} {full_u64(r)} {w} {full_u64(r)} {now} {r.randrange(2)}"
+
+
+def gen_full_range_session(r: random.Random) -> list:
+    """A limiter session with full-range capacities and windows, the program's
+    horizon, and amounts and time steps sized to them."""
+    c = [max(full_u64(r), 1), max(full_u64(r), 1)]
+    w = [full_window_ms(r), full_window_ms(r)]
+    # One session in ten has a delay past the horizon (every queue is full).
+    if r.random() < 0.1:
+        d = r.randrange(HORIZON_MS + 1, WINDOW_MAX_MS + 1)
+    else:
+        d = r.choice([0, 21_600_000, r.randrange(0, HORIZON_MS + 1)])
+    lines = [f"L {c[0]} {w[0]} {c[1]} {w[1]} {d} {HORIZON_MS}"]
+    now = r.choice([0, 1_700_000_000_000, r.randrange(0, 1 << 42)])
+    frozen = 0
+    for _ in range(r.randrange(1, 80)):
+        now += r.choice([0, 1, 1000, 3_600_000, w[0] // 2, w[1] // 2, r.randrange(0, 2 * max(w))])
+        roll = r.random()
+        if roll < 0.05:
+            frozen = now + r.choice([0, 3_600_000, 86_400_000])
+        if roll < 0.6:
+            b = r.choice(c)
+            amt = r.choice([1, b // 10_000, b // 10, b // 2, b - 1, b, b + 1, b * 2, full_u64(r)])
+            lines.append(f"R {now} {min(max(amt, 1), U64)} {frozen}")
+        elif roll < 0.67:
+            lines.append(f"Z {now} {r.choice([0, 0, 1])}")
+        elif roll < 0.72:
+            w = [full_window_ms(r), full_window_ms(r)]
+            lines.append(f"W {now} {w[0]} {w[1]}")
+        else:
+            lines.append(f"A {now}")
+    return lines
+
+
 def gen_pure(r: random.Random) -> str:
     k = r.randrange(11)
     if k == 0:
@@ -352,8 +420,20 @@ def check_worker() -> None:
 
 def run_worker(lines: list) -> list:
     check_worker()
-    p = subprocess.run([WORKER], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
-    return p.stdout.splitlines()
+    p = subprocess.run([WORKER], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    out = p.stdout.splitlines()
+    if p.returncode < 0:
+        # Killed by a signal: buffered answers are lost, so no line can be named.
+        sys.exit(f"worker killed by signal {-p.returncode} after {len(out)} answers: {p.stderr.strip()[-500:]}")
+    if p.returncode != 0:
+        # A panic unwinds and flushes: one answer per line it ran, so the
+        # first line without one is the line it stopped at.
+        run = protocol.runnable(lines)
+        if len(out) >= len(run):
+            sys.exit(f"worker exited {p.returncode} after its last answer: {p.stderr.strip()[-500:]}")
+        replay = "\n".join(fixture_for(run, len(out)))
+        sys.exit(f"worker exited {p.returncode} at `{run[len(out)]}`: {p.stderr.strip()[-500:]}\nreplay:\n{replay}")
+    return out
 
 
 def fixture_for(lines: list, idx: int) -> list:
