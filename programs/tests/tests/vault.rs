@@ -4006,14 +4006,23 @@ fn a_quote_gives_the_releases_outcome_for_a_loan() {
     assert_eq!(quoted.backed, ask, "signed: a loan");
     assert_eq!(quoted, paid, "signed");
 
-    // Signed but frozen: no loan is backed, the ask waits behind the freeze.
+    // Signed but this vault frozen: no loan is backed, the ask waits.
     let g0 = w.m.g[0].pubkey();
+    w.env.ok(&[w.m.freeze_ix(&g0, Some(&w.usdc), 60)], &[&w.m.g[0]]);
+    let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!((quoted.backed, quoted.queued), (0, ask), "vault frozen: queued");
+    assert_eq!(quoted, paid, "vault frozen");
+    w.env.advance(61);
+
+    // Signed but the protocol frozen: the same.
     w.env.ok(&[w.m.freeze_ix(&g0, None, 86_400)], &[&w.m.g[0]]);
     let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
     let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
     let paid = outcome(&w.env.ok(&[ix], &[&holder]));
-    assert_eq!((quoted.backed, quoted.queued), (0, ask), "frozen: queued");
-    assert_eq!(quoted, paid, "frozen");
+    assert_eq!((quoted.backed, quoted.queued), (0, ask), "protocol frozen: queued");
+    assert_eq!(quoted, paid, "protocol frozen");
 }
 
 /// Finding 98: the caller PDA signs every release, so its signature counted
