@@ -303,14 +303,22 @@ def check(texts: dict, t: dict, kept_list: list) -> tuple:
     for path, text in texts.items():
         for pattern, keys in RULES:
             for m in re.finditer(pattern, text):
-                spans = [snippet for a, b, snippet in kept.get(path, []) if a < m.end() and m.start() < b]
-                if spans:
-                    used.update((path, snippet) for snippet in spans)
+                # A kept statement exempts only the numbers inside it: another
+                # count the same rule matches (a current one in the same table
+                # row) is still checked.
+                check_keys = []
+                for i, key in enumerate(keys, 1):
+                    inside = [s for a, b, s in kept.get(path, []) if a <= m.start(i) and m.end(i) <= b]
+                    if inside:
+                        used.update((path, s) for s in inside)
+                    else:
+                        check_keys.append((i, key))
+                if not check_keys:
                     continue
                 live.add(pattern.pattern)
                 wrong = [
                     f"{m.group(i)} (the tree has {key} = {t[key]})"
-                    for i, key in enumerate(keys, 1)
+                    for i, key in check_keys
                     if int(m.group(i).replace(",", "")) != t[key]
                 ]
                 if wrong:
@@ -363,7 +371,9 @@ def self_test() -> int:
         ("then: 14 Kani harnesses", [("doc.md", "then:", "x")], 2),
         ("then: 14 Kani\nharnesses", old, 0),
         ("then: 114 Kani harnesses", old, 2),
-        ("| **Bounded proofs (Kani)** | 16 harnesses: x | **16/16 verified** (8 Oct) |", [("doc.md", "16/16 verified", "x")], 0),
+        # A kept dated result does not hide a stale current count beside it.
+        ("| **Bounded proofs (Kani)** | 16 harnesses: x | **16/16 verified** (8 Oct) |", [("doc.md", "16/16 verified", "x")], 1),
+        ("| **Bounded proofs (Kani)** | 17 harnesses: x | **16/16 verified** (8 Oct) |", [("doc.md", "16/16 verified", "x")], 0),
         ("Bounded model checking of the core's 15 harnesses", [], 1),
         ("the 3 harnesses at small width", [], 0),
         ("the S10 Floor tests and G2 property tests", [], 0),
