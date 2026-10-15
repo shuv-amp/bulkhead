@@ -34,7 +34,7 @@ It becomes a public ticket with an ETA, at least 6 hours out, and anyone can set
 ## Guardians
 
 **Who are the guardians?**
-Two to eight keys the protocol names at registration: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat within their interval count. They can freeze, cancel or extend a ticket, veto a change, and (Floor) stop the program. No guardian instruction moves tokens or chooses a recipient (G5).
+Four to eight keys the protocol names at registration, at least two more than the quorum: for example its operations key, the Bulkhead Cloud bot and two security firms. Only guardians that heartbeat within their interval count. They can freeze, cancel or extend a ticket, veto a change, and (Floor) stop the program. No guardian instruction moves tokens or chooses a recipient (G5).
 
 **What if a guardian key is stolen?**
 The attacker gets denial of service, not money:
