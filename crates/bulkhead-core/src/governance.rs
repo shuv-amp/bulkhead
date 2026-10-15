@@ -122,13 +122,22 @@ pub fn quorum(approvals: u8, alive: u8, threshold: u8) -> bool {
 /// stop: unfreeze, restore and eject always need at least two live guardians.
 pub const MIN_GUARDIAN_THRESHOLD: u8 = 2;
 
+/// Keys every new guardian set holds beyond its threshold (AUD-2, finding
+/// 107): the faults it survives, lost keys or rogues short of a rogue quorum.
+pub const GUARDIAN_MARGIN: u8 = 2;
+
 /// Whether a guardian set of `count` keys may use `threshold`: at least two to
-/// undo a stop, and fewer than all of them, so the others can always reach a
-/// quorum without a rogue and eject it (finding 96: in an n-of-n set nobody
-/// can be ejected, so one guardian kept a program stopped for good). A set
-/// therefore has at least 3 keys. Both programs check every set with this.
+/// undo a stop, and `GUARDIAN_MARGIN` keys more than that, so that after two
+/// faults, short of a rogue quorum, the honest guardians still reach one and
+/// eject the rogue. With a margin of one, a lost key and a rogue locked a 2-of-3 set
+/// for good (finding 107); with none, one rogue locked an n-of-n set (finding
+/// 96). A set therefore has at least 4 keys. Both programs check every new
+/// set with this; a stored set is not checked again, and an ejection may take
+/// a set down to `threshold + 1` keys and then to `threshold`.
 pub fn guardian_set_ok(count: u8, threshold: u8) -> bool {
-    count <= 8 && threshold >= MIN_GUARDIAN_THRESHOLD && threshold < count
+    count <= 8
+        && threshold >= MIN_GUARDIAN_THRESHOLD
+        && count >= threshold.saturating_add(GUARDIAN_MARGIN)
 }
 
 /// Most guardians a set may hold (bitmaps over the set are a `u8`).
@@ -156,7 +165,7 @@ pub enum GuardianSetError {
     /// A zero key, a forbidden key (the admin or owner, the recovery key), or
     /// a duplicate.
     BadKey,
-    /// Not `2 ≤ threshold < count` (`guardian_set_ok`).
+    /// Not `2 ≤ threshold ≤ count − 2` (`guardian_set_ok`).
     BadThreshold,
     /// A heartbeat interval outside 1–30 days.
     BadInterval,

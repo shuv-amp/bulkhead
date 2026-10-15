@@ -372,7 +372,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     && !duplicate
                     && !with_owner
                     && th >= 2
-                    && (th as usize) < n
+                    && th as usize + 2 <= n
                     && (MIN_HEARTBEAT_INTERVAL_S..=MAX_HEARTBEAT_INTERVAL_S).contains(&interval);
                 if valid {
                     displaced = free.unwrap();

@@ -4248,20 +4248,37 @@ fn no_more_vaults_before_the_seal_than_the_seal_can_name() {
 
 /// Finding 96: in an n-of-n set nobody can be ejected (the others never reach
 /// a quorum without the rogue), so one guardian renewed freezes and vetoed
-/// every loosening for good. A set must have more keys than its threshold;
-/// a 3-of-4 is fine.
+/// every loosening for good. Finding 107: with one key beyond the threshold,
+/// one lost key and one rogue did the same. A new set needs two keys beyond
+/// its threshold, when proposed and again when executed; a 2-of-4 and a
+/// 3-of-5 are fine.
 #[test]
-fn an_n_of_n_guardian_set_is_refused() {
+fn a_guardian_set_without_two_spare_keys_is_refused() {
     let mut w = World::new();
     w.seal();
-    let keys: Vec<Address> = (0..4).map(|_| Keypair::new().pubkey()).collect();
+    let keys: Vec<Address> = (0..5).map(|_| Keypair::new().pubkey()).collect();
     let zero = Address::default();
-    for (set, th) in [(&keys[..2], 2u8), (&keys[..3], 3), (&keys[..4], 4)] {
+    for (set, th) in [(&keys[..2], 2u8), (&keys[..3], 3), (&keys[..4], 4), (&keys[..3], 2), (&keys[..4], 3), (&keys[..5], 4), (&keys[..4], 1)] {
         let ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(set, th), None);
-        assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_GUARDIANS);
+        assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_GUARDIANS, "{th}-of-{}", set.len());
     }
     let ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&keys, 3), None);
     w.env.ok(&[ix], &[&w.m.admin]);
+    // A 2-of-4 waits; its threshold turns 3 in the stored change.
+    let id = read_protocol(&w.env, &w.m.protocol).next_change_id;
+    let set = guardian_set(&keys[..4], 2);
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 2, &zero, &set, None)], &[&w.m.admin]);
+    let change = w.m.change_address(id);
+    let mut acct = w.env.account(&change);
+    let at = acct.data.windows(set.len()).position(|x| x == set.as_slice()).expect("the pending set");
+    acct.data[at + 1 + 32 * 4] = 3;
+    w.env.svm.set_account(change, acct).unwrap();
+    w.env.advance(3 * DAY + 1);
+    let protocol = w.m.protocol;
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, id, &protocol)], &[]), verr::INVALID_GUARDIANS);
+    let p = read_protocol(&w.env, &w.m.protocol);
+    assert_eq!((p.guardian_count, p.threshold), (4, 2));
+    assert_eq!(p.guardians[0], w.m.g[0].pubkey().to_bytes(), "the old set stays");
 }
 
 /// The guardian-set payload for `SetGuardians`.

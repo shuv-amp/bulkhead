@@ -83,7 +83,7 @@ No. Tokens sit in accounts owned by the Vault program's PDA. No key can transfer
 **What if Bulkhead has a bug?**
 It is the top risk, so every rule is stated independently more than once and checked:
 - a Rust core against a Python reference, over 6.9M differential lines;
-- property tests, 17 Kani harnesses, exhaustive tests and mutation testing;
+- property tests, 19 Kani harnesses, exhaustive tests and mutation testing;
 - the programs against a model built from the core;
 - every finding listed in `09 §4`.
 

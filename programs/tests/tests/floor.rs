@@ -315,6 +315,37 @@ fn two_rogues_in_turn_are_both_ejected_from_a_two_of_four_set() {
     assert_eq!(read_config(&env, f).guardian_count, 4);
 }
 
+/// Finding 107: a new guardian set needs two keys beyond its threshold, when
+/// proposed and again when executed (a set proposed before the rule, as the
+/// devnet renewals were, is refused then). A set already stored is not
+/// checked again: an ejection takes a 2-of-4 down to 2-of-3, and that set
+/// still works (the two tests above).
+#[test]
+fn a_guardian_set_without_two_spare_keys_is_refused() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let zero = solana_address::Address::default();
+    let k: Vec<_> = (0..4).map(|_| Keypair::new().pubkey()).collect();
+    for (keys, th) in [(&k[..3], 2u8), (&k[..4], 3)] {
+        let set = Floor::guardian_set(keys, th, 7 * DAY);
+        let ix = f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &set, None);
+        assert_eq!(env.fails(&[ix], &[&p.owner]), err::INVALID_THRESHOLD, "{th}-of-{}", keys.len());
+    }
+    // A 2-of-4 waits; its threshold turns 3 in the stored proposal.
+    let set = Floor::guardian_set(&k, 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &set, None)], &[&p.owner]);
+    let mut acct = env.account(&f.config);
+    let at = acct.data.windows(set.len()).position(|w| w == set.as_slice()).expect("the pending set");
+    acct.data[at + 1 + 32 * 4] = 3;
+    env.svm.set_account(f.config, acct).unwrap();
+    env.advance(3 * DAY + 1);
+    assert_eq!(env.fails(&[f.execute_config()], &[]), err::INVALID_THRESHOLD);
+    let c = read_config(&env, f);
+    assert_eq!((c.guardian_count, c.threshold), (4, 2));
+    assert_eq!(c.guardians[0], gs[0].to_bytes(), "the old set stays");
+}
+
 #[test]
 fn registration_requires_the_current_upgrade_authority() {
     let mut env = Env::new();
@@ -365,7 +396,8 @@ fn registration_rejects_weak_settings() {
             err::INVALID_DELAY,
         ),
         (
-            f.register(&pay, &team.pubkey(), &owner, &[a, b], 1, 7 * DAY, 3 * DAY),
+            // Spare keys enough, so only the minimum threshold refuses it.
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 1, 7 * DAY, 3 * DAY),
             err::INVALID_THRESHOLD,
         ),
         (
@@ -380,6 +412,16 @@ fn registration_rejects_weak_settings() {
         ),
         (
             f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 3, 7 * DAY, 3 * DAY),
+            err::INVALID_THRESHOLD,
+        ),
+        // Threshold + 1: one lost key and one rogue guardian lock it for good
+        // (finding 107).
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY),
+            err::INVALID_THRESHOLD,
+        ),
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 3, 7 * DAY, 3 * DAY),
             err::INVALID_THRESHOLD,
         ),
         (

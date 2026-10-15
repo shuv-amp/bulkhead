@@ -259,7 +259,7 @@ def gen_guardian_set(r: random.Random) -> str:
         keys[r.randrange(len(keys))] = r.choice(forbidden)
     elif len(keys) > 1 and roll < 0.3:
         keys[r.randrange(1, len(keys))] = keys[0]
-    th = r.choice([2, 2, 3, count - 1, count, count + 1, 1, 0, r.randrange(256)]) % 256
+    th = r.choice([2, 2, 3, count - 2, count - 1, count, count + 1, 1, 0, r.randrange(256)]) % 256
     interval = r.choice([86_400, 86_399, 30 * 86_400, 30 * 86_400 + 1, 7 * 86_400, 0, -1,
                          -(1 << 63), (1 << 63) - 1, r.randrange(-(1 << 63), 1 << 63)])
     b = bytes([count % 256]) + b"".join(keys) + bytes([th]) + interval.to_bytes(8, "little", signed=True)
