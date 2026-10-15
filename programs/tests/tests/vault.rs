@@ -3653,6 +3653,81 @@ fn a_guardian_silent_past_its_interval_cannot_veto_the_seal() {
     w.env.ok(&[v1], &[&w.m.g[1]]);
 }
 
+/// G5: a quorum counts live guardians only. With g0 silent past its interval,
+/// g0 and g1 (two signatures, threshold 2) are no quorum for any action that
+/// needs one: unfreeze, a lifeboat return, abdicate, tightening an abdicated
+/// kind, replace_recovery, eject. g1 and g2, both live, are.
+#[test]
+fn a_silent_guardian_does_not_count_toward_a_quorum() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (g0, g1, g2) = (w.m.g[0].pubkey(), w.m.g[1].pubkey(), w.m.g[2].pubkey());
+    for k in [&w.m.g[0], &w.m.g[1], &w.m.g[2]] {
+        w.env.ok(&[r2_heartbeat(&w, &k.pubkey())], &[k]);
+    }
+    w.env.advance(7 * DAY);
+    w.env.ok(&[r2_heartbeat(&w, &g1)], &[&w.m.g[1]]);
+    w.env.ok(&[r2_heartbeat(&w, &g2)], &[&w.m.g[2]]);
+    w.env.advance(1); // g0 is one second past its interval
+    w.refresh_prices();
+    let admin = w.m.admin.pubkey();
+    let dead = [g0, g1];
+    let live = [g1, g2];
+    let signed = |mut ix: Instruction, by: &[Address]| {
+        ix.accounts.extend(by.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        ix
+    };
+
+    // Lifeboat return.
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let ret = |w: &World| {
+        w.m.vault_ix(25, &(1_000_000 * USDC).to_le_bytes(), vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.usdc.vault_tokens, false),
+            AccountMeta::new(r2_lifeboat(w), false),
+            AccountMeta::new_readonly(w.usdc.mint, false),
+            AccountMeta::new_readonly(w.usdc.token_program, false),
+        ])
+    };
+    assert_eq!(w.env.fails(&[signed(ret(&w), &dead)], &[&w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "lifeboat return");
+    w.env.ok(&[signed(ret(&w), &live)], &[&w.m.g[1], &w.m.g[2]]);
+
+    // Abdicate SetLimits, then tighten it.
+    let abdicate = |w: &World| {
+        w.m.vault_ix(17, &[0], vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        ])
+    };
+    assert_eq!(w.env.fails(&[signed(abdicate(&w), &dead)], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "abdicate");
+    w.env.ok(&[signed(abdicate(&w), &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
+    let vault = w.usdc.vault;
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let tighten = |w: &World| w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[signed(tighten(&w), &dead)], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "tighten abdicated");
+    w.env.ok(&[signed(tighten(&w), &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
+
+    // Replace the recovery key.
+    let recovery = Address::new_unique();
+    let ix = w.m.replace_recovery_ix(&admin, &recovery, &dead);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "replace recovery");
+    w.env.ok(&[w.m.replace_recovery_ix(&admin, &recovery, &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
+
+    // Unfreeze.
+    w.env.ok(&[w.m.freeze_ix(&g1, None, 86_400)], &[&w.m.g[1]]);
+    assert_eq!(w.env.fails(&[w.m.unfreeze_ix(None, &dead)], &[&w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "unfreeze");
+    w.env.ok(&[w.m.unfreeze_ix(None, &live)], &[&w.m.g[1], &w.m.g[2]]);
+
+    // Eject g2 (g0 and g1 sign) is refused; eject g0 (g1 and g2 sign) is not.
+    let eject = |w: &World, target: u8| w.m.vault_ix(15, &[target], vec![AccountMeta::new(w.m.protocol, false)]);
+    assert_eq!(w.env.fails(&[signed(eject(&w, 2), &dead)], &[&w.m.g[0], &w.m.g[1]]), verr::CANNOT_EJECT, "eject");
+    w.env.ok(&[signed(eject(&w, 0), &live)], &[&w.m.g[1], &w.m.g[2]]);
+}
+
 /// Finding 72: an abdicated recovery key can still be removed (it only takes
 /// power away), or a stolen one would stale every admin rotation for good.
 #[test]
