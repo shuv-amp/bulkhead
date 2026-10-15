@@ -59,7 +59,7 @@ Each was checked in agave's source (master `f771659`, 26 Sep 2026) or on-chain; 
 |---|---|
 | `program`, `programdata` | The protected program and its loader-v3 data account |
 | `owner` | Proposes upgrades, restores and configuration changes (e.g. a Squads vault) |
-| `guardians[≤8]`, `last_heartbeat[≤8]`, `threshold` (≥ 2, below the guardian count), `heartbeat_interval_s` (1–30 days) | Only guardians that heart-beat within the interval can act (Lido pattern) |
+| `guardians[≤8]`, `last_heartbeat[≤8]`, `threshold` (≥ 2, at most the guardian count − 2, finding 107), `heartbeat_interval_s` (1–30 days) | Only guardians that heart-beat within the interval can act (Lido pattern) |
 | `upgrade_delay_s` | ≥ 72h (constant floor), ≤ 30 days (same cap as the Vault's loosen delay); **7 days recommended** (L2BEAT Stage-1 exit window) |
 | `status` | Live or Aborted |
 | `elf_is_v3` | Whether the protected code is deployable after SIMD-0500 (set at registration, upgrade and restore; a stop leaves it describing the stopped code, which a restore puts back) |

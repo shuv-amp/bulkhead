@@ -27,7 +27,7 @@ These were in the plan and did not make the submission. None is claimed anywhere
 
 The twelve-month plan is in `11 §8`: three design partners on devnet in November (at least one on Floor, one on Vault), a Solana-specialist audit in December, a formal-methods audit of the core and a TVL-capped mainnet partner in Q1 2027, then the upgrade authorities burned.
 
-Before any mainnet deployment, the decisions in `16 §4` must be made: the guardian set's minimum size (AUD-2, and finding 96), a bound on new backed liabilities, and the oracle settings for a lending integration.
+Before any mainnet deployment, the decisions in `16 §4` must be made: a bound on new backed liabilities, and the oracle settings for a lending integration.
 
 ## 4. Risk register
 

@@ -78,7 +78,7 @@ flowchart LR
     V -->|"own deposit:<br/>always instant"| OK["✅ paid"]
     V -->|"within 2%/h · 5%/day"| OK
     V -->|"over the limit"| Q["⏳ public queue"]
-    G["Guardians<br/>(3–8 keys)"] -.->|"freeze · cancel"| Q
+    G["Guardians<br/>(4–8 keys)"] -.->|"freeze · cancel"| Q
     G -.->|"veto loosening"| V
     F["Floor<br/>holds the upgrade key"] -->|"new code waits 72h"| PR["Protocol program"]
     G -.->|"stop · veto"| F
@@ -93,7 +93,7 @@ flowchart LR
 | Does **not** stop | Outflow within the limits when nobody responds: up to 10% of the vault asked for and paid within a day, plus queued payouts once they are due, which can land together (finding 102). Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
 | Adoption | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
 
-**Who the guardians are.** When a protocol registers, it names 3–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly (the threshold is always below the number of guardians, so the others can always reach one), so a stolen guardian key means denial of service until then, never theft.
+**Who the guardians are.** When a protocol registers, it names 4–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and two security firms. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly (a new set has at least two keys more than its threshold, so after any two lost or rogue keys the others still reach one, unless the rogues are a quorum themselves: two in a 2-of-n set), so a stolen guardian key means denial of service until then, never theft.
 
 **Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian, limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day, on top of $Q already queued in public" through the unbacked lane, with absolute caps set. It excludes oracle risk on backed loans. A patient attacker who paces payouts under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2).
 
@@ -230,7 +230,7 @@ Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
 | G2 | An owner who owes nothing is never throttled, frozen or priced taking back their own deposit. (Whether the tokens are in the pool is the pool's liquidity; [`03 §4.6`](docs/03-MECHANISM.md#46-guarantees-of-the-ledger).) |
 | G3 | Backed payouts never leave an owner's ledger unsound at conservative prices |
 | G4 | Tighten instantly; loosen only after ≥ 72h, public, vetoable |
-| G5 | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one, in any set larger than its threshold (run at least `threshold + 2`; [finding 96](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). |
+| G5 | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one, in any set larger than its threshold. A new set needs at least `threshold + 2` keys, so any two faults, lost keys or rogue guardians, leave such a quorum unless the rogues are one themselves (two in a 2-of-n set, T7; [findings 96 and 107](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). |
 | G6 | Emergency moves go only into a Bulkhead-held lifeboat. Exits wait 72h, and go only to a destination committed 72h earlier. |
 | G7 | Missing, stale or wide prices, unknown assets and overflow only ever reduce what is backed |
 | G8 | (Floor) A new binary deploys only after ≥ 72h without veto. While the program is stopped, a live quorum's approval of that exact frozen buffer can deploy it sooner. Any live guardian stops the program instantly; a live quorum restores the snapshot, verified byte-identical to the stopped code. |
