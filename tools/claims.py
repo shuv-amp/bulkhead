@@ -216,7 +216,8 @@ def truth() -> dict:
 # failures is a red CI, not a state the docs describe. After raising a total,
 # run the check before writing the new result.
 D = r"(\d{1,3}(?:,\d{3})+|\d+)"
-N = r"(?<![\w.,])" + D  # a whole number, not the tail of "5.1" or "S10"
+WHOLE = r"(?<![\w.,])"  # not the tail of "5.1" or "S10"
+N = WHOLE + D  # a whole number
 
 RULES = [
     (N + r" Kani (?:harnesses|proofs)", ["kani"]),
@@ -256,6 +257,11 @@ RULES = [
     (r"libFuzzer, (\d+) targets", ["fuzz"]),
     (r"fuzzing, (\d+) targets", ["fuzz"]),
     (N + r" findings", ["findings"]),
+    # The findings since the submission, as a range ending at the latest.
+    (WHOLE + r"96[–-](\d+) were found after the submission", ["findings"]),
+    # 12 only. A lookbehind, since a match that overlaps the kept
+    # "95 findings at submission" just before it would be skipped.
+    (r"(?<=submission;)\s+96[–-](\d+) recorded", ["findings"]),
 ]
 RULES = [(re.compile(pattern.replace(" ", r"\s+").replace(r"(\d+)", D), re.I), keys) for pattern, keys in RULES]
 
@@ -286,7 +292,7 @@ def check(texts: dict, t: dict, kept_list: list) -> tuple:
     errors, live, used, found_any = [], set(), set(), set()
     kept = {}
     for path, snippet, _ in kept_list:
-        flexible = r"(?<![\w.,])" + r"\s+".join(re.escape(word) for word in snippet.split()) + r"(?!\w)"
+        flexible = WHOLE + r"\s+".join(re.escape(word) for word in snippet.split()) + r"(?!\w)"
         found = list(re.finditer(flexible, texts.get(path, "")))
         hits = [(m.start(), m.end()) for m in found]
         if hits:
@@ -338,6 +344,20 @@ def self_test() -> int:
         ("| **Program tests** | Floor (5) and Vault (6) on x | 10/10 |", [], 1),
         ("we found 1,103 findings", [], 0),
         ("we found 1,102 findings", [], 1),
+        ("96–1,103 were found after the submission", [], 0),
+        # A sub-range (which of them are fixed) must not read as the latest.
+        ("96–99, 101 and 103 are fixed; 96–1,103 were found after the submission", [], 0),
+        ("96–99, 101 and 103 fixed; 1 at submission; 96–1,103 recorded 13–14 Oct", [], 0),
+        ("96–1,102 were\nfound after the submission", [], 1),
+        ("96-1,102 were found after the submission", [], 1),
+        ("196–1,102 were found after the submission", [], 0),
+        ("1 at submission; 96–1,103 recorded 13–14 Oct", [], 0),
+        ("1 at submission; 96–1,102 recorded 13–14 Oct", [], 1),
+        ("1 at submission; 96-1,102 recorded 13–14 Oct", [], 1),
+        ("1 at submission; 196–1,102 recorded 13–14 Oct", [], 0),
+        ("findings 96–1,102 recorded on devnet", [], 0),
+        ("1 at submission;\n  96–1,102 recorded", [], 1),
+        ("95 findings at submission; 96–1,102 recorded", [("doc.md", "95 findings at submission", "x")], 1),
         ("then: 14 Kani harnesses", old, 0),
         ("then: 14 Kani harnesses; now: 14 Kani harnesses", old, 1),
         ("then: 14 Kani harnesses", [("doc.md", "then:", "x")], 2),
