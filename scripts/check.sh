@@ -11,7 +11,7 @@ CASES="${CASES:-50000}"
 
 echo "== fmt";      cargo fmt --all -- --check
 echo "== claims (the counts README and docs/ state, against the tree)"
-python3 tools/claims.py --self-test
+python3 -I tools/claims.py --self-test  # -I: it must find tools/mutant_exclusions.py itself
 python3 tools/claims.py
 echo "== clippy";   cargo clippy --all-targets --release -- -D warnings
 echo "== tests";    BULKHEAD_CASES="${BULKHEAD_CASES:-5000}" cargo test --release --quiet
@@ -27,6 +27,8 @@ for seed in 5 9 11; do python3 reference/extreme_diff.py "$seed"; done
 echo "== model";    python3 reference/drift_model.py > /dev/null
 echo "== floor_check self-test (curve25519 vectors, PDA derivation)"
 python3 tools/floor_check.py --self-test
+echo "== mutant_exclusions self-test (the check scripts/mutants.sh runs on .cargo/mutants.toml)"
+python3 tools/mutant_exclusions.py --self-test
 echo "== cloud (zero-dependency JavaScript: codecs, limiter port vs Python and Rust, guardian policy)"
 node --test cloud/test/*.test.mjs
 echo "ALL CHECKS PASSED"

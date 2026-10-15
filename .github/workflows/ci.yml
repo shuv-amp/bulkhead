@@ -300,7 +300,9 @@ jobs:
   mutants:
     # Mutation testing of the lines a pull request changes in the core: every
     # mutant there must fail a test. Known equivalent mutants are excluded in
-    # .cargo/mutants.toml, each with its reason in docs/09 §6.
+    # .cargo/mutants.toml, each with its reason in docs/09 §6. First,
+    # scripts/mutants.sh checks those exclusions against the whole core's
+    # mutant list and fails if one no longer matches its count (finding 105).
     needs: changes
     if: >-
       github.event_name == 'pull_request' &&

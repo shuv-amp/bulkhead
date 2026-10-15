@@ -20,7 +20,7 @@ while IFS= read -r f; do
       workflows=true ;;
   esac
   case "$f" in
-    crates/bulkhead-core/src/*|scripts/mutants.sh|.cargo/mutants.toml)
+    crates/bulkhead-core/src/*|scripts/mutants.sh|.cargo/mutants.toml|tools/mutant_exclusions.py)
       mutants=true ;;
   esac
   case "$f" in
