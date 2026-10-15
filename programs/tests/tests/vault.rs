@@ -1216,6 +1216,11 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
     assert_eq!(w.env.balance(&stray), 0);
+    // The vault token account is one of them, refused by its address and by
+    // its owner: a payout to it would debit the ledger while the tokens stay.
+    let own = w.usdc.vault_tokens;
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &own, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "the vault's own account");
 }
 
 #[test]
@@ -1715,19 +1720,22 @@ fn after_the_seal_the_admin_cannot_upsert_an_asset() {
 #[test]
 fn the_seal_checks_each_vault_once() {
     // The seal checks every vault's claims against its balance. Naming one
-    // vault twice in place of another would skip the other's check, whether
-    // or not the two names are next to each other.
+    // vault twice in place of another would skip the other's check, wherever
+    // the two names are: the first named, next to each other, or neither.
     let mut w = World::new();
     let third = w.m.create_vault(&mut w.env, 6, Limits::default_limits(), [3; 32], None);
+    let fourth = w.m.create_vault(&mut w.env, 6, Limits::default_limits(), [4; 32], None);
     let ix = import_ix(&w, &Keypair::new().pubkey(), 1_000 * USDC);
     w.env.ok(&[ix], &[&w.m.admin]);
     w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
     w.env.advance(3 * DAY);
-    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &w.sol]);
-    assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "apart");
-    let ix = w.m.execute_seal_ix(&[&w.sol, &w.sol, &third]);
+    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &fourth, &w.sol]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "the first named");
+    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &third, &fourth]);
     assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "adjacent");
-    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol, &third]);
+    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &fourth, &third]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "neither");
+    let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol, &third, &fourth]);
     assert_eq!(w.env.fails(std::slice::from_ref(&ix), &[]), verr::IMPORT_EXCEEDS_BALANCE, "the skipped vault");
     w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
     w.env.ok(&[ix], &[]);
