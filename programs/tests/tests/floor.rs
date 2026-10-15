@@ -626,13 +626,16 @@ fn a_code_change_names_a_buffer_already_frozen_to_floor() {
     // Frozen to Floor, the same buffer is accepted.
     env.set_buffer_authority(&open, &p.owner, &f.authority);
     env.ok(&[f.propose(&owner, RESTORE, &open, &[], Some(&open))], &[&p.owner]);
-    // And an upgrade of a buffer frozen to Floor, while the program runs.
-    let mut env = Env::new();
-    let p = protect(&mut env, &honest_v1());
-    let fix = env.write_buffer(&honest_fix(), &p.owner);
-    env.set_buffer_authority(&fix, &p.owner, &p.f.authority);
-    let owner = p.owner.pubkey();
-    env.ok(&[p.f.propose(&owner, UPGRADE, &fix, &[], Some(&fix))], &[&p.owner]);
+    // And an upgrade of a buffer frozen to Floor, while the program runs (a
+    // fresh program: the one above is stopped, with a restore pending).
+    {
+        let mut live_env = Env::new();
+        let live = protect(&mut live_env, &honest_v1());
+        let fix = live_env.write_buffer(&honest_fix(), &live.owner);
+        live_env.set_buffer_authority(&fix, &live.owner, &live.f.authority);
+        let ix = live.f.propose(&live.owner.pubkey(), UPGRADE, &fix, &[], Some(&fix));
+        live_env.ok(&[ix], &[&live.owner]);
+    }
 }
 
 /// Issue #68: a spare buffer identical to the live code cannot be closed
