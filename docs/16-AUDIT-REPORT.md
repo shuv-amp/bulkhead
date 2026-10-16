@@ -81,18 +81,25 @@ Lending integrators wait for §4.1 to §4.3.
 
 ## 6. For the independent audit: on-chain changes since this engagement
 
-The engagement reviewed `9aae0c4`. Every on-chain change since then is new code no reviewer has seen, and belongs in the independent audit's scope. Each change has its own tests, and each test fails with its rule deleted (`09`).
+The engagement reviewed `9aae0c4`. Every on-chain change since then is new code no reviewer has seen, and belongs in the independent audit's scope. Each fix's tests and evidence are in its `09` §4 row. The last row is meant to change no rule; its evidence is in PRs #82 and #84.
 
 | Finding | Program | What changed | Where |
 |---|---|---|---|
-| 87–89 | Vault, Floor | The fixes from this engagement (§2), made after the reviewed commit | `09` §4 |
+| 87–89 | Vault, Floor, core | The fixes from this engagement (§2), made after the reviewed commit | `09` §4 |
 | 90 | Vault | A freeze caps what is backed at the owner's own balance: new loans wait behind it | `custody.rs` `release` |
-| 91 | Vault | A lifeboat exit records its proposer in the vault's reserved tail, and executes only while that key is still the admin (`ChangeStale`) | `lifeboat.rs` `propose_exit` / `execute_exit`, `state.rs` `Vault` |
+| 91 | Vault | A lifeboat exit records its proposer in the vault's reserved tail, and executes only while that key is still the admin (`ChangeStale`) | `lifeboat.rs` `propose_exit` / `execute_exit`, `state.rs` `Vault`, `genesis.rs` `create_vault` |
 | 92 | Vault | Abdications bind genesis: `upsert_asset` is refused once `UpsertAsset` is abdicated, and `create_vault` must keep a new vault's lane closed once `SetLimits` is | `genesis.rs` |
-| 93 | Floor | A release closes any further frozen buffer it is passed, rent to the owner | `lib.rs` `execute`, `RELEASE_AUTHORITY` |
-| 95 | Floor | A release to none needs the owner's signature | `lib.rs` `execute`, `RELEASE_AUTHORITY` |
+| 93 | Floor | A release closes any further frozen buffer it is passed, rent to the owner | `proposals.rs` `execute_release` |
+| 95 | Floor | A release to none needs the owner's signature | `proposals.rs` `execute_release` |
+| 96, 107 | Floor, Vault | A new guardian set needs a threshold of at least 2 and two keys beyond it, at most 8 keys: 96 refused n-of-n sets, 107 raised the margin from 1 to 2. Both programs check every new set, at registration and when a SetGuardians is proposed and again when it executes; a stored set is never checked again, and an ejection may still shrink a set below the margin. 107 is not on devnet yet | core `governance.rs` `guardian_set_ok`, `GuardianSet::parse`, through each program's `parse_guardian_set` (Floor `guardians.rs`, Vault `lib.rs`); called from Floor `register.rs`, `proposals.rs` and Vault `genesis.rs`, `governance.rs` |
+| 97 | Vault | The lifeboat refuses a mint that charges or can charge a transfer fee (`FeeBearingMint`); the return is unchanged | `token.rs` `may_charge_transfer_fee`, `transfer_fee_possible`; `lifeboat.rs` `move_in`; `error.rs` |
+| 98 | Vault | The caller PDA's signature is never a borrower's consent: a release to a recipient it owns is backed only up to the ledger's own balance of the mint | `custody.rs` `release` |
+| 99 | Floor | While the program is live, a release takes a frozen buffer byte-identical to the live code in place of the pinned snapshot | `proposals.rs` `execute_release` |
+| 101 | Vault | A backlog reset clamps at the latest time seen, `max(now, ref_updated_s)` | `brakes.rs` `reset_backlog` |
+| 103 | Floor, Vault | Both programs use one guardian-set module in the core (PR #83), and guardian liveness counts a gap that overflows as not alive | core `governance.rs` `GuardianSet`, `guardian_alive`, `alive_mask`, `guardian_index`, `signer_bits`; Floor `guardians.rs` `parse_guardian_set`, `guardian_signers`, `replace_recovery`, `register.rs`, `proposals.rs`, `state.rs`; Vault `state.rs`, `lib.rs`, `genesis.rs`, `governance.rs` |
+| — | Floor, Vault | PR #82 moved each program's entrypoint behind the `no-entrypoint` feature; PR #84 split Floor into modules and its `execute` into `execute_code`, `execute_release` and `execute_config`, which refuses a kind it does not handle (`WrongProposalKind`) | Floor `guardians.rs`, `loader.rs`, `proposals.rs`, `register.rs`, `stop.rs`; both `lib.rs` and `Cargo.toml` |
 
-Questions worth the auditors' time: whether any other state that a role holder sets up outlives that holder's replacement, as the exit did before 91; whether any other genesis path ignores an abdication, as `upsert_asset` and `create_vault` did before 92; and whether the accounts a release accepts after the fixed ones can do anything but close a buffer Floor holds.
+Questions worth the auditors' time: whether any other state that a role holder sets up outlives that holder's replacement, as the exit did before 91; whether any other genesis path ignores an abdication, as `upsert_asset` and `create_vault` did before 92; whether the accounts a release accepts after the fixed ones can do anything but close a buffer Floor holds or, since 99, stand in for the pin; whether any other signature the Vault sees can pass as a borrower's consent, as the caller PDA's did before 98; and whether any path but registration and SetGuardians can install or keep a guardian set that fails 107's check, as a stored set and an ejection can.
 
 ## 7. Sources
 
