@@ -3973,7 +3973,8 @@ fn a_backed_loan_needs_the_borrowers_signature() {
 }
 
 /// A quote is its release's dry run, for a loan too: the owner's signature
-/// (finding 74) and a freeze (finding 90) decide what is backed in both.
+/// (finding 74), not just the owner's key, and a freeze (finding 90) decide
+/// what is backed in both.
 #[test]
 fn a_quote_gives_the_releases_outcome_for_a_loan() {
     let mut w = World::new();
@@ -3998,6 +3999,18 @@ fn a_quote_gives_the_releases_outcome_for_a_loan() {
     let paid = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
     assert_eq!(quoted.backed, 0, "unsigned: not a loan");
     assert_eq!(quoted, paid, "unsigned");
+
+    // The holder's key listed but not signing: still not a loan. Only the
+    // signature is consent, not the key being there.
+    let listed = AccountMeta::new_readonly(holder.pubkey(), false);
+    let mut q = w.m.quote_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    q.accounts.push(listed.clone());
+    let quoted = outcome(&w.env.ok(&[q], &[]));
+    let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    ix.accounts.push(listed);
+    let paid = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(quoted.backed, 0, "listed, unsigned: not a loan");
+    assert_eq!(quoted, paid, "listed, unsigned");
 
     // Signed by the holder: a backed loan against the SOL.
     let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
