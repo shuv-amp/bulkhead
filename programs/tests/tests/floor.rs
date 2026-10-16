@@ -1713,7 +1713,8 @@ fn the_config_layout_matches_what_off_chain_readers_decode() {
 }
 
 /// A copy of `real`'s account at a fresh address, under `owner`, with `edit`
-/// applied to its data.
+/// applied to its data. Never executable: only a loader may own an executable
+/// account.
 fn copy_under(
     env: &mut Env,
     real: &solana_address::Address,
@@ -1722,6 +1723,7 @@ fn copy_under(
 ) -> solana_address::Address {
     let mut a = env.account(real);
     a.owner = owner;
+    a.executable = false;
     edit(&mut a.data);
     let at = solana_address::Address::new_unique();
     env.svm.set_account(at, a).unwrap();
@@ -1770,4 +1772,75 @@ fn floor_reads_only_a_config_it_wrote_and_a_buffer_the_loader_owns() {
     // loader could never install it, so a stop naming it could not restore.
     let fake_pin = copy_under(&mut env, &p.snapshot, thief.pubkey(), |_| {});
     assert_eq!(env.fails(&[f.pin_snapshot(&fake_pin)], &[]), err::NOT_LOADER_V3);
+}
+
+/// Registration takes the upgrade authority from the programdata the program
+/// itself names (register.rs:63). Without that, a thief naming their own
+/// programdata, of which they hold the key, would take the config address of
+/// another team's program, and that team could never register it. The program
+/// must also be the loader's (:57): a program account the thief wrote, at an
+/// address of their own, could name the thief's programdata, and Floor would
+/// hold a config for a program the loader never deployed. The team's own
+/// config address is not at risk from that. The programdata half of :57 is
+/// covered only jointly with :63: a program the loader owns names its own
+/// programdata, which the loader owns too. And the programdata must still
+/// have its header (:69): the loader's Close leaves a closed programdata
+/// loader-owned until its transaction ends.
+#[test]
+fn registration_reads_only_the_programs_own_programdata() {
+    let mut env = Env::new();
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, programdata) = env.deploy(&honest_v1(), &team, 2048);
+    let thief = Keypair::new();
+    env.fund(&thief);
+    let (_, thiefs_programdata) = env.deploy(&honest_v1(), &thief, 2048);
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let pay = env.payer.pubkey();
+
+    let f = Floor::new(env.floor, program);
+    let mut theirs = f.register(&pay, &thief.pubkey(), &thief.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    theirs.accounts[4].pubkey = thiefs_programdata;
+    assert_eq!(env.fails(&[theirs], &[&thief]), err::PROGRAM_MISMATCH);
+
+    // A copy of the team's program account, under an owner that is not the
+    // loader, naming the thief's real programdata.
+    let fake_program = copy_under(&mut env, &program, thief.pubkey(), |d| {
+        d[4..36].copy_from_slice(thiefs_programdata.as_ref())
+    });
+    let g = Floor::new(env.floor, fake_program);
+    let mut forged = g.register(&pay, &thief.pubkey(), &thief.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    forged.accounts[4].pubkey = thiefs_programdata;
+    assert_eq!(env.fails(&[forged], &[&thief]), err::NOT_LOADER_V3);
+
+    // The team closes its programdata and registers, in one transaction.
+    // Until the transaction ends the closed programdata is still the
+    // loader's and the program still names it, so :57 and :63 pass; it has
+    // no header left, and :69 refuses. Both forms of the close (SIMD-0432:
+    // the program account reclaimed or tombstoned). The failed transaction
+    // undoes the close.
+    for tombstone in [false, true] {
+        let close = solana_loader_v3_interface::instruction::close_any(
+            &programdata,
+            &pay,
+            Some(&team.pubkey()),
+            Some(&program),
+            tombstone,
+        );
+        let reg = f.register(&pay, &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+        let e = env.send(&[close, reg], &[&team]).map(|_| ()).unwrap_err();
+        assert_eq!(
+            e.err,
+            solana_transaction_error::TransactionError::InstructionError(
+                1,
+                solana_instruction_error::InstructionError::Custom(err::PROGRAM_MISMATCH)
+            ),
+            "tombstone {tombstone}:\n{}",
+            e.meta.logs.join("\n")
+        );
+    }
+
+    // The team registers its program.
+    env.ok(&[f.register(&pay, &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY)], &[&team]);
+    assert_eq!(env.upgrade_authority(&programdata), Some(f.authority.to_bytes()));
 }
