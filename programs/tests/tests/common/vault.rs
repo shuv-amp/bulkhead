@@ -31,6 +31,7 @@ pub mod verr {
     pub const NO_QUORUM: u32 = 8007;
     pub const INVALID_GUARDIANS: u32 = 8023;
     pub const WRONG_CALLER: u32 = 8009;
+    pub const WRONG_MINT: u32 = 8011;
     pub const EXTENSION_NOT_ALLOWED: u32 = 8013;
     pub const RECIPIENT_OWNER_MISMATCH: u32 = 8014;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;

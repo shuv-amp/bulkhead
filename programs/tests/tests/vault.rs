@@ -1352,6 +1352,26 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: re-owned vault account");
 }
 
+/// A payout goes only to an account of the vault's mint, for a release and
+/// its quote alike. The owner's USDC account is quoted first, as a control:
+/// the same call to the owner's SOL account is refused by the mint check
+/// alone. Without it the release fails later in the token program, with its
+/// own error, and the quote succeeds.
+#[test]
+fn a_release_and_its_quote_refuse_another_mints_account() {
+    let mut w = World::new();
+    let whale = w.user();
+    let usdc_acc = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let q = w.m.quote_ix(&w.env, &w.usdc, &usdc_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(outcome(&w.env.ok(&[q], &[])).backed, 1_000 * USDC, "control: the owner's USDC account");
+    let sol_acc = w.account("sol", &whale.pubkey());
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &sol_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::WRONG_MINT, "release");
+    let q = w.m.quote_ix(&w.env, &w.usdc, &sol_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::WRONG_MINT, "quote");
+}
+
 #[test]
 fn a_quote_cannot_promise_more_than_the_vault_holds() {
     let mut w = World::new();
