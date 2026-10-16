@@ -1920,10 +1920,15 @@ fn the_seal_checks_each_vault_once() {
     assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "adjacent");
     let ix = w.m.execute_seal_ix(&[&w.sol, &third, &fourth, &third]);
     assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "neither");
+    // Leaving the vault out would skip its check too.
+    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &fourth]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::VAULT_COUNT_MISMATCH, "left out");
     let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol, &third, &fourth]);
     assert_eq!(w.env.fails(std::slice::from_ref(&ix), &[]), verr::IMPORT_EXCEEDS_BALANCE, "the skipped vault");
     w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
     w.env.ok(&[ix], &[]);
+    // Once sealed, there is no second seal to propose.
+    assert_eq!(w.env.fails(&[w.m.propose_seal_ix()], &[&w.m.admin]), verr::ALREADY_SEALED);
 }
 
 #[test]

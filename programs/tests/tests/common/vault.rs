@@ -37,8 +37,10 @@ pub mod verr {
     pub const RECIPIENT_OWNER_MISMATCH: u32 = 8014;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;
     pub const NOT_SEALED: u32 = 8016;
+    pub const ALREADY_SEALED: u32 = 8017;
     pub const SEAL_NOT_EXECUTABLE: u32 = 8018;
     pub const IMPORT_EXCEEDS_BALANCE: u32 = 8019;
+    pub const VAULT_COUNT_MISMATCH: u32 = 8020;
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
     pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
     pub const INSUFFICIENT_BALANCE: u32 = 8049;
