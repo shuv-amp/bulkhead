@@ -1761,11 +1761,15 @@ fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
 }
 
 fn import_ix(w: &World, owner: &Address, amount: u64) -> Instruction {
+    import_into_ix(w, &w.usdc.vault, owner, amount)
+}
+
+fn import_into_ix(w: &World, vault: &Address, owner: &Address, amount: u64) -> Instruction {
     w.m.vault_ix(3, &amount.to_le_bytes(), vec![
         AccountMeta::new(w.env.payer.pubkey(), true),
         AccountMeta::new_readonly(w.m.admin.pubkey(), true),
         AccountMeta::new_readonly(w.m.protocol, false),
-        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(*vault, false),
         AccountMeta::new(w.m.backing(owner), false),
         AccountMeta::new_readonly(*owner, false),
         AccountMeta::new_readonly(SYSTEM, false),
@@ -1857,6 +1861,26 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
     w.env.ok(&[ix], &[&w.m.admin]);
     let d = w.env.account(&vault).data;
     assert_eq!(u16::from_le_bytes(d[8 + 32 * 4..8 + 32 * 4 + 2].try_into().unwrap()), 0, "still closed: the opening is only a proposal");
+}
+
+/// A backing ledger holds `MAX_SLOTS` (8) mints. An import into a ninth is
+/// refused: taken, it would count toward the vault's imported total, which
+/// the seal must cover, but stand in no ledger the owner could draw on.
+#[test]
+fn an_import_into_a_ninth_mint_is_refused() {
+    let mut w = World::new();
+    let mut vaults = vec![w.usdc.vault, w.sol.vault];
+    for i in 0..7u8 {
+        vaults.push(w.m.create_vault(&mut w.env, 6, Limits::default_limits(), [10 + i; 32], None).vault);
+    }
+    let owner = Keypair::new().pubkey();
+    for v in &vaults[..8] {
+        let ix = import_into_ix(&w, v, &owner, 1_000);
+        w.env.ok(&[ix], &[&w.m.admin]);
+    }
+    assert_eq!(ledger_of(&w.env, &w.m.backing(&owner)).len(), 8);
+    let ix = import_into_ix(&w, &vaults[8], &owner, 1_000);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NO_SLOT);
 }
 
 #[test]
