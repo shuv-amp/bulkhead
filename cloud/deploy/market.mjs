@@ -8,7 +8,7 @@
 //   node cloud/deploy/market.mjs seal  <rpc> <dir> <payer.json>
 //
 // <dir> receives world.json (the same fields cloud/e2e uses) and keys/*.json:
-// admin, guardian0..2, lifeboat destination, mint authority, whale, attacker,
+// admin, guardian0..3, lifeboat destination, mint authority, whale, attacker,
 // and the mint and token accounts. Setup resumes after a failure: run it again
 // with the same <dir>. Keys are saved before they are used, each step records
 // its signature in progress.json, and a step whose effect is already on chain
@@ -21,7 +21,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Rpc, key, findPda, concat, u64le, i64le, IDS, b58encode, decodeProtocol, decodeVault } from "../lib/solana.mjs";
+import { Rpc, key, findPda, concat, u64le, i64le, IDS, b58encode, decodeProtocol, decodeVault, GUARDIAN_MARGIN } from "../lib/solana.mjs";
+export { guardianMarginProblem } from "../lib/solana.mjs";
 import { Keypair, send } from "../lib/signer.mjs";
 
 const DAY = 86_400;
@@ -109,15 +110,36 @@ export function registerArgs(admin, guardians, destination) {
     key(admin),
     Uint8Array.of(guardians.length),
     ...guardians.map((g) => key(g)),
-    Uint8Array.of(2), // threshold
+    Uint8Array.of(THRESHOLD),
     i64le(7 * DAY), // heartbeat interval
     i64le(3 * DAY), // loosen delay: the 72h constant minimum
     key(destination),
   );
 }
 
+// Guardian keys are keys/guardian0.json, guardian1.json, ... with no gap. Every
+// new guardian set needs GUARDIAN_MARGIN keys beyond its quorum (finding 107),
+// but a market registered before that rule has three. With `create`, missing
+// keys are made up to MIN_GUARDIANS (setup before `register`, renew-guardians);
+// otherwise only the files there are count. A gap is an error, never filled.
+export const THRESHOLD = 2;
+export const MIN_GUARDIANS = THRESHOLD + GUARDIAN_MARGIN;
+export function guardianKeys(dir, create = false) {
+  const file = (i) => `${dir}/keys/guardian${i}.json`;
+  const there = [0, 1, 2, 3, 4, 5, 6, 7].filter((i) => existsSync(file(i)));
+  const gap = there.findIndex((i, at) => i !== at);
+  if (gap >= 0) throw new Error(`${file(there[gap])} exists but ${file(gap)} does not`);
+  const keys = there.map((i) => Keypair.load(file(i)));
+  while (create && keys.length < MIN_GUARDIANS) {
+    const kp = Keypair.generate();
+    kp.save(file(keys.length));
+    keys.push(kp);
+  }
+  return keys;
+}
+
 // --- commands ------------------------------------------------------------------
-function keysIn(dir) {
+function keysIn(dir, createGuardians = false) {
   mkdirSync(`${dir}/keys`, { recursive: true, mode: 0o700 });
   const k = (name) => {
     const p = `${dir}/keys/${name}.json`;
@@ -126,9 +148,12 @@ function keysIn(dir) {
     kp.save(p);
     return kp;
   };
+  let guardians;
   return {
     admin: k("admin"),
-    guardians: [k("guardian0"), k("guardian1"), k("guardian2")],
+    get guardians() { // read when used, so admin-only commands never need them
+      return (guardians ??= guardianKeys(dir, createGuardians));
+    },
     destination: k("lifeboat-destination"),
     mintAuthority: k("mint-authority"),
     whale: k("whale"),
@@ -151,7 +176,12 @@ const utc = (s) => new Date(s * 1000).toISOString().replace(".000Z", "Z");
 async function setup(url, dir, payerPath, vaultProgram, harbor) {
   const rpc = new Rpc(url);
   const payer = Keypair.load(payerPath);
-  const k = keysIn(dir);
+  // Guardian keys are made only for a protocol not registered yet, so resuming
+  // a market registered before finding 107 adds no key the chain lacks.
+  const [protocol] = await findPda(["protocol", key(harbor)], vaultProgram);
+  const registered = await rpc.account(protocol).catch(() => undefined);
+  if (registered === undefined) throw new Error("can't read the cluster to see whether the protocol is registered");
+  const k = keysIn(dir, !registered);
   const step = (msg) => console.log(`== ${msg}`);
   const progressPath = `${dir}/progress.json`;
   const progress = existsSync(progressPath) ? JSON.parse(readFileSync(progressPath, "utf8")) : {};
@@ -185,7 +215,6 @@ async function setup(url, dir, payerPath, vaultProgram, harbor) {
   const whaleTokens = k.whaleTokens.address;
   const attackerTokens = k.attackerTokens.address;
   const [caller] = await findPda(["bulkhead-caller"], harbor);
-  const [protocol] = await findPda(["protocol", key(harbor)], vaultProgram);
   const [vault] = await findPda(["vault", protocol, mint.publicKey], vaultProgram);
   const [vaultTokens] = await findPda(["vault-tokens", protocol, mint.publicKey], vaultProgram);
   const [backing] = await findPda(["backing", protocol, k.whale.publicKey], vaultProgram);
@@ -343,8 +372,12 @@ async function heartbeat(url, dir, payerPath) {
   const now = Math.floor(Date.now() / 1000);
   for (const [i, g] of k.guardians.entries()) {
     const at = p.guardians.indexOf(g.address);
-    const last = at < 0 ? null : Number(p.lastHeartbeat[at]);
-    if (last === null || now - last > p.heartbeatIntervalS) {
+    if (at < 0) {
+      console.log(`guardian${i}: not in the set (a renewal not executed yet?)`);
+      continue;
+    }
+    const last = Number(p.lastHeartbeat[at]);
+    if (now - last > p.heartbeatIntervalS) {
       console.log(`guardian${i}: not live (last heartbeat ${last ? new Date(last * 1000).toISOString() : "none"}); only a new guardian set revives it`);
       continue;
     }
@@ -353,14 +386,19 @@ async function heartbeat(url, dir, payerPath) {
   }
 }
 
-/** The admin proposes the same guardian set again: after the delay, every
- * guardian counts as live from that moment (the way a stale one comes back). */
+/** The admin proposes the guardian set again: after the delay, every guardian
+ * counts as live from that moment (the way a stale one comes back). A market
+ * with fewer than MIN_GUARDIANS key files gets new ones first, since the
+ * programs refuse a smaller set (finding 107). Like setup, it saves them
+ * before they are used, so a failed proposal leaves them for the next run. */
 async function renewGuardians(url, dir, payerPath) {
   const rpc = new Rpc(url);
   const payer = Keypair.load(payerPath);
-  const k = keysIn(dir);
+  const had = guardianKeys(dir).length;
+  const k = keysIn(dir, true);
+  for (let i = had; i < k.guardians.length; i++) console.log(`new guardian key keys/guardian${i}.json (${k.guardians[i].address}, unfunded): a set needs ${MIN_GUARDIANS} keys (finding 107)`);
   const world = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
-  const set = concat(Uint8Array.of(k.guardians.length), ...k.guardians.map((g) => key(g.publicKey)), Uint8Array.of(2), i64le(7 * DAY));
+  const set = concat(Uint8Array.of(k.guardians.length), ...k.guardians.map((g) => key(g.publicKey)), Uint8Array.of(THRESHOLD), i64le(7 * DAY));
   const c = await proposeAsAdmin(rpc, payer, k, world, 2, new Uint8Array(32), set);
   console.log(`guardian set proposed as change ${c.id} (${c.sig}); anyone may execute it from about ${c.executable}: market.mjs execute-change <rpc> <dir> <payer> ${c.id}`);
 }

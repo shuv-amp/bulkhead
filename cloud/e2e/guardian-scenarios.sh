@@ -41,7 +41,7 @@ for s in "${scenarios[@]}"; do
     sleep 0.5
   done
   [ "$healthy" = 1 ] || { tail -20 "$E/validator.log"; echo "the validator did not become healthy in 120 s"; exit 1; }
-  for k in admin guardian0 guardian1 guardian2; do
+  for k in admin guardian0 guardian1 guardian2 guardian3; do
     addr=$(solana-keygen pubkey "$E/keys/$k.json")
     curl -s "$RPC" -H 'content-type: application/json' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"$addr\",10000000000]}" >/dev/null
