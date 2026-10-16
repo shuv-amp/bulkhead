@@ -51,7 +51,7 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   // a restore approval; finding 76). It alerts as a warning.
   const urgent = level === "error" || ACTIONS.has(action) || line.notify === true || (level === "warn" && URGENT_WARNINGS.some((r) => r.test(message)));
   if (!urgent) return null;
-  const subject = [line.changeId, line.proposalId, line.program, line.mint, line.what].filter((x) => x != null).join("/");
+  const subject = [line.changeId, line.proposalId, line.program, line.mint, line.what, line.target].filter((x) => x != null).join("/");
   const kind = `${level}:${action ?? ""}:${subject}:${message.slice(0, 60)}`;
   const landedFreeze = action === "freeze" && line.signature;
   const window = action === "freeze" ? failedFreezeMs : windowMs;
