@@ -34,6 +34,7 @@ pub mod err {
     pub const INVALID_INSTRUCTION: u32 = 7000;
     pub const NOT_A_FLOOR_CONFIG: u32 = 7001;
     pub const NOT_LOADER_V3: u32 = 7005;
+    pub const PROGRAM_MISMATCH: u32 = 7006;
     pub const NOT_CURRENT_AUTHORITY: u32 = 7007;
     pub const INVALID_GUARDIANS: u32 = 7008;
     pub const INVALID_THRESHOLD: u32 = 7009;
