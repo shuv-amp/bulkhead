@@ -2452,6 +2452,35 @@ fn every_account_substitution_is_refused() {
         w.m.settle_ix(&w.usdc, &t2, &payee_acc, &w.env.payer.pubkey());
     s.run(&mut w.env, "settle ticket", ix, &[], &[]);
 
+    // --- views: attest, quote ------------------------------------------------
+    let ix = w.m.vault_ix(
+        22,
+        &[],
+        vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new_readonly(w.usdc.vault, false),
+            AccountMeta::new_readonly(w.usdc.vault_tokens, false),
+        ],
+    );
+    s.run(&mut w.env, "attest", ix, &[], &[]);
+    let mut quote = vec![AccountMeta::new_readonly(w.m.caller, false)];
+    quote.extend(w.m.release_accounts(&w.env, &w.usdc, &whale_acc, &whale.pubkey(), &w.usdc_prices(true)));
+    let ix = w.m.vault_ix(23, &(1_000 * USDC).to_le_bytes(), quote);
+    // A quote is the release's slots after the caller, minus Harbor's.
+    s.run(
+        &mut w.env,
+        "quote release",
+        ix,
+        &[],
+        &[
+            any(0, "caller: a quote is anyone's, so it does not check the caller"),
+            any(8, "payer: a quote returns before it would create a ticket"),
+            any(9, "ticket PDA: a quote returns before it would create a ticket"),
+            any(10, "system program: a quote returns before it would create a ticket"),
+            any(12, "price account: an owner taking back a deposit needs no price (G2)"),
+        ],
+    );
+
     // --- brakes -------------------------------------------------------------
     let ix = w.m.freeze_ix(&g0, Some(&w.usdc), 60);
     s.run(
@@ -2507,6 +2536,18 @@ fn every_account_substitution_is_refused() {
         &[],
         &[
             any(1, "the vault slot is unused for the protocol scope"),
+            role(2, guardians.clone(), "any quorum"),
+            role(3, guardians.clone(), "any quorum"),
+        ],
+    );
+    let ix = w.m.unfreeze_ix(Some(&w.usdc), &[g1, g2]);
+    s.run(
+        &mut w.env,
+        "unfreeze (vault)",
+        ix,
+        &[],
+        &[
+            role(1, protocol_vaults.clone(), "any vault of this protocol"),
             role(2, guardians.clone(), "any quorum"),
             role(3, guardians.clone(), "any quorum"),
         ],

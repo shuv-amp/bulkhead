@@ -181,7 +181,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **148/148**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,570 swaps refused, 16 Oct) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **148/148**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (6,991 swaps refused, 16 Oct) |
 | Bounded proofs (Kani) and exhaustive checks | **17/17 harnesses verified** on 14 Oct (14 for every value of their types), 227 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
 | Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
