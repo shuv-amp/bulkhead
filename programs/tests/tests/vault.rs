@@ -1360,9 +1360,7 @@ fn a_quote_cannot_promise_more_than_the_vault_holds() {
     assert_eq!(w.env.balance(&w.usdc.vault_tokens), 100_000 * USDC);
 
     let too_much = 1_000_000 * USDC;
-    let mut quote_accounts = vec![AccountMeta::new_readonly(w.m.caller, false)];
-    quote_accounts.extend(w.m.release_accounts(&w.env, &w.usdc, &to, &whale.pubkey(), &w.usdc_prices(true)));
-    let quote = w.m.vault_ix(23, &too_much.to_le_bytes(), quote_accounts);
+    let quote = w.m.quote_ix(&w.env, &w.usdc, &to, &whale.pubkey(), too_much, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[quote], &[]), verr::INSUFFICIENT_BALANCE);
     let pay = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &to, too_much, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&whale]), verr::INSUFFICIENT_BALANCE);
@@ -1551,15 +1549,7 @@ fn compute_units_are_within_the_spec_targets() {
     w.env.advance(eta - w.env.time);
     let ix = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
     let settle = w.env.ok(&[ix], &[]).compute_units_consumed;
-    let attest_ix = w.m.vault_ix(
-        22,
-        &[],
-        vec![
-            AccountMeta::new_readonly(w.m.protocol, false),
-            AccountMeta::new_readonly(w.usdc.vault, false),
-            AccountMeta::new_readonly(w.usdc.vault_tokens, false),
-        ],
-    );
+    let attest_ix = w.m.attest_ix(&w.usdc);
     let attest = w.env.ok(&[attest_ix], &[]).compute_units_consumed;
     println!("CU  deposit (new ledger) {first_deposit}  deposit {deposit}  release G2 {g2}  release priced {priced}  release to ticket {}  settle {settle}  attest {attest}", ticketed.compute_units_consumed);
     assert!(deposit <= 25_000 + 12_000, "deposit incl. Harbor CPI");
@@ -2453,33 +2443,17 @@ fn every_account_substitution_is_refused() {
     s.run(&mut w.env, "settle ticket", ix, &[], &[]);
 
     // --- views: attest, quote ------------------------------------------------
-    let ix = w.m.vault_ix(
-        22,
-        &[],
-        vec![
-            AccountMeta::new_readonly(w.m.protocol, false),
-            AccountMeta::new_readonly(w.usdc.vault, false),
-            AccountMeta::new_readonly(w.usdc.vault_tokens, false),
-        ],
-    );
-    s.run(&mut w.env, "attest", ix, &[], &[]);
-    let mut quote = vec![AccountMeta::new_readonly(w.m.caller, false)];
-    quote.extend(w.m.release_accounts(&w.env, &w.usdc, &whale_acc, &whale.pubkey(), &w.usdc_prices(true)));
-    let ix = w.m.vault_ix(23, &(1_000 * USDC).to_le_bytes(), quote);
-    // A quote is the release's slots after the caller, minus Harbor's.
-    s.run(
-        &mut w.env,
-        "quote release",
-        ix,
-        &[],
-        &[
-            any(0, "caller: a quote is anyone's, so it does not check the caller"),
-            any(8, "payer: a quote returns before it would create a ticket"),
-            any(9, "ticket PDA: a quote returns before it would create a ticket"),
-            any(10, "system program: a quote returns before it would create a ticket"),
-            any(12, "price account: an owner taking back a deposit needs no price (G2)"),
-        ],
-    );
+    s.run(&mut w.env, "attest", w.m.attest_ix(&w.usdc), &[], &[]);
+    let ix = w.m.quote_ix(&w.env, &w.usdc, &whale_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    // A quote has the release's Vault accounts, behind the caller alone
+    // instead of Harbor's H slots, and returns before any ticket.
+    let q = |at: usize| at - H + 1;
+    let mut free = vec![
+        any(0, "caller: checked only for a real release"),
+        any(q(H + 7), "payer: a quote never creates a ticket"),
+    ];
+    free.extend(unqueued.iter().map(|a| any(q(a.at), a.why)));
+    s.run(&mut w.env, "quote release", ix, &[], &free);
 
     // --- brakes -------------------------------------------------------------
     let ix = w.m.freeze_ix(&g0, Some(&w.usdc), 60);

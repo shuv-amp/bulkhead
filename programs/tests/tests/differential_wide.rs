@@ -302,9 +302,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 });
 
                 // quote_release: same answer, nothing written.
-                let mut q = vec![AccountMeta::new_readonly(m.caller, false)];
-                q.extend(m.release_accounts(&env, &usdc, &recipient, &owner, &prices));
-                let quote = env.send(&[m.vault_ix(23, &amount.to_le_bytes(), q)], &[]);
+                let quote = env.send(&[m.quote_ix(&env, &usdc, &recipient, &owner, amount, &prices)], &[]);
                 match (&quote, &expected) {
                     (Ok(meta), Ok(e)) => {
                         let o = outcome(meta);
