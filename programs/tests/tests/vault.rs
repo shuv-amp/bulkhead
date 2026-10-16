@@ -4402,10 +4402,36 @@ fn oracle_settings_of_a_priced_asset_are_bounded() {
         (asset_bytes(true, 8_500, 10_500, 20_000, 60, 100, [0; 32]), "no feed"),
     ] {
         let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &cfg);
-        assert!(w.env.send(&[ix], &[&w.m.admin]).is_err(), "{what} must be refused");
+        assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_ASSET, "{what} must be refused");
     }
     let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &asset_bytes(false, 8_500, 10_500, 20_000, 60, 100, [0; 32]));
     w.env.ok(&[ix], &[&w.m.admin]);
+}
+
+/// Limits and asset settings are bounded wherever they enter: when a vault
+/// is created, and in a proposed change. Execution parses the change again,
+/// but from the bytes its proposal checked, and the bounds read nothing
+/// else, so no transaction reaches that copy. The genesis upsert's bounds
+/// are refused, with the same code, in the test above.
+#[test]
+fn invalid_limits_and_assets_are_refused_wherever_they_enter() {
+    let mut w = World::new();
+    let mut over = Limits::default_limits();
+    over.short_bps = 10_001;
+    let ix = create_vault_ix(&mut w, &over);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_LIMITS, "a new vault");
+    w.seal();
+    let vault = w.usdc.vault;
+    let mut no_window = Limits::default_limits();
+    no_window.long_window_s = 0;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &no_window.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_LIMITS, "a limits change");
+    let (asset, mint, program) = (w.usdc.asset, w.usdc.mint, w.usdc.token_program);
+    let over_haircut = asset_bytes(true, 10_001, 10_100, 20_000, 60, 100, USDC_FEED);
+    let mut ix = w.m.propose_change_ix(&w.env, 1, &mint, &over_haircut, Some(&asset));
+    ix.accounts.push(AccountMeta::new_readonly(mint, false));
+    ix.accounts.push(AccountMeta::new_readonly(program, false));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_ASSET, "an asset change");
 }
 
 /// Finding 89: a payout to a token account the protocol PDA owns is refused,
