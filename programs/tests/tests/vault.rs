@@ -1327,6 +1327,9 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
     assert_eq!(w.env.balance(&stray), 0);
+    // A quote refuses what its release refuses, so it never promises a payout.
+    let q = w.m.quote_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote");
     // The vault token account is one of them: a payout to it would debit the
     // ledger while the tokens stay. Its address check (custody.rs) refuses it
     // first, and the owner check behind it would too, so this case cannot tell
@@ -1334,6 +1337,19 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     let own = w.usdc.vault_tokens;
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &own, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "the vault's own account");
+    let q = w.m.quote_ix(&w.env, &w.usdc, &own, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: the vault's own account");
+    // What pins the address check alone: the vault token account with another
+    // owner written into it. No instruction can do that (only the vault PDA
+    // could sign the change), so the test writes the account directly. The
+    // owner check then passes, and only the address check refuses.
+    let mut forged = w.env.svm.get_account(&own).unwrap();
+    forged.data[32..64].copy_from_slice(whale.pubkey().as_ref());
+    w.env.svm.set_account(own, forged).unwrap();
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &own, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "re-owned vault account");
+    let q = w.m.quote_ix(&w.env, &w.usdc, &own, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: re-owned vault account");
 }
 
 #[test]
@@ -4268,6 +4284,8 @@ fn a_release_cannot_pay_an_account_the_protocol_owns() {
     let stray = w.env.token_account(&mint, &protocol, &program);
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &protocol, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
+    let q = w.m.quote_ix(&w.env, &w.usdc, &stray, &protocol, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote");
 }
 
 /// Finding 91, stated: an exit records its proposer's key, not the admin
