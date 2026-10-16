@@ -25,6 +25,7 @@ pub mod verr {
     pub const WRONG_ACCOUNT_TYPE: u32 = 8001;
     pub const WRONG_ADDRESS: u32 = 8002;
     pub const INVALID_INSTRUCTION: u32 = 8000;
+    pub const ALREADY_INITIALIZED: u32 = 8003;
     pub const NOT_ADMIN: u32 = 8005;
     pub const MISSING_SIGNATURE: u32 = 8008;
     pub const NOT_GUARDIAN: u32 = 8006;
@@ -62,12 +63,15 @@ pub mod verr {
     pub const CHANGE_NOT_EXECUTABLE: u32 = 8033;
     pub const CHANGE_VETOED: u32 = 8034;
     pub const CHANGE_EXPIRED: u32 = 8035;
+    pub const CHANGE_EXECUTED: u32 = 8036;
     pub const ABDICATED: u32 = 8037;
     pub const NO_SLOT: u32 = 8040;
     pub const DUPLICATE_ACCOUNT: u32 = 8041;
     pub const CANNOT_EJECT: u32 = 8042;
     pub const GENESIS_ONLY: u32 = 8043;
     pub const DESTINATION_NOT_SETTLED: u32 = 8044;
+    pub const NOTHING_TO_EXIT: u32 = 8045;
+    pub const ZERO_AMOUNT: u32 = 8046;
 }
 
 pub fn so(name: &str) -> Vec<u8> {
