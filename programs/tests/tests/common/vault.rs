@@ -41,6 +41,8 @@ pub mod verr {
     pub const SEAL_NOT_EXECUTABLE: u32 = 8018;
     pub const IMPORT_EXCEEDS_BALANCE: u32 = 8019;
     pub const VAULT_COUNT_MISMATCH: u32 = 8020;
+    pub const INVALID_LIMITS: u32 = 8021;
+    pub const INVALID_ASSET: u32 = 8022;
     pub const DELAY_BELOW_MINIMUM: u32 = 8024;
     pub const DELAY_ABOVE_MAXIMUM: u32 = 8048;
     pub const INSUFFICIENT_BALANCE: u32 = 8049;
