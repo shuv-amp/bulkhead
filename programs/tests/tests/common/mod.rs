@@ -38,6 +38,7 @@ pub mod err {
     pub const NOT_CURRENT_AUTHORITY: u32 = 7007;
     pub const INVALID_GUARDIANS: u32 = 7008;
     pub const INVALID_THRESHOLD: u32 = 7009;
+    pub const INVALID_INTERVAL: u32 = 7010;
     pub const INVALID_DELAY: u32 = 7011;
     pub const MISSING_SIGNATURE: u32 = 7012;
     pub const NOT_OWNER: u32 = 7013;
@@ -58,6 +59,7 @@ pub mod err {
     pub const VETOED: u32 = 7029;
     pub const EXPIRED: u32 = 7030;
     pub const CANNOT_EJECT: u32 = 7031;
+    pub const WRONG_PROGRAM: u32 = 7033;
     pub const ABORT_DOES_NOT_FIT: u32 = 7035;
     pub const BUFFER_IN_USE: u32 = 7036;
     pub const WRONG_ACCOUNT: u32 = 7037;

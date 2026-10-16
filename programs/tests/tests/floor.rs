@@ -440,9 +440,24 @@ fn registration_rejects_weak_settings() {
             f.register(&pay, &team.pubkey(), &owner, &[a], 1, 7 * DAY, 3 * DAY),
             err::INVALID_GUARDIANS,
         ),
+        // Heartbeats every 1 to 30 days.
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, DAY - 1, 3 * DAY),
+            err::INVALID_INTERVAL,
+        ),
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, 30 * DAY + 1, 3 * DAY),
+            err::INVALID_INTERVAL,
+        ),
     ];
     for (ix, code) in cases {
         assert_eq!(env.fails(&[ix], &[&team]), code);
+    }
+    // Each heartbeat bound itself is accepted.
+    for interval in [DAY, 30 * DAY] {
+        let (program, _) = env.deploy(&honest_v1(), &team, 1024);
+        let ix = Floor::new(env.floor, program).register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, interval, 3 * DAY);
+        env.ok(&[ix], &[&team]);
     }
 }
 
@@ -1843,4 +1858,22 @@ fn registration_reads_only_the_programs_own_programdata() {
     // The team registers its program.
     env.ok(&[f.register(&pay, &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY)], &[&team]);
     assert_eq!(env.upgrade_authority(&programdata), Some(f.authority.to_bytes()));
+}
+
+/// A registration names the real system program, and is refused with Floor's
+/// own code if it does not. Without the check the CPI to the system program
+/// would still fail, with no code saying why.
+#[test]
+fn registration_names_the_system_program() {
+    let mut env = Env::new();
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 2048);
+    let f = Floor::new(env.floor, program);
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let reg = f.register(&env.payer.pubkey(), &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    let mut no_system = reg.clone();
+    no_system.accounts[6].pubkey = solana_address::Address::new_unique();
+    assert_eq!(env.fails(&[no_system], &[&team]), err::WRONG_PROGRAM);
+    env.ok(&[reg], &[&team]);
 }
