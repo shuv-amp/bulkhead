@@ -18,6 +18,7 @@
 mod common;
 
 use bulkhead_core::classify::{classify_limits, Class, LimitConfig};
+use bulkhead_core::consts::{MAX_TICKET_EXTENSION_S, MAX_TICKET_TOTAL_EXTENSION_S};
 use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{available_now, capacity_base, max_unbacked_over, params_from_config, request, rescale_windows, reset_backlog, Decision, LimiterState};
@@ -154,7 +155,7 @@ fn program_matches_the_core_model_with_caps_freezes_and_the_lifeboat() {
     // Coverage: every operation and outcome occurred, so a pass is not vacuous.
     for k in [
         "deposit", "release", "backed", "instant", "queued", "refused", "quote", "settle", "cancel",
-        "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_refused", "reset", "reset_refused",
+        "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_push", "extend_refused_call", "extend_refused_total", "reset", "reset_refused",
         "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "lifeboat_refused_window", "insufficient", "tighten", "loosen_waits",
         "loosen_executed", "loosen_stale", "loosen_early",
     ] {
@@ -389,28 +390,52 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 }
             }
             // A guardian extends a ticket: at most 24h a call and 7 days in total.
+            // One draw in three pushes the ticket by up to 24h a call to exactly
+            // 7 days, then asks for 1 s more: the total's edge, not only the
+            // per-call bound.
             24..=25 => {
                 if !md.tickets.is_empty() {
                     let k = rng.below(md.tickets.len() as u64) as usize;
-                    let (&id, _) = md.tickets.iter().nth(k).unwrap();
-                    let secs = rng.pick(&[0i64, 1, 3_600, 86_400, 86_401]);
-                    let tk = md.tickets.get_mut(&id).unwrap();
-                    let mut args = secs.to_le_bytes().to_vec();
-                    args.extend_from_slice(&id.to_le_bytes());
-                    let ix = m.vault_ix(11, &args, vec![
-                        AccountMeta::new_readonly(m.protocol, false),
-                        AccountMeta::new(tk.account, false),
-                        AccountMeta::new_readonly(m.g[2].pubkey(), true),
-                    ]);
-                    let r = env.send(&[ix], &[&m.g[2]]);
-                    let legal = secs > 0 && secs <= 86_400 && tk.extended + secs <= 604_800;
-                    assert_eq!(r.is_ok(), legal, "{}", at("extend"));
-                    if legal {
-                        tk.eta += secs;
-                        tk.extended += secs;
-                        count("extend");
-                    } else {
-                        count("extend_refused");
+                    let (&id, tk) = md.tickets.iter_mut().nth(k).unwrap();
+                    let push = rng.below(3) == 0;
+                    loop {
+                        let left = MAX_TICKET_TOTAL_EXTENSION_S - tk.extended;
+                        let secs = if push {
+                            left.clamp(1, MAX_TICKET_EXTENSION_S)
+                        } else if rng.below(2) == 0 {
+                            rng.pick(&[1, 3_600, MAX_TICKET_EXTENSION_S])
+                        } else {
+                            rng.pick(&[i64::MIN, -86_400, -1, 0, MAX_TICKET_EXTENSION_S + 1, i64::MAX])
+                        };
+                        let mut args = secs.to_le_bytes().to_vec();
+                        args.extend_from_slice(&id.to_le_bytes());
+                        let ix = m.vault_ix(11, &args, vec![
+                            AccountMeta::new_readonly(m.protocol, false),
+                            AccountMeta::new(tk.account, false),
+                            AccountMeta::new_readonly(m.g[2].pubkey(), true),
+                        ]);
+                        let r = env.send(&[ix], &[&m.g[2]]);
+                        let per_call = secs > 0 && secs <= MAX_TICKET_EXTENSION_S;
+                        let legal = per_call && tk.extended + secs <= MAX_TICKET_TOTAL_EXTENSION_S;
+                        match &r {
+                            Ok(_) => assert!(legal, "{}", at("extend")),
+                            Err(e) => {
+                                assert!(!legal, "{}: {:?}\n{}", at("extend"), e.err, e.meta.logs.join("\n"));
+                                assert_eq!(custom_code(e), Some(verr::EXTENSION_TOO_LONG), "{}", at("extend"));
+                            }
+                        }
+                        if legal {
+                            tk.eta += secs;
+                            tk.extended += secs;
+                            count(if push { "extend_push" } else { "extend" });
+                        } else if per_call {
+                            count("extend_refused_total");
+                        } else {
+                            count("extend_refused_call");
+                        }
+                        if !push || !legal {
+                            break;
+                        }
                     }
                 }
             }
