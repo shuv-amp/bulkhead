@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, guardianSetWarning, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -193,6 +193,20 @@ test("floor readiness: an unarmed stop button and an unpinned snapshot are repor
   assert.deepEqual(floorAlerts({ ...ready, abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["unarmed", "no_snapshot"]);
   // Stopped: arming is moot until it is restored; that is the one thing to say.
   assert.deepEqual(floorAlerts({ status: "aborted", abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["stopped"]);
+});
+
+test("a guardian set without two keys beyond its threshold is warned about, alerting on mainnet only (finding 107)", async () => {
+  const { alertFor } = await import("../guardian/alert.mjs");
+  const keys = (n) => Array.from({ length: n }, (_, i) => `g${i}`);
+  assert.equal(guardianSetWarning({ guardians: keys(4), threshold: 2 }, true), null);
+  assert.equal(guardianSetWarning({ guardians: keys(5), threshold: 3 }, true), null);
+  // 2-of-3, registered before the rule: one lost key and one rogue lock it.
+  const legacy = guardianSetWarning({ guardians: keys(3), threshold: 2 }, false);
+  assert.equal(legacy.level, "warn");
+  assert.match(legacy.msg, /^2-of-3 guardians: one lost key and one rogue guardian lock governance; run at least 2-of-4/);
+  assert.match(guardianSetWarning({ guardians: keys(4), threshold: 3 }, false).msg, /^3-of-4 guardians: .* at least 3-of-5/);
+  assert.equal(alertFor(legacy, new Map(), 0), null, "off mainnet it is a log line");
+  assert.notEqual(alertFor(guardianSetWarning({ guardians: keys(3), threshold: 2 }, true), new Map(), 0), null, "on mainnet it alerts");
 });
 
 test("floor readiness reads the real account layout", async () => {

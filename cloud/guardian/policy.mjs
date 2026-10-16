@@ -5,7 +5,7 @@
 // veto proposals, and (under Floor) abort. It can never move funds or choose a
 // recipient; the programs enforce that, not this file.
 
-import { b58encode, Reader, decodeChange, parseLogs } from "../lib/solana.mjs";
+import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, guardianMarginProblem } from "../lib/solana.mjs";
 
 const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -406,6 +406,19 @@ export function floorAlerts(fl) {
     alerts.push({ code: "no_snapshot", msg: "no snapshot pinned: after a stop, restoring needs a new frozen buffer and a quorum" });
   }
   return alerts;
+}
+
+/**
+ * The warning for a guardian set (a Vault protocol's or a Floor config's) with
+ * fewer than threshold + GUARDIAN_MARGIN members, or null. Such a set can lose
+ * governance for good: one lost key plus one rogue guardian leave no quorum
+ * that can replace either (docs/16 §4.4, AUD-2). Sets registered before
+ * finding 107 can be like that, and only the owner's new set fixes it; on
+ * mainnet it alerts.
+ */
+export function guardianSetWarning({ guardians, threshold }, mainnet) {
+  if (!guardianMarginProblem(guardians.length, threshold)) return null;
+  return { level: "warn", notify: mainnet, msg: `${threshold}-of-${guardians.length} guardians: one lost key and one rogue guardian lock governance; run at least ${threshold}-of-${threshold + GUARDIAN_MARGIN} with independent operators (docs/07 §6)` };
 }
 
 export function newState() {
