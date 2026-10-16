@@ -67,6 +67,22 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
 }
 
 /**
+ * The line the guardian logs for an action it sent or failed to send: `fields`
+ * plus what the action acts on (a change, a proposal and its program, a
+ * mint), which alertFor keys its repeats on. The line used to carry only the
+ * reason and the ticket, so two vetoes of different loosenings, exits or
+ * proposals were one kind, and the second was muted for the window. A
+ * cancel's mint is left out: the cancels of one sweep are one alert.
+ */
+export function actionLine(action, fields) {
+  const line = { action: action.type, ...fields };
+  for (const k of ["changeId", "proposalId", "program", "mint"]) {
+    if (action[k] != null && !(k === "mint" && action.type === "cancel")) line[k] = action[k];
+  }
+  return line;
+}
+
+/**
  * A loop step that keeps failing is a guardian that has gone quiet: one
  * transaction the RPC never returns (`requireTransaction`) used to hold
  * ingestion at that signature forever, logged only as a warning, which does

@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -122,4 +122,30 @@ test("the same warning about two heartbeat targets is two alerts", () => {
   assert.ok(alertFor(dead("vault"), seen, 0));
   assert.ok(alertFor(dead("floor P1"), seen, 60_000), "another target");
   assert.equal(alertFor(dead("floor P1"), seen, 120_000), null, "the same target again");
+});
+
+test("the line for a sent or failed action says what it acts on", () => {
+  // execute() used to log only the reason, the ticket and the signature, so
+  // two vetoes of different loosenings, exits or proposals had one kind and
+  // the second was muted for 10 minutes. Shapes as policy.mjs builds them.
+  const seen = new Map();
+  const sent = (a, at) => alertFor(actionLine(a, { reason: a.reason, ticketId: a.ticketId, signature: `s${at}` }), seen, at);
+  const failed = (a, at) => alertFor(actionLine(a, { level: "error", error: "blockhash not found", ticketId: a.ticketId }), seen, at);
+  const change = (id) => ({ type: "veto_change", changeId: id, reason: `loosening ${id} (kind 1) is not pre-approved` });
+  const exit = (mint) => ({ type: "veto_exit", mint, executableS: 9, reason: "lifeboat exit of 5 is not pre-approved" });
+  const proposal = (id) => ({ type: "floor_veto", program: "P1", proposalId: id, reason: `floor P1 proposal ${id} is still pending` });
+  const cancel = (id, mint) => ({ type: "cancel", ticketId: id, address: "A", mint, vault: "V", reason: "incident: ticket to O" });
+  for (const [one, two] of [[change(4), change(5)], [exit("M1"), exit("M2")], [proposal(1), proposal(2)]]) {
+    assert.ok(sent(one, 0));
+    assert.ok(sent(two, 1_000), `${two.type}: a second target alerts`);
+    assert.equal(sent(two, 2_000), null, `${two.type}: the same target again`);
+    assert.ok(failed(one, 0));
+    assert.ok(failed(two, 1_000), `${two.type}: a second failure alerts`);
+  }
+  // Proposal 1 on a second Floor program is another target too.
+  assert.ok(sent({ ...proposal(1), program: "P2" }, 3_000));
+  // The cancels of one sweep stay one alert, across mints too.
+  assert.ok(sent(cancel(1, "M1"), 0));
+  assert.equal(sent(cancel(2, "M2"), 1_000), null);
+  assert.deepEqual(actionLine(change(4), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 4 });
 });
