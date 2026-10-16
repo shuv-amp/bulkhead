@@ -78,10 +78,10 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault, GUARDIAN_MARGIN, guardianMarginProblem } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { assess, watchedEvents, floorAlerts, guardianSetWarning, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll } from "./alert.mjs";
@@ -1030,7 +1030,7 @@ async function syncFromChain(act, { startup = false } = {}) {
   if (!acc) return;
   const p = decodeProtocol(acc.bytes);
   const now = wallNow();
-  checkGuardianSet(p);
+  checkGuardianSet("protocol", p);
   observeFreezeEnd(state, lastChainFrozenUntil, p.frozenUntil);
   lastChainFrozenUntil = p.frozenUntil;
   state.frozenUntil = p.frozenUntil;
@@ -1067,19 +1067,17 @@ async function syncFromChain(act, { startup = false } = {}) {
 
 
 /**
- * A guardian set with fewer than threshold + GUARDIAN_MARGIN members can lose governance
- * for good: one lost key plus one rogue guardian leave no quorum that can
- * replace either (docs/16 §4.4, AUD-2). Said once per set shape; on mainnet
- * it alerts.
+ * Warn about a guardian set short of the margin (`guardianSetWarning`), once
+ * per set shape: `which` is "protocol" for the Vault's set, or the program a
+ * Floor config protects.
  */
-let guardianSetShape = "";
-function checkGuardianSet(p) {
-  const shape = `${p.threshold}/${p.guardians.length}`;
-  if (shape === guardianSetShape) return;
-  guardianSetShape = shape;
-  if (guardianMarginProblem(p.guardians.length, p.threshold)) {
-    log({ level: "warn", notify: cfg.cluster === "mainnet-beta", msg: `${p.threshold}-of-${p.guardians.length} guardians: one lost key and one rogue guardian lock governance; run at least ${p.threshold}-of-${p.threshold + GUARDIAN_MARGIN} with independent operators (docs/07 §6)` });
-  }
+const guardianSetShape = new Map();
+function checkGuardianSet(which, set) {
+  const shape = `${set.threshold}/${set.guardians.length}`;
+  if (guardianSetShape.get(which) === shape) return;
+  guardianSetShape.set(which, shape);
+  const warning = guardianSetWarning(set, cfg.cluster === "mainnet-beta");
+  if (warning) log(which === "protocol" ? warning : { ...warning, program: which });
 }
 
 /** Log each Floor program's missing pieces, once per change (A5). */
@@ -1087,7 +1085,9 @@ async function checkFloor() {
   for (const fc of floorWatch) {
     const program = b58encode(fc.protected);
     const acc = await rpc.account(fc.config);
-    const alerts = acc ? floorAlerts(decodeFloor(acc.bytes)) : [{ code: "missing", msg: "no Floor config for this program" }];
+    const fl = acc ? decodeFloor(acc.bytes) : null;
+    if (fl) checkGuardianSet(program, fl);
+    const alerts = fl ? floorAlerts(fl) : [{ code: "missing", msg: "no Floor config for this program" }];
     const codes = alerts.map((a) => a.code).join(",");
     if (floorReported.get(program) === codes) continue;
     floorReported.set(program, codes);
