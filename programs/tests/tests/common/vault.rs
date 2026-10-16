@@ -593,7 +593,8 @@ impl Market {
     }
 
     /// quote_release: the caller, then the release's accounts, all read-only
-    /// and none signing (no writes, no signer).
+    /// and none marked signing (no writes, no signer). The payer slot is the
+    /// fee payer, which the runtime still makes a writable signer.
     pub fn quote_ix(&self, env: &Env, v: &VaultRef, recipient: &Address, owner: &Address, amount: u64, prices: &[(Address, Address)]) -> Instruction {
         let mut a = vec![AccountMeta::new_readonly(self.caller, false)];
         a.extend(

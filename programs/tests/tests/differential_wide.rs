@@ -301,8 +301,11 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                     Some(Decision::Queued { eta_ms }) => (backed, 0, unbacked, (eta_ms + 999).div_euclid(1_000)),
                 });
 
-                // quote_release: same answer, nothing written.
-                let quote = env.send(&[m.quote_ix(&env, &usdc, &recipient, &owner, amount, &prices)], &[]);
+                // quote_release: same answer, nothing written, with the release's
+                // own account metas (the sweep and vault.rs send it read-only).
+                let mut q = vec![AccountMeta::new_readonly(m.caller, false)];
+                q.extend(m.release_accounts(&env, &usdc, &recipient, &owner, &prices));
+                let quote = env.send(&[m.vault_ix(23, &amount.to_le_bytes(), q)], &[]);
                 match (&quote, &expected) {
                     (Ok(meta), Ok(e)) => {
                         let o = outcome(meta);
