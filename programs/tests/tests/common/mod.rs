@@ -33,6 +33,7 @@ pub const T0: i64 = 1_790_000_000; // a fixed start time (Sep 2026)
 pub mod err {
     pub const INVALID_INSTRUCTION: u32 = 7000;
     pub const NOT_A_FLOOR_CONFIG: u32 = 7001;
+    pub const WRONG_AUTHORITY_ADDRESS: u32 = 7003;
     pub const NOT_LOADER_V3: u32 = 7005;
     pub const PROGRAM_MISMATCH: u32 = 7006;
     pub const NOT_CURRENT_AUTHORITY: u32 = 7007;
@@ -55,10 +56,12 @@ pub mod err {
     pub const NO_VALID_SNAPSHOT: u32 = 7024;
     pub const PROPOSAL_PENDING: u32 = 7025;
     pub const NO_PROPOSAL: u32 = 7026;
+    pub const WRONG_PROPOSAL_KIND: u32 = 7027;
     pub const NOT_EXECUTABLE: u32 = 7028;
     pub const VETOED: u32 = 7029;
     pub const EXPIRED: u32 = 7030;
     pub const CANNOT_EJECT: u32 = 7031;
+    pub const WRONG_SYSVAR: u32 = 7032;
     pub const WRONG_PROGRAM: u32 = 7033;
     pub const ABORT_DOES_NOT_FIT: u32 = 7035;
     pub const BUFFER_IN_USE: u32 = 7036;
