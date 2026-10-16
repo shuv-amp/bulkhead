@@ -104,7 +104,7 @@ When frozen: "Frozen: $0 can leave unbacked until {time}."
 | **Backed / unbacked** | Whether a payout is supported by the owner's ledger (G3) or must use the limiter (G1) |
 | **Burst, daily cap** | The two GCRA buckets: default 2%/1h and 5%/24h of the least of the reference, the live balance and the low-water balance, optionally capped in tokens |
 | **Reference balance** | A slow (24h) average of the vault balance: it rises and falls at most `dt/24h` of the way to the balance. Capacities come from the least of it, the live balance and the low-water balance |
-| **Low-water balance** | The least balance any touch saw before its operation in the current and the previous 30-minute window. Capital counts toward capacity only once it has stayed a full window, so a flash deposit can't lift it; a withdrawal that comes straight back lowers it for at most an hour (`03 §3`) |
+| **Low-water balance** | The least balance any touch saw before its operation in the current and the previous 30-minute window. Capital counts toward capacity only once it has stayed a full window, so a flash deposit can't lift it; a withdrawal that comes straight back, or a backed loan repaid in the same transaction, lowers it for at most an hour, though payouts requested in that hour stay charged at the lowered capacity (`03 §3`; `09`, finding 100) |
 | **Ticket** | A queued unbacked payout with an ETA; guardians may cancel or extend it |
 | **Freeze** | Guardian action: the unbacked lane queues everything and tickets cannot settle, ≤ 24h per call |
 | **Lifeboat** | Bulkhead-held holding account for emergency moves; exits wait 72h to a pre-committed destination |
