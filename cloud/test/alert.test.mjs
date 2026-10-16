@@ -149,3 +149,45 @@ test("the line for a sent or failed action says what it acts on", () => {
   assert.equal(sent(cancel(2, "M2"), 1_000), null);
   assert.deepEqual(actionLine(change(4), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 4 });
 });
+
+test("an alert names what it is about when its text does not", () => {
+  // The webhook shows the title and the detail only. "floor not ready" for
+  // one of two Floor programs, a lifeboat move or a veto used to arrive
+  // without the program, mint or change it was about. Line shapes as
+  // main.mjs logs them.
+  const P = "Prog1111111111111111111111111111111111111111";
+  const M = "Mint1111111111111111111111111111111111111111";
+  const detail = (line) => alertFor(line, new Map(), 0).detail;
+  assert.equal(detail({ level: "warn", msg: "floor not ready", program: P, alerts: [{ code: "unarmed" }] }), `floor not ready | program ${P}`);
+  assert.equal(detail({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short", mint: M, amount: 5 }), `the admin moved tokens into the lifeboat: depositors may be short | mint ${M}`);
+  const change = { type: "veto_change", changeId: 4, reason: "loosening 4 (kind 1) is not pre-approved" };
+  assert.equal(detail(actionLine(change, { reason: change.reason, signature: "S" })), "loosening 4 (kind 1) is not pre-approved | change 4 | tx S");
+  assert.equal(detail(actionLine(change, { level: "error", error: "blockhash not found" })), "blockhash not found | change 4");
+  const floor = { type: "floor_veto", program: P, proposalId: 7, reason: "upgrade to unapproved buffer B is still pending" };
+  assert.equal(detail(actionLine(floor, { reason: floor.reason, signature: "S" })), `upgrade to unapproved buffer B is still pending | proposal 7 | program ${P} | tx S`);
+  const exit = { type: "veto_exit", mint: M, reason: "lifeboat exit of 5 is not pre-approved" };
+  assert.equal(detail(actionLine(exit, { reason: exit.reason, signature: "S" })), `lifeboat exit of 5 is not pre-approved | mint ${M} | tx S`);
+  assert.equal(detail({ action: "execute", what: "change 5", signature: "S" }), "change 5 | tx S");
+  assert.equal(detail({ level: "error", msg: "this key is no longer a live guardian", target: "vault" }), "this key is no longer a live guardian | on vault");
+  // Named once: not again when the reason, the text or a part before it
+  // already says it, as a whole word, in any case; a key only exactly.
+  assert.equal(detail({ action: "floor_veto", reason: `floor ${P} proposal 7 is still pending`, program: P, proposalId: 7, signature: "S" }), `floor ${P} proposal 7 is still pending | tx S`);
+  assert.equal(detail({ level: "error", msg: "change 4 may be approved, but its account could not be read", changeId: 4 }), "change 4 may be approved, but its account could not be read");
+  assert.equal(detail({ level: "error", msg: "Change 4 failed", changeId: 4 }), "Change 4 failed");
+  assert.equal(detail({ level: "error", msg: "change 45 may be approved", changeId: 4 }), "change 45 may be approved | change 4");
+  assert.equal(detail({ level: "error", msg: "exchange 4 failed", changeId: 4 }), "exchange 4 failed | change 4");
+  assert.equal(detail({ level: "error", msg: "change 45 replaced change 4", changeId: 4 }), "change 45 replaced change 4");
+  assert.equal(detail({ level: "error", msg: `${P.toLowerCase()} failed`, program: P }), `${P.toLowerCase()} failed | program ${P}`);
+  assert.equal(detail({ level: "error", msg: `program ${P.toLowerCase()} failed`, program: P }), `program ${P.toLowerCase()} failed | program ${P}`);
+  assert.equal(detail({ action: "execute", reason: `floor ${P.toLowerCase()} proposal 7 is due`, what: `floor ${P} proposal 7`, signature: "S" }), `floor ${P.toLowerCase()} proposal 7 is due | floor ${P} proposal 7 | tx S`);
+  assert.equal(detail({ level: "warn", notify: true, msg: `the Floor guardians are 2-of-3 for ${P}: fix it`, program: P }), `the Floor guardians are 2-of-3 for ${P}: fix it`);
+  assert.equal(detail({ level: "error", msg: "this key is no longer a live guardian", program: P, target: `floor ${P}` }), `this key is no longer a live guardian | on floor ${P}`);
+  // The repeat key holds the labels: change 4 and proposal 4 are two alerts.
+  const seen = new Map();
+  assert.ok(alertFor({ level: "error", msg: "could not be read", changeId: 4 }, seen, 0));
+  assert.ok(alertFor({ level: "error", msg: "could not be read", proposalId: 4 }, seen, 1_000));
+  // An empty field names nothing, and is not searched for: indexOf("")
+  // matches at the end of the text forever.
+  assert.equal(detail({ level: "error", msg: "floor not ready", what: "", program: "" }), "floor not ready");
+  assert.equal(detail({ action: "execute", reason: "due", what: "", signature: "S" }), "due | tx S");
+});
