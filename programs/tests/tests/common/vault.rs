@@ -73,6 +73,17 @@ pub mod verr {
     pub const DESTINATION_NOT_SETTLED: u32 = 8044;
     pub const NOTHING_TO_EXIT: u32 = 8045;
     pub const ZERO_AMOUNT: u32 = 8046;
+
+    /// The code the program gives each limiter refusal (custody.rs `limiter_error`).
+    pub fn limiter(e: bulkhead_core::limiter::LimiterError) -> u32 {
+        use bulkhead_core::limiter::LimiterError;
+        match e {
+            LimiterError::LaneClosed => LANE_CLOSED,
+            LimiterError::QueueFull => QUEUE_FULL,
+            LimiterError::ZeroAmount => ZERO_AMOUNT,
+            LimiterError::TicketsPending => TICKETS_PENDING,
+        }
+    }
 }
 
 pub fn so(name: &str) -> Vec<u8> {
