@@ -448,6 +448,8 @@ export class FailoverRpc extends Rpc {
 /** Keys a new guardian set needs beyond its threshold: core governance.rs
  * GUARDIAN_MARGIN (finding 107). A stored set is not checked again. */
 export const GUARDIAN_MARGIN = 2;
+/** The most keys a guardian set can have: core governance.rs MAX_GUARDIANS. */
+export const MAX_GUARDIANS = 8;
 
 /** Why a guardian set breaks the margin rule (finding 107), or null. */
 export function guardianMarginProblem(count, threshold) {

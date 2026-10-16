@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, guardianSetWarning, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -195,18 +195,48 @@ test("floor readiness: an unarmed stop button and an unpinned snapshot are repor
   assert.deepEqual(floorAlerts({ status: "aborted", abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["stopped"]);
 });
 
-test("a guardian set without two keys beyond its threshold is warned about, alerting on mainnet only (finding 107)", async () => {
+test("a guardian set without two keys beyond its threshold is warned about once per shape, alerting on mainnet only (finding 107)", async () => {
   const { alertFor } = await import("../guardian/alert.mjs");
-  const keys = (n) => Array.from({ length: n }, (_, i) => `g${i}`);
-  assert.equal(guardianSetWarning({ guardians: keys(4), threshold: 2 }, true), null);
-  assert.equal(guardianSetWarning({ guardians: keys(5), threshold: 3 }, true), null);
+  const set = (threshold, n) => ({ threshold, guardians: Array.from({ length: n }, (_, i) => `g${i}`) });
+  // Real program ids are 43-44 characters, which is what the alert key has to survive.
+  const [P1, P2, P3] = [PROTOCOL_ID, owner, mint];
+  const shapes = new Map();
+  assert.equal(guardianSetCheck(shapes, "protocol", set(2, 4), false), null);
   // 2-of-3, registered before the rule: one lost key and one rogue lock it.
-  const legacy = guardianSetWarning({ guardians: keys(3), threshold: 2 }, false);
-  assert.equal(legacy.level, "warn");
-  assert.match(legacy.msg, /^2-of-3 guardians: one lost key and one rogue guardian lock governance; run at least 2-of-4/);
-  assert.match(guardianSetWarning({ guardians: keys(4), threshold: 3 }, false).msg, /^3-of-4 guardians: .* at least 3-of-5/);
-  assert.equal(alertFor(legacy, new Map(), 0), null, "off mainnet it is a log line");
-  assert.notEqual(alertFor(guardianSetWarning({ guardians: keys(3), threshold: 2 }, true), new Map(), 0), null, "on mainnet it alerts");
+  const vault = guardianSetCheck(shapes, "protocol", set(2, 3), false);
+  assert.equal(vault.level, "warn");
+  assert.equal(vault.program, undefined);
+  assert.equal(vault.msg, "the Vault protocol's guardians are 2-of-3: one lost key and one rogue guardian lock governance; run at least 2-of-4 with independent operators (docs/07 §6)");
+  assert.equal(guardianSetCheck(shapes, "protocol", set(2, 3), false), null, "said once per shape");
+  // Each set is remembered on its own: a Floor set of the same shape is news.
+  const floor = guardianSetCheck(shapes, P1, set(2, 3), false);
+  assert.equal(floor.program, P1);
+  assert.equal(floor.msg, `the Floor guardians are 2-of-3 for ${P1}: one lost key and one rogue guardian lock governance; run at least 2-of-4 with independent operators (docs/07 §6)`);
+  assert.match(guardianSetCheck(shapes, P2, set(3, 4), false).msg, /are 3-of-4 for \w+: .* at least 3-of-5/);
+  // n-of-n (finding 96's case): one rogue alone locks it. A lost key alone
+  // does not, as it cannot veto the owner's new set, but it leaves no quorum.
+  assert.match(guardianSetCheck(shapes, P1, set(2, 2), false).msg, /are 2-of-2 for \w+: one rogue guardian alone locks governance, and one lost key leaves no quorum until a new set executes; run at least 2-of-4 with/);
+  assert.equal(guardianSetCheck(shapes, P3, set(3, 5), true), null);
+  // 6-of-8 is the highest threshold a full set can keep the margin at.
+  assert.match(guardianSetCheck(shapes, P3, set(6, 7), false).msg, /are 6-of-7 for \w+: .*; run at least 6-of-8 with/);
+  assert.match(guardianSetCheck(shapes, P3, set(7, 8), false).msg, /are 7-of-8 for \w+: .*; lower the threshold to at most 6-of-8 with/);
+  // Following that advice changes only the threshold, and is news too.
+  assert.deepEqual(guardianSetCheck(shapes, P3, set(6, 8), false), { notify: false, program: P3, msg: `the Floor guardians are now 6-of-8 for ${P3}, with the margin` });
+  // The owner's new set: said once.
+  const fixed = guardianSetCheck(shapes, P1, set(2, 4), false);
+  assert.deepEqual(fixed, { notify: false, program: P1, msg: `the Floor guardians are now 2-of-4 for ${P1}, with the margin` });
+  assert.equal(guardianSetCheck(shapes, P1, set(3, 5), false), null, "no news after the fix");
+  assert.equal(alertFor(vault, new Map(), 0), null, "off mainnet it is a log line");
+  assert.equal(alertFor(fixed, new Map(), 0), null);
+  // On mainnet each step alerts, even within alertFor's repeat window, and
+  // the alert names the Floor program.
+  const main = new Map(), seen = new Map();
+  for (const [t, n] of [[2, 3], [2, 2], [2, 4]]) {
+    const alert = alertFor(guardianSetCheck(main, P1, set(t, n), true), seen, 1_000);
+    assert.notEqual(alert, null, `${t}-of-${n} alerts`);
+    assert.match(alert.detail, new RegExp(`${t}-of-${n} for ${P1}`));
+  }
+  assert.notEqual(alertFor(guardianSetCheck(main, "protocol", set(2, 3), true), seen, 1_000), null);
 });
 
 test("floor readiness reads the real account layout", async () => {
