@@ -1960,3 +1960,76 @@ fn a_proposal_has_a_known_kind_and_a_release_its_own_programdata() {
     env.ok(&[release], &[&new_key]);
     assert_eq!(env.upgrade_authority(&f.programdata), Some(new_key.pubkey().to_bytes()));
 }
+
+/// Refusals the substitution sweep or the random differential already see
+/// fail, here asserted by their own code: Floor's PDAs at registration, each
+/// instruction's own programdata, and what needs the program live or stopped.
+#[test]
+fn each_instruction_names_its_own_accounts_and_state() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let (f, gs) = (&p.f, p.guardians());
+    let owner = p.owner.pubkey();
+    let elsewhere = solana_address::Address::new_unique();
+
+    // Registration: Floor's config and authority PDAs (accounts 1 and 2).
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 2048);
+    let reg = Floor::new(env.floor, program).register(&env.payer.pubkey(), &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    for (at, code) in [(1, err::WRONG_CONFIG_ADDRESS), (2, err::WRONG_AUTHORITY_ADDRESS)] {
+        let mut ix = reg.clone();
+        ix.accounts[at].pubkey = elsewhere;
+        assert_eq!(env.fails(&[ix], &[&team]), code);
+    }
+
+    // Another program's programdata, each checked against what the named
+    // programdata would pass: a replacement abort buffer (account 2), a pin
+    // of the other program's code (1), and a close (5) of a copy of this
+    // program's live code, which a stop may name (finding 85).
+    let frozen = |env: &mut Env, elf: &[u8]| {
+        let b = env.write_buffer(elf, &p.owner);
+        env.set_buffer_authority(&b, &p.owner, &f.authority);
+        b
+    };
+    let (new_abort, copy_of_q, copy_of_live) = (frozen(&mut env, &ABORT_ELF), frozen(&mut env, &honest_fix()), frozen(&mut env, &honest_v1()));
+    let mut stage = f.stage_abort_by(&new_abort, &gs[0..2]);
+    stage.accounts[2].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[stage], &[&p.g[0], &p.g[1]]), err::PROGRAM_MISMATCH);
+    let mut pin = f.pin_snapshot(&copy_of_q);
+    pin.accounts[1].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[pin], &[]), err::PROGRAM_MISMATCH);
+    let mut close = f.close_buffer(&owner, &copy_of_live);
+    close.accounts[5].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[close], &[&p.owner]), err::PROGRAM_MISMATCH);
+    let c = read_config(&env, f);
+    assert_eq!((c.abort_buffer, c.snapshot_buffer), (p.abort_buffer.to_bytes(), p.snapshot.to_bytes()));
+    assert!(env.account(&copy_of_live).lamports > 0);
+
+    // Live: no restore proposal, and only a restore is approved: not a
+    // pending upgrade, even by its own id.
+    let fix = frozen(&mut env, &honest_fix());
+    assert_eq!(env.fails(&[f.propose(&owner, RESTORE, &fix, &[], Some(&fix))], &[&p.owner]), err::NOT_ABORTED);
+    env.ok(&[f.propose(&owner, UPGRADE, &fix, &[], Some(&fix))], &[&p.owner]);
+    let pid = read_config(&env, f).pending_id;
+    assert_eq!(env.fails(&[f.approve(pid, &gs[0..2])], &[&p.g[0], &p.g[1]]), err::WRONG_PROPOSAL_KIND);
+    assert_eq!(read_config(&env, f).pending_approvals, 0);
+    env.ok(&[f.cancel(&owner)], &[&p.owner]);
+
+    // Stopped: no upgrade proposal, no new pin, and no second stop, even
+    // through an abort buffer anyone may stage while stopped.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    assert_eq!(env.fails(&[f.propose(&owner, UPGRADE, &fix, &[], Some(&fix))], &[&p.owner]), err::NOT_LIVE);
+    // A copy of what now runs, the abort binary, would replace the pin.
+    let copy_of_abort = frozen(&mut env, &ABORT_ELF);
+    assert_eq!(env.fails(&[f.pin_snapshot(&copy_of_abort)], &[]), err::NOT_LIVE);
+    let abort2 = frozen(&mut env, &ABORT_ELF);
+    env.ok(&[f.stage_abort(&abort2)], &[]);
+    let aborted_at = read_config(&env, f).aborted_at;
+    env.advance(DAY);
+    assert_eq!(env.fails(&[f.abort(&gs[1], &abort2, Some(&p.snapshot))], &[&p.g[1]]), err::NOT_LIVE);
+    let c = read_config(&env, f);
+    assert_eq!((c.aborted_at, c.snapshot_buffer, c.snapshot_valid), (aborted_at, p.snapshot.to_bytes(), 1));
+}

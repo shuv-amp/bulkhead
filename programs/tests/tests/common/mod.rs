@@ -33,6 +33,7 @@ pub const T0: i64 = 1_790_000_000; // a fixed start time (Sep 2026)
 pub mod err {
     pub const INVALID_INSTRUCTION: u32 = 7000;
     pub const NOT_A_FLOOR_CONFIG: u32 = 7001;
+    pub const WRONG_CONFIG_ADDRESS: u32 = 7002;
     pub const WRONG_AUTHORITY_ADDRESS: u32 = 7003;
     pub const NOT_LOADER_V3: u32 = 7005;
     pub const PROGRAM_MISMATCH: u32 = 7006;
