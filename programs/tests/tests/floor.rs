@@ -1877,3 +1877,86 @@ fn registration_names_the_system_program() {
     assert_eq!(env.fails(&[no_system], &[&team]), err::WRONG_PROGRAM);
     env.ok(&[reg], &[&team]);
 }
+
+/// A stop names its own program, the real sysvars and its own Floor
+/// authority, and each is refused with Floor's code. Without these checks
+/// the loader would still refuse the upgrade, with no code saying which
+/// account was wrong.
+#[test]
+fn a_stop_names_its_own_program_sysvars_and_authority() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let (f, g0) = (&p.f, p.g[0].pubkey());
+    // Accounts: 2 programdata, 3 program, 6 rent, 7 clock, 8 authority.
+    let stop = || f.abort(&g0, &p.abort_buffer, Some(&p.snapshot));
+    // Each of the pair on its own (loader.rs:140 checks both).
+    for at in [2, 3] {
+        let mut other_program = stop();
+        other_program.accounts[at].pubkey = [q.f.programdata, q.f.program][at - 2];
+        assert_eq!(env.fails(&[other_program], &[&p.g[0]]), err::PROGRAM_MISMATCH);
+    }
+    let mut other_authority = stop();
+    other_authority.accounts[8].pubkey = q.f.authority;
+    assert_eq!(env.fails(&[other_authority], &[&p.g[0]]), err::WRONG_AUTHORITY_ADDRESS);
+    for (at, other) in [(6, CLOCK), (7, RENT)] {
+        let mut wrong_sysvar = stop();
+        wrong_sysvar.accounts[at].pubkey = other;
+        assert_eq!(env.fails(&[wrong_sysvar], &[&p.g[0]]), err::WRONG_SYSVAR);
+    }
+    env.ok(&[stop()], &[&p.g[0]]);
+    stopped_with_floor_code(&mut env, &f.program);
+    assert_eq!(env.call(&q.f.program).map(|_| ()), Ok(()), "the other program still runs");
+}
+
+/// A quorum restore needs a stop, and a stop needs a staged abort buffer,
+/// each refused with its own code. Without the first, a restore while live
+/// is still refused (no snapshot is valid while live). Without the second, a
+/// stop naming a used-up buffer is still refused (it is not the staged one),
+/// but one naming the all-zero address, which equals the empty slot, gets as
+/// far as the loader.
+#[test]
+fn a_restore_needs_a_stop_and_a_stop_needs_an_abort_buffer() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let restore = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[0..2]);
+    assert_eq!(env.fails(std::slice::from_ref(&restore), &[&p.g[0], &p.g[1]]), err::NOT_ABORTED);
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    env.ok(&[restore], &[&p.g[0], &p.g[1]]);
+    env.next_slot();
+    // The stop used the abort buffer up, and nobody has staged another.
+    assert_eq!(read_config(&env, f).abort_buffer, [0; 32]);
+    let empty_slot = solana_address::Address::default();
+    for buffer in [empty_slot, p.abort_buffer] {
+        assert_eq!(env.fails(&[f.abort(&gs[0], &buffer, None)], &[&p.g[0]]), err::NO_ABORT_BUFFER);
+    }
+}
+
+/// A proposal is of a kind Floor knows, and a release names its own
+/// programdata. Without the first check an unknown kind would hold the
+/// proposal slot until cancelled; without the second the loader would
+/// still refuse the release, with no code saying why.
+#[test]
+fn a_proposal_has_a_known_kind_and_a_release_its_own_programdata() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let f = &p.f;
+    let owner = p.owner.pubkey();
+    let zero = solana_address::Address::default();
+    assert_eq!(env.fails(&[f.propose(&owner, 99, &zero, &[], None)], &[&p.owner]), err::WRONG_PROPOSAL_KIND);
+    assert_eq!(read_config(&env, f).pending_kind, 0);
+
+    let new_key = Keypair::new();
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &new_key.pubkey(), &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    let release = f.execute_release(&owner, Some(&new_key.pubkey()), &[p.abort_buffer, p.snapshot]);
+    let mut other = release.clone();
+    other.accounts[1].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[other], &[&new_key]), err::PROGRAM_MISMATCH);
+    assert_eq!(env.upgrade_authority(&q.f.programdata), Some(q.f.authority.to_bytes()));
+    env.ok(&[release], &[&new_key]);
+    assert_eq!(env.upgrade_authority(&f.programdata), Some(new_key.pubkey().to_bytes()));
+}
