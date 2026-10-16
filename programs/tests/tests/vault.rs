@@ -451,6 +451,9 @@ fn a_ticket_settles_after_its_eta_to_its_stored_recipient_only() {
     let other = w.account("usdc", &Keypair::new().pubkey());
     let wrong = w.m.settle_ix(&w.usdc, &ticket, &other, &w.env.payer.pubkey());
     assert!(w.env.send(&[wrong], &[]).is_err());
+    // Nor can it be settled through another vault of the same protocol.
+    let via_sol = w.m.settle_ix(&w.sol, &ticket, &to, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(&[via_sol], &[]), verr::WRONG_VAULT);
     let ok = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
     w.env.ok(&[ok], &[]);
     assert_eq!(w.env.balance(&to), 300_000 * USDC);
@@ -3223,6 +3226,42 @@ fn a_cancel_or_extension_names_its_ticket() {
     let right =
         w.m.cancel_ix(&w.usdc, &ticket, id, &g0, &w.env.payer.pubkey());
     w.env.ok(&[right], &[&w.m.g[0]]);
+}
+
+/// A ticket stays in its own protocol. Any program can register a protocol
+/// and name its own guardians, so a guardian of another protocol extending
+/// this one's tickets could hold every queued payout back, up to the total
+/// extension limit.
+#[test]
+fn another_protocols_guardian_cannot_extend_a_ticket() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 2_000_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let mut args = 3_600i64.to_le_bytes().to_vec();
+    args.extend_from_slice(&ticket_id(&w.env, &ticket).to_le_bytes());
+    let extend = |m: &Market, guardian: &Address| {
+        m.vault_ix(11, &args, vec![
+            AccountMeta::new_readonly(m.protocol, false),
+            AccountMeta::new(ticket, false),
+            AccountMeta::new_readonly(*guardian, true),
+        ])
+    };
+    let eta = |w: &World| bulkhead_vault::Ticket::load(&w.env.account(&ticket).data).expect("a Vault ticket").eta_s;
+    let before = eta(&w);
+    let other = Market::new(&mut w.env);
+    let ix = extend(&other, &other.g[0].pubkey());
+    assert_eq!(w.env.fails(&[ix], &[&other.g[0]]), verr::WRONG_VAULT);
+    assert_eq!(eta(&w), before, "the refused extension moved nothing");
+    // The same instruction from this protocol's own guardian extends it.
+    let ix = extend(&w.m, &w.m.g[0].pubkey());
+    w.env.ok(&[ix], &[&w.m.g[0]]);
+    assert_eq!(eta(&w), before + 3_600);
 }
 
 /// Finding 64: every Vault event ends with the protocol it concerns, so a
