@@ -160,6 +160,21 @@ fn s4_bank_run_every_depositor_gets_their_own_deposit_back_instantly() {
     assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
 }
 
+/// A zero amount is refused up front. Nothing after the check refuses it: a
+/// zero release has no unbacked part, so it never reaches the limiter,
+/// which is called only when `unbacked > 0` (custody.rs:361).
+#[test]
+fn a_zero_deposit_or_release_is_refused() {
+    let mut w = World::new();
+    let u = w.user();
+    let acc = w.deposit("usdc", &u, 1_000 * USDC);
+    let ix = w.m.deposit_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 0);
+    assert_eq!(w.env.fails(&[ix], &[&u]), verr::ZERO_AMOUNT, "deposit");
+    w.seal();
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 0, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[ix], &[&u]), verr::ZERO_AMOUNT, "release");
+}
+
 // ---------------------------------------------------------------------------
 // S9: an honest borrower is 100% backed at conservative prices.
 // ---------------------------------------------------------------------------
@@ -1012,6 +1027,11 @@ fn an_unvetoed_loosening_executes_after_the_delay() {
     );
     w.env.ok(&[exec], &[]);
     assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 300_000 * USDC);
+    // An executed change can be neither vetoed nor withdrawn.
+    let veto = veto_change_ix(&w, 0, &w.m.g[1].pubkey());
+    assert_eq!(w.env.fails(&[veto], &[&w.m.g[1]]), verr::CHANGE_EXECUTED);
+    let cancel = cancel_change_ix(&w, 0, &w.m.admin.pubkey());
+    assert_eq!(w.env.fails(&[cancel], &[&w.m.admin]), verr::CHANGE_EXECUTED);
 }
 
 /// A1 on the real runtime: after a large backed withdrawal, the burst is sized
@@ -1746,6 +1766,10 @@ fn lengthening_a_window_is_a_tightening_that_grants_no_new_burst() {
 
 fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
     let (mint, _) = w.env.create_mint(6, &token_program());
+    create_vault_for_ix(w, limits, &mint, &token_program())
+}
+
+fn create_vault_for_ix(w: &World, limits: &Limits, mint: &Address, program: &Address) -> Instruction {
     let vault = pda(&[b"vault", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
     let vault_tokens = pda(&[b"vault-tokens", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
     w.m.vault_ix(1, &limits.bytes(), vec![
@@ -1754,8 +1778,8 @@ fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
         AccountMeta::new(w.m.protocol, false),
         AccountMeta::new(vault, false),
         AccountMeta::new(vault_tokens, false),
-        AccountMeta::new_readonly(mint, false),
-        AccountMeta::new_readonly(token_program(), false),
+        AccountMeta::new_readonly(*mint, false),
+        AccountMeta::new_readonly(*program, false),
         AccountMeta::new_readonly(SYSTEM, false),
     ])
 }
@@ -1839,6 +1863,9 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
     w.seal();
     let ix = create_vault_ix(&mut w, &Limits::default_limits());
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY);
+    // A vault that exists says so first, whatever the seal's state.
+    let again = create_vault_for_ix(&w, &Limits::default_limits(), &w.usdc.mint, &w.usdc.token_program);
+    assert_eq!(w.env.fails(&[again], &[&w.m.admin]), verr::ALREADY_INITIALIZED);
     // A floor alone opens a bucket: no bps but a floor is still an open lane.
     let mut floor_only = Limits::default_limits();
     floor_only.short_bps = 0;
@@ -2140,6 +2167,14 @@ fn queued_releases_built_from_the_same_state_do_not_collide() {
     // A payer reusing its own nonce is refused, and nothing else is.
     let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
     assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
+}
+
+fn veto_change_ix(w: &World, id: u64, guardian: &Address) -> Instruction {
+    w.m.vault_ix(19, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new_readonly(*guardian, true),
+    ])
 }
 
 fn cancel_change_ix(w: &World, id: u64, signer: &Address) -> Instruction {
@@ -3636,6 +3671,10 @@ fn the_lifeboat_stays_shut_until_the_seal() {
     w.env.ok(&[ix], &[&alice]);
     w.env.advance(3 * DAY + 1);
     w.env.ok(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]);
+    let owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &owner);
+    let exit = r2_execute_exit(&w, &owner, &dest);
+    assert_eq!(w.env.fails(&[exit], &[&w.m.destination]), verr::NOTHING_TO_EXIT, "no exit proposed");
     w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
 }
 
