@@ -3654,11 +3654,31 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
 
 /// A protocol registers once. Registration has no check of its own for an
 /// existing protocol account: the guard at the top of `create_pda` refuses it.
+/// That guard has two halves (data present, or not owned by the system
+/// program), and an existing protocol fails both. So each half is also tried
+/// alone, on an account planted at a fresh protocol address that fails just
+/// that half. No transaction is known to make one: data or a new owner at a
+/// PDA needs its signature, which only this program gives, and `create_pda`
+/// gives both in one instruction.
 #[test]
 fn a_protocol_registers_once() {
     let mut w = World::new();
     let ix = w.m.register_ix(&w.env, w.m.harbor, 3 * DAY);
     assert_eq!(w.env.fails(&[ix], &[]), verr::ALREADY_INITIALIZED);
+    let harbor_so = so("bulkhead_harbor");
+    for (data, owner, half) in [
+        (vec![0u8; 8], SYSTEM, "data, owned by the system program"),
+        (vec![], Address::new_unique(), "no data, owned by another program"),
+    ] {
+        let harbor = Address::new_unique();
+        w.env.svm.add_program(harbor, &harbor_so).unwrap();
+        let protocol = pda(&[b"protocol", harbor.as_ref()], &w.m.vault_program);
+        let lamports = w.env.svm.minimum_balance_for_rent_exemption(data.len());
+        let planted = solana_account::Account { lamports, data, owner, executable: false, rent_epoch: 0 };
+        w.env.svm.set_account(protocol, planted).unwrap();
+        let ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
+        assert_eq!(w.env.fails(&[ix], &[]), verr::ALREADY_INITIALIZED, "{half}");
+    }
 }
 
 /// A recovery key cut short at registration is an error, not "no recovery key".
