@@ -1375,6 +1375,26 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: re-owned vault account");
 }
 
+/// A payout goes only to an account a token program owns. Here the bytes of
+/// a real USDC account (right mint, the whale as owner) sit in an account the
+/// system program owns. Without the owner check the release still fails, in
+/// the runtime at the transfer, but the quote promises the payout.
+#[test]
+fn a_payout_goes_only_to_an_account_a_token_program_owns() {
+    let mut w = World::new();
+    let whale = w.user();
+    let real = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let mut fake = w.env.svm.get_account(&real).unwrap();
+    fake.owner = SYSTEM;
+    let fake_address = Address::new_unique();
+    w.env.svm.set_account(fake_address, fake).unwrap();
+    let q = w.m.quote_ix(&w.env, &w.usdc, &fake_address, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[q], &[]), verr::WRONG_TOKEN_PROGRAM, "quote");
+    let pay = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &fake_address, 1_000 * USDC, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[pay], &[&whale]), verr::WRONG_TOKEN_PROGRAM, "release");
+}
+
 /// A payout goes only to an account of the vault's mint, for a release and
 /// its quote alike. The owner's USDC account is quoted first, as a control:
 /// the same call to the owner's SOL account is refused by the mint check
@@ -3547,6 +3567,15 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     w.env.ok(&[ix], &[]);
 }
 
+/// A protocol registers once. Registration has no check of its own for an
+/// existing protocol account: the guard at the top of `create_pda` refuses it.
+#[test]
+fn a_protocol_registers_once() {
+    let mut w = World::new();
+    let ix = w.m.register_ix(&w.env, w.m.harbor, 3 * DAY);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::ALREADY_INITIALIZED);
+}
+
 /// A recovery key cut short at registration is an error, not "no recovery key".
 #[test]
 fn registration_refuses_a_cut_off_recovery_key() {
@@ -3676,6 +3705,35 @@ fn the_lifeboat_stays_shut_until_the_seal() {
     let exit = r2_execute_exit(&w, &owner, &dest);
     assert_eq!(w.env.fails(&[exit], &[&w.m.destination]), verr::NOTHING_TO_EXIT, "no exit proposed");
     w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
+}
+
+/// A lifeboat move names the vault's own mint and token program, in and out.
+#[test]
+fn a_lifeboat_move_names_the_vaults_own_mint() {
+    let mut w = World::new();
+    let alice = w.user();
+    w.deposit("usdc", &alice, 1_000_000 * USDC);
+    w.seal();
+    w.env.advance(3 * DAY + 1);
+    let mut wrong = r2_move_in(&w, 1_000 * USDC);
+    wrong.accounts[4].pubkey = w.sol.mint;
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.admin]), verr::WRONG_VAULT, "in: another mint");
+    let mut wrong = r2_move_in(&w, 1_000 * USDC);
+    wrong.accounts[5].pubkey = token_2022();
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.admin]), verr::WRONG_VAULT, "in: another token program");
+    w.env.ok(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &owner);
+    let mut wrong = r2_execute_exit(&w, &owner, &dest);
+    wrong.accounts[3].pubkey = w.sol.mint;
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.destination]), verr::WRONG_VAULT, "out: another mint");
+    let mut wrong = r2_execute_exit(&w, &owner, &dest);
+    wrong.accounts[5].pubkey = token_2022();
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.destination]), verr::WRONG_VAULT, "out: another token program");
+    w.env.ok(&[r2_execute_exit(&w, &owner, &dest)], &[&w.m.destination]);
+    assert_eq!(w.env.balance(&dest), 1_000 * USDC);
 }
 
 /// Issue #38: a lifeboat destination this program owns (here the SOL vault,

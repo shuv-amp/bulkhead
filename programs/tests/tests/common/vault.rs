@@ -34,6 +34,7 @@ pub mod verr {
     pub const WRONG_CALLER: u32 = 8009;
     pub const WRONG_VAULT: u32 = 8010;
     pub const WRONG_MINT: u32 = 8011;
+    pub const WRONG_TOKEN_PROGRAM: u32 = 8012;
     pub const EXTENSION_NOT_ALLOWED: u32 = 8013;
     pub const RECIPIENT_OWNER_MISMATCH: u32 = 8014;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;
