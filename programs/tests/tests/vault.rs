@@ -528,6 +528,79 @@ fn reset_backlog_is_refused_while_tickets_are_pending() {
     w.env.ok(&[reset], &[&w.m.admin]);
 }
 
+/// Finding 102: G1 counts payouts when they are requested, not when they land.
+/// A request is refused only past the 7-day horizon, so one request for
+/// `min_k C_k·(W_k+horizon)/W_k`, 40% of a 10M vault, is a single ticket due at
+/// exactly +7d and paid in one transfer. One unit more is refused.
+#[test]
+fn one_request_for_40_percent_is_paid_in_one_transfer_after_seven_days() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(2 * DAY);
+    let user = Keypair::new();
+    let to = w.account("usdc", &user.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), 4_000_000 * USDC + 1, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::QUEUE_FULL);
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    let t_req = w.env.time;
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), 4_000_000 * USDC, &w.usdc_prices(false));
+    let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!((o.instant, o.queued), (0, 4_000_000 * USDC));
+    assert_eq!(o.eta_s - t_req, 7 * DAY, "queued exactly at the horizon");
+    w.env.advance(7 * DAY - 1);
+    let ix = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(std::slice::from_ref(&ix), &[]), verr::TICKET_NOT_DUE);
+    w.env.advance(1);
+    w.env.ok(&[ix], &[]);
+    assert_eq!(w.env.balance(&to), 4_000_000 * USDC, "40% of the vault in one transfer");
+}
+
+/// Finding 102: tickets do not expire, and a queued ticket does not lower the
+/// capacity base (the tokens are still in the vault), so due tickets requested
+/// days apart add up with no cap but G1 from the first request to the
+/// settlement. Nineteen requests a day apart (625,000, then 500,000 a day,
+/// then 875,000, due a day later) are settled together 19 days after the
+/// first: the whole 10M vault, in one transaction that fits a legacy packet.
+#[test]
+fn tickets_requested_over_eighteen_days_land_in_one_transaction() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(2 * DAY);
+    let user = Keypair::new();
+    let to = w.account("usdc", &user.pubkey());
+    let payer = w.env.payer.pubkey();
+    let mut settles = Vec::new();
+    let mut total = 0;
+    for day in 0..19 {
+        let (ask, delay) = match day {
+            0 => (625_000 * USDC, 6 * 3_600),
+            18 => (875_000 * USDC, DAY),
+            _ => (500_000 * USDC, 6 * 3_600),
+        };
+        let (_, ticket) = w.m.next_ticket(&w.env);
+        let t_req = w.env.time;
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), ask, &w.usdc_prices(false));
+        let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+        assert_eq!((o.instant, o.queued, o.eta_s - t_req), (0, ask, delay), "day {day}");
+        settles.push(w.m.settle_ix(&w.usdc, &ticket, &to, &payer));
+        total += ask;
+        w.env.advance(if day == 18 { DAY - 1 } else { DAY });
+    }
+    // Not a second earlier: the last ticket is due exactly 19 days after the first request.
+    assert_eq!(w.env.fails(&settles[18..], &[]), verr::TICKET_NOT_DUE);
+    w.env.advance(1);
+    let size = legacy_tx_size(&solana_message::Message::new(&settles, Some(&payer)));
+    assert!(size <= PACKET, "{size} B");
+    w.env.ok(&settles, &[]);
+    assert_eq!(total, 10_000_000 * USDC);
+    assert_eq!(w.env.balance(&to), total, "the whole vault in one transaction");
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Freezes, guardians
 // ---------------------------------------------------------------------------

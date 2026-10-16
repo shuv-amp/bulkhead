@@ -827,6 +827,40 @@ fn one_request_can_queue_a_long_window_plus_the_delay() {
     );
 }
 
+/// Finding 102: the largest single lump. A request is refused only when its
+/// ETA is past the 7-day horizon, so one request for `min_k C_k·(W_k+horizon)/W_k`,
+/// 40% of a 10M vault at the defaults, is a single ticket due at exactly
+/// +7d; one unit more is `QueueFull`.
+#[test]
+fn one_request_can_queue_up_to_the_horizon() {
+    let cfg = LimitConfig {
+        short_bps: 200,
+        short_window_s: 3_600,
+        long_bps: 500,
+        long_window_s: 86_400,
+        min_queue_delay_s: 21_600,
+        short_floor: 0,
+        long_floor: 0,
+        short_cap: 0,
+        long_cap: 0,
+    };
+    let p = params_from_config(&cfg, 10_000_000);
+    let t = 1_800_000_000_000;
+    let mut s = LimiterState::default();
+    assert_eq!(
+        request(&mut s, &p, t, 4_000_000, 0),
+        Ok(Decision::Queued {
+            eta_ms: t + 604_800_000
+        })
+    );
+    let mut s = LimiterState::default();
+    assert_eq!(
+        request(&mut s, &p, t, 4_000_001, 0),
+        Err(LimiterError::QueueFull)
+    );
+    assert_eq!(s, LimiterState::default(), "a refusal changes nothing");
+}
+
 /// Finding 96: the guardian-set shape, at every boundary. At least two to undo
 /// a stop, fewer than all of them (so the others can eject a rogue), at most 8.
 #[test]
