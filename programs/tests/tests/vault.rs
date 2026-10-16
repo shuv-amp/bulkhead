@@ -3972,6 +3972,50 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     assert_eq!(o.backed, 10_000 * USDC, "signed: a backed loan against the SOL");
 }
 
+/// A quote is its release's dry run, for a loan too: the owner's signature
+/// (finding 74) and a freeze (finding 90) decide what is backed in both.
+#[test]
+fn a_quote_gives_the_releases_outcome_for_a_loan() {
+    let mut w = World::new();
+    let lender = w.user();
+    w.deposit("usdc", &lender, 1_000_000 * USDC);
+    let holder = w.user();
+    w.deposit("sol", &holder, 700 * SOL);
+    w.seal();
+    let both = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+    let holder_usdc = w.account("usdc", &holder.pubkey());
+    let ask = 10_000 * USDC;
+    let signed_quote = |w: &World| {
+        let mut q = w.m.quote_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+        q.accounts.push(AccountMeta::new_readonly(holder.pubkey(), true));
+        q
+    };
+
+    // Unsigned (the admin pays the holder): not a loan.
+    let q = w.m.quote_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    let quoted = outcome(&w.env.ok(&[q], &[]));
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(quoted.backed, 0, "unsigned: not a loan");
+    assert_eq!(quoted, paid, "unsigned");
+
+    // Signed by the holder: a backed loan against the SOL.
+    let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!(quoted.backed, ask, "signed: a loan");
+    assert_eq!(quoted, paid, "signed");
+
+    // Signed but frozen: no loan is backed, the ask waits behind the freeze.
+    let g0 = w.m.g[0].pubkey();
+    w.env.ok(&[w.m.freeze_ix(&g0, None, 86_400)], &[&w.m.g[0]]);
+    let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!((quoted.backed, quoted.queued), (0, ask), "frozen: queued");
+    assert_eq!(quoted, paid, "frozen");
+}
+
 /// Finding 98: the caller PDA signs every release, so its signature counted
 /// as consent when it owned the ledger itself (an integrator that deposits
 /// through its caller PDA, a pooled design). A compromised protocol program
