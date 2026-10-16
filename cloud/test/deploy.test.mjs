@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { key, b58encode } from "../lib/solana.mjs";
+import { key, b58encode, GUARDIAN_MARGIN, MAX_GUARDIANS } from "../lib/solana.mjs";
 import { stepDisposition, marketDirProblem, guardianKeys, guardianMarginProblem } from "../deploy/market.mjs";
 import { Keypair } from "../lib/signer.mjs";
 
@@ -92,6 +92,15 @@ test("the margin check names a set without two keys beyond its quorum", () => {
   assert.equal(guardianMarginProblem(8, 6), null);
   assert.match(guardianMarginProblem(3, 2), /2-of-3: a new set needs at least 4 keys/);
   assert.match(guardianMarginProblem(7, 6), /6-of-7: a new set needs at least 8 keys/);
+});
+
+test("the margin and the set size limit are the programs' own: core governance.rs", () => {
+  const core = readFileSync(new URL("../../crates/bulkhead-core/src/governance.rs", import.meta.url), "utf8");
+  for (const [name, type, js] of [["GUARDIAN_MARGIN", "u8", GUARDIAN_MARGIN], ["MAX_GUARDIANS", "usize", MAX_GUARDIANS]]) {
+    const found = [...core.matchAll(new RegExp(`^pub const ${name}: ${type} = (\\d+);$`, "gm"))];
+    assert.equal(found.length, 1, name);
+    assert.equal(js, Number(found[0][1]), name);
+  }
 });
 
 test("an unregistered market gets four guardian keys, made once", () => {
