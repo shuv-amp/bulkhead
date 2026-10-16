@@ -112,3 +112,14 @@ test("a step that keeps failing raises an urgent alert after the threshold, rate
 test("a removed recovery key alerts like a replaced one", () => {
   assert.ok(alertFor({ level: "warn", msg: "the recovery key was removed by the admin with a guardian quorum: there is no recovery key now" }, new Map(), 0));
 });
+
+test("the same warning about two heartbeat targets is two alerts", () => {
+  // beatOne names where the key is dead only in `target`: the Vault's line and
+  // a Floor program's line minutes later used to share one repeat slot, so the
+  // second never reached anyone.
+  const seen = new Map();
+  const dead = (target) => ({ level: "error", msg: "this key is no longer a live guardian; a heartbeat cannot revive it", target });
+  assert.ok(alertFor(dead("vault"), seen, 0));
+  assert.ok(alertFor(dead("floor P1"), seen, 60_000), "another target");
+  assert.equal(alertFor(dead("floor P1"), seen, 120_000), null, "the same target again");
+});
