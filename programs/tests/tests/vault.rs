@@ -3348,6 +3348,91 @@ fn another_protocols_guardian_cannot_extend_a_ticket() {
     assert_eq!(eta(&w), before + 3_600);
 }
 
+/// An extension moves a ticket's ETA later by more than 0 and at most 24h a
+/// call, and by at most 7 days in total, however it is split (docs/05 row
+/// 11). A live guardian, or a stolen guardian key, could otherwise pull a
+/// queued payout's ETA into the past and skip the queue, or hold it back for
+/// ever, 24h at a time.
+#[test]
+fn a_ticket_is_extended_later_by_at_most_a_day_a_call_and_seven_in_total() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 2_000_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let id = ticket_id(&w.env, &ticket);
+    let g0 = w.m.g[0].pubkey();
+    let extend = |w: &World, secs: i64| {
+        let mut args = secs.to_le_bytes().to_vec();
+        args.extend_from_slice(&id.to_le_bytes());
+        w.m.vault_ix(11, &args, vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(ticket, false),
+            AccountMeta::new_readonly(g0, true),
+        ])
+    };
+    let eta = |w: &World| bulkhead_vault::Ticket::load(&w.env.account(&ticket).data).expect("a Vault ticket").eta_s;
+    let before = eta(&w);
+    for (secs, why) in [(-3_600, "earlier"), (0, "zero"), (DAY + 1, "more than 24h")] {
+        let ix = extend(&w, secs);
+        assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::EXTENSION_TOO_LONG, "{why}");
+        assert_eq!(eta(&w), before, "{why}: the refused extension moved nothing");
+    }
+    // Six full days, then 23h: one hour of the total is left.
+    for _ in 0..6 {
+        let ix = extend(&w, DAY);
+        w.env.ok(&[ix], &[&w.m.g[0]]);
+    }
+    let ix = extend(&w, DAY - 3_600);
+    w.env.ok(&[ix], &[&w.m.g[0]]);
+    // Two hours, within the 24h a call may add, is past the total.
+    let ix = extend(&w, 7_200);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::EXTENSION_TOO_LONG);
+    assert_eq!(eta(&w), before + 7 * DAY - 3_600, "the refused extension moved nothing");
+    // The hour left is still granted, and then nothing more.
+    let ix = extend(&w, 3_600);
+    w.env.ok(&[ix], &[&w.m.g[0]]);
+    assert_eq!(eta(&w), before + 7 * DAY);
+    let ix = extend(&w, 1);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::EXTENSION_TOO_LONG);
+    assert_eq!(eta(&w), before + 7 * DAY, "the refused extension moved nothing");
+}
+
+/// A vault whose unbacked lane is closed (either bucket at capacity 0)
+/// refuses an unbacked payout with its own code, not as a full queue. The
+/// same payout from a vault with both buckets open is taken: the control.
+#[test]
+fn a_closed_lane_refuses_an_unbacked_payout() {
+    for closed in [None, Some("short"), Some("long")] {
+        let mut w = World::new();
+        let whale = w.user();
+        w.deposit("usdc", &whale, 10_000_000 * USDC);
+        let mut limits = Limits::default_limits();
+        match closed {
+            Some("short") => limits.short_bps = 0,
+            Some(_) => limits.long_bps = 0,
+            None => {}
+        }
+        let vault = w.usdc.vault;
+        let ix = w.m.propose_change_ix(&w.env, 0, &vault, &limits.bytes(), Some(&vault));
+        w.env.ok(&[ix], &[&w.m.admin]);
+        w.seal();
+        let payee = w.user();
+        let to = w.account("usdc", &payee.pubkey());
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), USDC, &w.usdc_prices(true));
+        match closed {
+            Some(bucket) => assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::LANE_CLOSED, "{bucket} bucket closed"),
+            None => {
+                w.env.ok(&[ix], &[&w.m.admin]);
+            }
+        }
+    }
+}
+
 /// Finding 64: every Vault event ends with the protocol it concerns, so a
 /// reader can tell one protocol's events from another's in one transaction.
 #[test]
