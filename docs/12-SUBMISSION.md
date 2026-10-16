@@ -13,7 +13,7 @@ Bulkhead was submitted to the Colosseum Crypto World's Fair (Solana track) on 12
 | Claim | Check |
 |---|---|
 | The live devnet market: sealed, guardians live, 9,900,000 USDC left after S1, nothing pending | `node cloud/status/snapshot.mjs …` (README, "Verify it yourself"), about 2 s, nothing to build |
-| The three devnet programs run this repository's code | `scripts/verify-devnet.sh`; hashes and the upgrade authority in `SECURITY.md`; repeated weekly in CI |
+| The three devnet programs run the code of PR #85 (this tree's Floor and Vault add finding 107, not deployed yet) | `scripts/verify-devnet.sh` at PR #85's commit (`3eec968`); hashes and the upgrade authority in `SECURITY.md`; repeated weekly in CI on `main`'s build, which differs until 107 is deployed |
 | S1 on devnet: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the rest | Signatures in `08` ("Devnet signatures") |
 | Floor S10 on devnet: one guardian stops, two restore byte-identical | Signatures in `08`; `scripts/floor-devnet.sh` |
 | Floor on a real 1 MB mainnet program's bytes | `scripts/floor-demo.sh <program-id>` (`06 §7`) |
