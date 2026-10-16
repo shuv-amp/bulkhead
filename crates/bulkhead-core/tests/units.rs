@@ -1,7 +1,8 @@
-//! Targeted unit tests. Each exists because mutation testing (cargo-mutants)
-//! showed a mutant that the property tests did not catch. Properties check
-//! soundness ("never too permissive"); these pin completeness and exact
-//! behavior ("permissive exactly where the spec says").
+//! Targeted unit tests. Most exist because mutation testing (cargo-mutants)
+//! showed a mutant that the property tests did not catch; the others pin a
+//! finding's or review item's exact figure or boundary (`docs/09` §2 lists
+//! which). Properties check soundness ("never too permissive"); these pin
+//! completeness and exact behavior ("permissive exactly where the spec says").
 
 use bulkhead_core::classify::{classify_asset, classify_limits, AssetConfig, Class, LimitConfig};
 use bulkhead_core::floor::{deployable_after_simd0500, elf_info};
