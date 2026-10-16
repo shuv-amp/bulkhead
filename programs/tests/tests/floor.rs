@@ -1711,3 +1711,63 @@ fn the_config_layout_matches_what_off_chain_readers_decode() {
         assert_eq!((k(852), d[884]), (c.recovery, c.pending_by_recovery));
     }
 }
+
+/// A copy of `real`'s account at a fresh address, under `owner`, with `edit`
+/// applied to its data.
+fn copy_under(
+    env: &mut Env,
+    real: &solana_address::Address,
+    owner: solana_address::Address,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> solana_address::Address {
+    let mut a = env.account(real);
+    a.owner = owner;
+    edit(&mut a.data);
+    let at = solana_address::Address::new_unique();
+    env.svm.set_account(at, a).unwrap();
+    at
+}
+
+/// Floor trusts a config only if Floor owns it and wrote it, and a buffer
+/// only if the loader owns it. A copy of either under another owner is
+/// refused, whatever its bytes say. `close_buffer` never writes the config
+/// it reads, so without the owner check a copy naming a stranger as the
+/// owner, with no abort buffer staged, would let that stranger close the real
+/// abort buffer, which is frozen to the real Floor authority, and take its
+/// rent. The real config would still name the closed buffer, so every stop
+/// would fail until a live quorum staged another. And anyone can create an
+/// account Floor owns (the system program assigns it without Floor), so a
+/// config Floor owns must also carry Floor's discriminator.
+#[test]
+fn floor_reads_only_a_config_it_wrote_and_a_buffer_the_loader_owns() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let thief = Keypair::new();
+    env.fund(&thief);
+    let forged = copy_under(&mut env, &f.config, solana_address::Address::new_unique(), |d| {
+        let mut c = bulkhead_floor::Config::load(d).unwrap();
+        c.owner = thief.pubkey().to_bytes();
+        c.abort_buffer = [0; 32];
+        c.store(d).unwrap();
+    });
+    let mut close = f.close_buffer(&thief.pubkey(), &p.abort_buffer);
+    close.accounts[0].pubkey = forged;
+    assert_eq!(env.fails(&[close], &[&thief]), err::NOT_A_FLOOR_CONFIG);
+
+    // A zero-filled account of a config's length, created for Floor by a
+    // stranger's own CreateAccount.
+    let blank = Keypair::new();
+    let len = env.account(&f.config).data.len();
+    let rent = env.svm.minimum_balance_for_rent_exemption(len);
+    let create = solana_system_interface::instruction::create_account(&thief.pubkey(), &blank.pubkey(), rent, len as u64, &env.floor);
+    env.ok(&[create], &[&thief, &blank]);
+    let mut beat = f.heartbeat(&p.g[0].pubkey());
+    beat.accounts[0].pubkey = blank.pubkey();
+    assert_eq!(env.fails(&[beat], &[&p.g[0]]), err::NOT_A_FLOOR_CONFIG);
+
+    // A byte-identical copy of the pinned snapshot, under its writer: the
+    // loader could never install it, so a stop naming it could not restore.
+    let fake_pin = copy_under(&mut env, &p.snapshot, thief.pubkey(), |_| {});
+    assert_eq!(env.fails(&[f.pin_snapshot(&fake_pin)], &[]), err::NOT_LOADER_V3);
+}
