@@ -549,6 +549,9 @@ fn one_request_for_40_percent_is_paid_in_one_transfer_after_seven_days() {
     let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
     assert_eq!((o.instant, o.queued), (0, 4_000_000 * USDC));
     assert_eq!(o.eta_s - t_req, 7 * DAY, "queued exactly at the horizon");
+    // attest's worst case bounds payouts not yet requested; the ticket is in `queued`.
+    let a = w.m.attest(&mut w.env, &w.usdc);
+    assert_eq!((a.worst_1h, a.worst_24h, a.queued), (400_000 * USDC, 1_000_000 * USDC, 4_000_000 * USDC));
     w.env.advance(7 * DAY - 1);
     let ix = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
     assert_eq!(w.env.fails(std::slice::from_ref(&ix), &[]), verr::TICKET_NOT_DUE);

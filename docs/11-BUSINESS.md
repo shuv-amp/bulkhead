@@ -61,7 +61,7 @@ The model is SaaS margins. The cost is guardian operations (people and infrastru
 2. **Replay Friday.** Every notable exploit replayed against Bulkhead within 48 hours, with signatures (content that builds trust and inbound).
 3. **Launch-secure program.** New protocols integrate Vault before launch, when migration cost is zero.
 4. **Security-firm channel.** Firms run guardians for their audit clients (revenue share).
-5. **Curator pull.** One sentence for a risk committee: "Worst case is $X now, then $Y per hour until frozen, at most $Z per day, enforced on-chain."
+5. **Curator pull.** One sentence for a risk committee: "Worst case is $X now, then $Y per hour until frozen, at most $Z per day, enforced on-chain, on top of $Q already in the public queue."
 6. **STRIDE alignment.** STRIDE (Asymmetric Research with the Solana Foundation) scores 40 controls in 8 pillars. Bulkhead gives on-chain evidence for 7 of them:
    - **G2** Upgrade authority and **G3** Timelock & delay mechanisms ("enforced on-chain timelocks with duration proportional to impact"): Floor, plus the 72h loosen floor.
    - **G5** Risk parameter controls: tighten instantly, loosen after a delay.

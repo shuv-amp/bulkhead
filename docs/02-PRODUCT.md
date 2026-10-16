@@ -77,6 +77,7 @@ For each vault, computed from on-chain state (`03 §7`):
 - `available_now`, from both buckets, capped at the vault's token balance.
 - `worst_1h` = `min_k C_k·(W_k + 1 hour)/W_k`.
 - `worst_24h` = `min_k C_k·(W_k + 24 hours)/W_k`.
+- `queued`, the pending tickets: not in `worst_*`, and they can come due together (`09`, finding 102).
 
 Summed across vaults at display prices. Display prices are **never** used on-chain.
 When frozen: "Frozen: $0 can leave unbacked until {time}."

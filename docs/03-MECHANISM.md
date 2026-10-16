@@ -332,7 +332,7 @@ worst_24h   = worst_T at T = 86 400 000 ms
 
 `available_now` is exact for the limiter: that amount would be instant and one unit more would not. The property `available_now_is_exact` checks it. The on-chain `attest` field is that amount capped at the vault token balance (or zero while frozen), because a transfer cannot pay more than the account holds.
 
-`worst_T` is the G1 bound from §2.4, starting from a full bucket, and it is the minimum of both buckets. For the 10M USDC vault, `worst_1h` is 400,000 and `worst_24h` is 1,000,000 (golden G-6). The on-chain fields are this bound. They are a property of the capacities, so a configured floor can make them larger than the tokens currently in the vault; `balance` is reported beside them.
+`worst_T` is the G1 bound from §2.4, starting from a full bucket, and it is the minimum of both buckets. For the 10M USDC vault, `worst_1h` is 400,000 and `worst_24h` is 1,000,000 (golden G-6). The on-chain fields are this bound. They are a property of the capacities, so a configured floor can make them larger than the tokens currently in the vault; `balance` is reported beside them. They bound payouts not yet requested: tickets already queued are not in them, can come due inside `T` and land together (`09`, finding 102), and `queued` reports their total.
 
 ## 8. Floor helpers
 

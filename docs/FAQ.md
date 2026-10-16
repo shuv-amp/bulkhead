@@ -13,7 +13,7 @@ Drift had a rate limiter, and its compromised admin raised it. Bulkhead's limits
 See `03 §2–§5`.
 
 **Why would a protocol limit itself? Who pays?**
-The people who want the admin constrained are the ones whose money sits under it: depositors, curators, allocators, insurers. Bulkhead gives them a worst case enforced on-chain (`attest`: "at most $X now, $Y in the next hour, $Z in a day"). Protocols pay for Bulkhead Cloud: a hosted guardian, calibration on their own flows, and the attestation feed. The core stays free and open source. See `11`.
+The people who want the admin constrained are the ones whose money sits under it: depositors, curators, allocators, insurers. Bulkhead gives them a worst case enforced on-chain (`attest`: "at most $X now, $Y in the next hour, $Z in a day, on top of $Q already queued in public"). Protocols pay for Bulkhead Cloud: a hosted guardian, calibration on their own flows, and the attestation feed. The core stays free and open source. See `11`.
 
 **What exactly does "2% per hour and 5% per day" mean?**
 Each rate refills a bucket of the same size. So of the unbacked payouts asked for in any window of length `T`, at most `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault is paid within that window (of the least of its live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes, `03 §3`):

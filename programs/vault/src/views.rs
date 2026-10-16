@@ -9,7 +9,7 @@ use bulkhead_core::limiter::{available_now, max_unbacked_over, params_from_confi
 // Accounts: 0 protocol, 1 vault, 2 vault token account.
 // Returns (return data, 64 bytes, little-endian):
 //   available_now u64   unbacked amount that would pay out instantly right now
-//   worst_1h      u64   most unbacked outflow possible if nobody freezes for 1 hour
+//   worst_1h      u64   G1 bound over 1 hour if nobody freezes; excludes `queued`
 //   worst_24h     u64   the same for 24 hours
 //   balance       u64   vault token balance
 //   frozen_until  i64   max(protocol, vault) freeze end
