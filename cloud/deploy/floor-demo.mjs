@@ -43,7 +43,7 @@ const kept = (name) => {
   return k;
 };
 const owner = kept("owner");
-const guardians = [kept("guardian0"), kept("guardian1"), kept("guardian2")];
+const guardians = [kept("guardian0"), kept("guardian1"), kept("guardian2"), kept("guardian3")];
 const stranger = Keypair.generate(); // appears only in simulations
 const f = await new FloorClient(floorProgram, program).init();
 const DAY = 86_400;
@@ -133,7 +133,7 @@ say("\n1. register: one transaction, signed by the current upgrade key");
 await send(rpc, team, [f.register(team.publicKey, team.publicKey, owner.publicKey, guardians.map((g) => g.publicKey), 2, 7 * DAY, 3 * DAY)]);
 const afterRegister = await fingerprint();
 say(`   upgrade authority is now Floor's PDA ${afterRegister.authority}; code unchanged: ${afterRegister.sha256 === before.sha256}`);
-await refused("the old key registering it again (Floor holds the key now)", [f.register(team.publicKey, team.publicKey, stranger.publicKey, [0, 1, 2].map(() => Keypair.generate().publicKey), 2, 7 * DAY, 3 * DAY)], "NotCurrentAuthority");
+await refused("the old key registering it again (Floor holds the key now)", [f.register(team.publicKey, team.publicKey, stranger.publicKey, [0, 1, 2, 3].map(() => Keypair.generate().publicKey), 2, 7 * DAY, 3 * DAY)], "NotCurrentAuthority");
 
 say("\n2. stage the stop button and pin a snapshot (anyone can do both)");
 const loose = buffer(`${dir}/abort.so`, true);

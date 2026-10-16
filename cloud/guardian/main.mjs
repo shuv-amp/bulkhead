@@ -78,7 +78,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault, GUARDIAN_MARGIN, guardianMarginProblem } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, watchedEvents, floorAlerts, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
@@ -1067,7 +1067,7 @@ async function syncFromChain(act, { startup = false } = {}) {
 
 
 /**
- * A guardian set with fewer than threshold + 2 members can lose governance
+ * A guardian set with fewer than threshold + GUARDIAN_MARGIN members can lose governance
  * for good: one lost key plus one rogue guardian leave no quorum that can
  * replace either (docs/16 §4.4, AUD-2). Said once per set shape; on mainnet
  * it alerts.
@@ -1077,8 +1077,8 @@ function checkGuardianSet(p) {
   const shape = `${p.threshold}/${p.guardians.length}`;
   if (shape === guardianSetShape) return;
   guardianSetShape = shape;
-  if (p.guardians.length < p.threshold + 2) {
-    log({ level: "warn", notify: cfg.cluster === "mainnet-beta", msg: `${p.threshold}-of-${p.guardians.length} guardians: one lost key and one rogue guardian lock governance; run at least ${p.threshold}-of-${p.threshold + 2} with independent operators (docs/07 §6)` });
+  if (guardianMarginProblem(p.guardians.length, p.threshold)) {
+    log({ level: "warn", notify: cfg.cluster === "mainnet-beta", msg: `${p.threshold}-of-${p.guardians.length} guardians: one lost key and one rogue guardian lock governance; run at least ${p.threshold}-of-${p.threshold + GUARDIAN_MARGIN} with independent operators (docs/07 §6)` });
   }
 }
 
