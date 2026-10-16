@@ -71,8 +71,8 @@ def time_to_lose(pct: int, dual: bool) -> F:
 def check() -> None:
     """The figures the README states, so `scripts/check.sh` can fail on them."""
     claims = [
-        ("at most 4% of a vault in any hour", fraction(HOUR, **DUAL), F(4, 100)),
-        ("at most 10% of a vault in any day", fraction(DAY, **DUAL), F(10, 100)),
+        ("of an hour's requests, at most 4% of a vault paid within it", fraction(HOUR, **DUAL), F(4, 100)),
+        ("of a day's requests, at most 10% of a vault paid within it", fraction(DAY, **DUAL), F(10, 100)),
         ("5% needs an hour and a half of silence", time_to_lose(5, True), F(3, 2)),
         ("10% needs a day of silence", time_to_lose(10, True), F(24)),
     ]

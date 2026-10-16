@@ -16,10 +16,12 @@ See `03 §2–§5`.
 The people who want the admin constrained are the ones whose money sits under it: depositors, curators, allocators, insurers. Bulkhead gives them a worst case enforced on-chain (`attest`: "at most $X now, $Y in the next hour, $Z in a day"). Protocols pay for Bulkhead Cloud: a hosted guardian, calibration on their own flows, and the attestation feed. The core stays free and open source. See `11`.
 
 **What exactly does "2% per hour and 5% per day" mean?**
-Each rate refills a bucket of the same size. So the most unbacked money that can leave in any window of length `T` is `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault (of the least of its live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes, `03 §3`):
-- up to 4% in any hour;
-- up to 10% in any day;
+Each rate refills a bucket of the same size. So of the unbacked payouts asked for in any window of length `T`, at most `min(2% × (1 + T/1h), 5% × (1 + T/24h))` of the vault is paid within that window (of the least of its live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes, `03 §3`):
+- of an hour's requests, up to 4% within that hour;
+- of a day's, up to 10% within that day;
 - half a vault takes 9 days with nobody responding.
+
+This counts payouts when they are asked for, not when they land. Above the limits a payout waits at least 6 hours in a public queue any guardian can cancel, and queued payouts can land together: a single request of up to 40% of the vault is paid in one transfer, and due tickets asked for over many days can be settled at once (`09`, finding 102).
 
 This is guarantee G1, proved in `03 §2.5` and checked by Kani and the exhaustive tests (`09 §5`).
 
