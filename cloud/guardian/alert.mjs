@@ -51,19 +51,64 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   // a restore approval; finding 76). It alerts as a warning.
   const urgent = level === "error" || ACTIONS.has(action) || line.notify === true || (level === "warn" && URGENT_WARNINGS.some((r) => r.test(message)));
   if (!urgent) return null;
-  const subject = [line.changeId, line.proposalId, line.program, line.mint, line.what, line.target].filter((x) => x != null).join("/");
+  const parts = about(line);
+  const subject = parts.map((p) => p.shown).join("/");
   const kind = `${level}:${action ?? ""}:${subject}:${message.slice(0, 60)}`;
   const landedFreeze = action === "freeze" && line.signature;
   const window = action === "freeze" ? failedFreezeMs : windowMs;
   if (!landedFreeze && nowMs - (seen.get(kind) ?? -Infinity) < window) return null;
   seen.set(kind, nowMs);
   const what = action ? `${action}${line.signature ? " sent" : " failed"}` : level === "info" ? "notice" : level;
-  const detail = [line.reason, message, line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
+  const detail = [line.reason, message, ...named(parts, [line.reason ?? "", message]), line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
     .filter(Boolean).join(" | ");
   const alert = { severity: level === "error" || action === "freeze" ? "critical" : "warning", title: `Bulkhead guardian: ${what}`, detail, at: line.t };
   // Not part of the message: lets the sender un-mute an alert it could not deliver.
   Object.defineProperty(alert, "kind", { value: kind });
   return alert;
+}
+
+/**
+ * What `line` is about: each part as the webhook shows it (`shown`), and the
+ * word that says it is already in a text (`needle`). alertFor keys its
+ * repeats on the shown parts ("change 4" and "proposal 4" differ) and names
+ * them in the detail, so the webhook never keys on a part it doesn't show.
+ * A program or mint is said by its bare key, and a change or proposal in any
+ * case ("Change 4"). `what` and `target` may hold a key, so they and the keys
+ * match exactly: base58 case matters.
+ */
+function about(line) {
+  return [
+    [line.what, ""], [line.target, "on "],
+    [line.changeId, "change ", false, true], [line.proposalId, "proposal ", false, true],
+    [line.program, "program ", true], [line.mint, "mint ", true],
+  ].filter(([v]) => v != null && v !== "") // says() never ends on an empty word
+    .map(([v, label, bare = false, fold = false]) => ({ shown: `${label}${v}`, needle: bare ? String(v) : `${label}${v}`, fold }));
+}
+
+/**
+ * The `parts` (from `about`) the webhook should show: those that `texts` (the
+ * reason and the message) or an earlier part don't already say. The webhook
+ * gets only the title and the detail, so "floor not ready" for one of two
+ * Floor programs used to arrive without saying which.
+ */
+function named(parts, texts) {
+  const out = [];
+  for (const { shown, needle, fold } of parts) {
+    if (![...texts, ...out].some((s) => says(s, needle, fold))) out.push(shown);
+  }
+  return out;
+}
+
+/**
+ * `s` contains `word` (ignoring case if `fold`), and not as part of a longer
+ * word or number ("change 4" is not in "change 45").
+ */
+function says(s, word, fold = false) {
+  const [hay, needle] = fold ? [s.toLowerCase(), word.toLowerCase()] : [s, word];
+  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) {
+    if (!/\w/.test(hay[i - 1] ?? "") && !/\w/.test(hay[i + needle.length] ?? "")) return true;
+  }
+  return false;
 }
 
 /**
