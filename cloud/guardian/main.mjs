@@ -82,7 +82,7 @@ import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeF
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
-import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
+import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll, actionLine } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
@@ -1259,27 +1259,18 @@ const floorFollowed = new Set();
  * account scans cover what came before.
  */
 async function followFloor() {
-  for (const fc of floorWatch) {
-    const address = b58encode(fc.config);
-    const program = b58encode(fc.protected);
-    const page = (q) => rpc.call("getSignaturesForAddress", [address, q]);
-    const resuming = !floorFollowed.has(address);
-    const r = await followAccount(page, { cursor: floorCursors.get(address) ?? null, oldestWanted: resuming ? wallNow() - DAY_S : null, knows: knowsSignature });
-    if (r.status === "gone") {
-      log({ level: "error", msg: "the node no longer has the Floor config's cursor signature; reading on from its newest. Floor history in the gap was not reviewed: check this program's proposals, executions and recovery key by hand", program });
-    } else if (r.status === "gap") {
-      log({ level: "error", msg: "Floor history older than a day, back to the saved cursor, was not reviewed: check this program's proposals, executions and recovery key by hand", program });
-    }
-    if (r.cursor) floorCursors.set(address, r.cursor);
-    else floorCursors.delete(address);
-    // No signature at all yet: ask again next poll, never from genesis.
-    if (r.status === "empty") continue;
+  await followConfigs(floorWatch.map((fc) => ({ address: b58encode(fc.config), program: b58encode(fc.protected) })), {
+    page: (address, q) => rpc.call("getSignaturesForAddress", [address, q]),
+    cursors: floorCursors,
+    followed: floorFollowed,
+    oldestWanted: () => wallNow() - DAY_S,
+    knows: knowsSignature,
     // Live, bounded like the protocol's ingest (finding 76): what is left is
     // listed again from the saved cursor next pass.
-    await ingest(r.sigs, !resuming, (signature, s) => floorCursors.set(address, { signature, slot: s.slot ?? 0 }), program, resuming ? Infinity : ingestBudgetMs);
-    floorFollowed.add(address);
-    saveIncident();
-  }
+    ingest: (sigs, live, checkpoint, program) => ingest(sigs, live, checkpoint, program, live ? ingestBudgetMs : Infinity),
+    log,
+    saved: saveIncident,
+  });
 }
 
 /**
