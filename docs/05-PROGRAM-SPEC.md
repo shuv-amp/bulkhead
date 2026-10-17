@@ -141,7 +141,7 @@ Codes from 8000 (`error.rs`), disjoint from Floor (7000+), Anchor (6000+) and th
 
 | # | Class | Check | Tested by |
 |---|---|---|---|
-| 0 | Signer authorization | admin, guardians, caller PDA, source authority | `only_the_protocol_itself_can_release`, `freezes_are_short…` |
+| 0 | Signer authorization | admin, guardians, caller PDA, source authority | `only_the_protocol_itself_can_deposit`, `only_the_protocol_itself_can_release`, `freezes_are_short…` |
 | 1 | Account data matching | vault ↔ protocol ↔ mint ↔ token account; ticket ↔ vault; backing ↔ recipient owner | `a_ticket_settles…only`, differential |
 | 2 | Owner checks | program-owned state; token accounts owned by a token program; prices owned by the Pyth receiver | `a_price_for_the_wrong_feed_is_refused` |
 | 3 | Type cosplay | 8-byte discriminators + exact lengths | unit `every_layout_round_trips` (a `Change` never reads as a `Ticket`) |
