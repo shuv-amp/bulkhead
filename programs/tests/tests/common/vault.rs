@@ -198,7 +198,7 @@ pub struct Market {
     pub caller: Address,
     pub protocol: Address,
     pub admin: Keypair,
-    pub g: [Keypair; 3],
+    pub g: [Keypair; 4],
     pub destination: Keypair,
 }
 
@@ -297,7 +297,7 @@ impl Market {
         let caller = pda(&[b"bulkhead-caller"], &harbor);
         let protocol = pda(&[b"protocol", harbor.as_ref()], &vault_program);
         let admin = Keypair::new();
-        let g = [Keypair::new(), Keypair::new(), Keypair::new()];
+        let g = [Keypair::new(), Keypair::new(), Keypair::new(), Keypair::new()];
         let destination = Keypair::new();
         env.fund(&admin);
         for k in &g {
@@ -307,7 +307,7 @@ impl Market {
         // Register through Harbor: the caller PDA is the registrar.
         let mut args = Vec::new();
         args.extend_from_slice(m.admin.pubkey().as_ref());
-        args.push(3);
+        args.push(4);
         for k in &m.g {
             args.extend_from_slice(k.pubkey().as_ref());
         }
@@ -335,7 +335,7 @@ impl Market {
         let protocol = pda(&[b"protocol", harbor.as_ref()], &self.vault_program);
         let mut data = vec![0u8];
         data.extend_from_slice(self.admin.pubkey().as_ref());
-        data.push(3);
+        data.push(4);
         for k in &self.g {
             data.extend_from_slice(k.pubkey().as_ref());
         }

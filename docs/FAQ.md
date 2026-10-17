@@ -34,7 +34,7 @@ It becomes a public ticket with an ETA, at least 6 hours out, and anyone can set
 ## Guardians
 
 **Who are the guardians?**
-Two to eight keys the protocol names at registration: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat within their interval count. They can freeze, cancel or extend a ticket, veto a change, and (Floor) stop the program. No guardian instruction moves tokens or chooses a recipient (G5).
+Four to eight keys the protocol names at registration, at least two more than the quorum: for example its operations key, the Bulkhead Cloud bot and two security firms. Only guardians that heartbeat within their interval count. They can freeze, cancel or extend a ticket, veto a change, and (Floor) stop the program. No guardian instruction moves tokens or chooses a recipient (G5).
 
 **What if a guardian key is stolen?**
 The attacker gets denial of service, not money:
@@ -83,7 +83,7 @@ No. Tokens sit in accounts owned by the Vault program's PDA. No key can transfer
 **What if Bulkhead has a bug?**
 It is the top risk, so every rule is stated independently more than once and checked:
 - a Rust core against a Python reference, over 6.9M differential lines;
-- property tests, 17 Kani harnesses, exhaustive tests and mutation testing;
+- property tests, 19 Kani harnesses, exhaustive tests and mutation testing;
 - the programs against a model built from the core;
 - every finding listed in `09 §4`.
 

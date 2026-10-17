@@ -185,7 +185,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
     let stager = Keypair::new();
     env.fund(&stager);
 
-    // Key pools: guardians 0..3 are registered; 3 and 4 are not. Owner 0 is
+    // Key pools: guardians 0..4 are registered; 4 and 5 are not. Owner 0 is
     // registered; owner 1 is a key a SetOwner proposal may name.
     let extra = [Keypair::new(), Keypair::new()];
     let gk: Vec<&Keypair> = p.g.iter().chain(extra.iter()).collect();
@@ -203,8 +203,8 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
     let mut md = Model {
         owner: 0,
         recovery: None,
-        guardians: vec![0, 1, 2],
-        heartbeats: vec![env.time; 3],
+        guardians: vec![0, 1, 2, 3],
+        heartbeats: vec![env.time; 4],
         threshold: 2,
         interval: 7 * DAY,
         delay: 3 * DAY,
@@ -285,7 +285,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
         match choice {
             // Heartbeat, by a live, stale or unregistered key.
             0..=2 => {
-                let k = rng.below(5) as usize;
+                let k = rng.below(gk.len() as u64) as usize;
                 let r = env.send(&[f.heartbeat(&gk[k].pubkey())], &[gk[k]]);
                 let i = md.live_guardian(k, now);
                 if let Some(i) = i {
@@ -295,7 +295,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             }
             // Veto, with no id, the pending id, another id, or a malformed one.
             3 => {
-                let k = if rng.below(4) != 0 { md.guardians[rng.below(md.guardians.len() as u64) as usize] } else { rng.below(5) as usize };
+                let k = if rng.below(4) != 0 { md.guardians[rng.below(md.guardians.len() as u64) as usize] } else { rng.below(gk.len() as u64) as usize };
                 let pending_id = md.pending.as_ref().map(|x| x.id).unwrap_or(md.last_id);
                 let variant = rng.below(4);
                 let mut ix = f.veto_id(&gk[k].pubkey(), match variant {
@@ -344,10 +344,10 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
             }
             // Propose a new guardian set (sometimes invalid: the owner, a duplicate, a bad threshold or interval).
             5 => {
-                let n = 2 + rng.below(3) as usize;
+                let n = 2 + rng.below(5) as usize;
                 let mut set: Vec<usize> = Vec::new();
                 while set.len() < n {
-                    let k = rng.below(5) as usize;
+                    let k = rng.below(gk.len() as u64) as usize;
                     if !set.contains(&k) {
                         set.push(k);
                     }
@@ -372,7 +372,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     && !duplicate
                     && !with_owner
                     && th >= 2
-                    && (th as usize) < n
+                    && th as usize + 2 <= n
                     && (MIN_HEARTBEAT_INTERVAL_S..=MAX_HEARTBEAT_INTERVAL_S).contains(&interval);
                 if valid {
                     displaced = free.unwrap();
@@ -515,7 +515,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<String, u64> {
                     // The owner stops only while no quorum of guardians is live.
                     (ok_[who], who == md.owner && md.alive(now).count_ones() < md.threshold as u32)
                 } else {
-                    let k = if rng.below(2) == 0 { md.guardians[rng.below(md.guardians.len() as u64) as usize] } else { rng.below(5) as usize };
+                    let k = if rng.below(2) == 0 { md.guardians[rng.below(md.guardians.len() as u64) as usize] } else { rng.below(gk.len() as u64) as usize };
                     (gk[k], md.live_guardian(k, now).is_some())
                 };
                 // The snapshot account: none, a wrong one, or the pinned one.

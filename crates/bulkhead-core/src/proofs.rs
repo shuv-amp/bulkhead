@@ -317,17 +317,79 @@ fn eject_rules_hold() {
     }
 }
 
-/// FULL. A guardian set is accepted exactly when every guardian in it can be
-/// ejected by a live quorum of the others (finding 96): `guardian_set_ok` is
-/// the condition for ejection to be reachable at all, for every target.
+/// FULL. Every guardian in an accepted set can be ejected by a live quorum of
+/// the others (finding 96), and ejection is reachable in exactly the sets
+/// larger than their threshold, so a set an ejection has shrunk to
+/// `threshold + 1` keys can still eject (refusing that, option (a) of
+/// AUD-2, would leave a rogue in place). An accepted set keeps a margin of
+/// at least two keys over its threshold, and two is enough (finding 107).
 #[kani::proof]
 fn accepted_sets_can_eject_anyone() {
     let (count, th, target): (u8, u8, u8) = (kani::any(), kani::any(), kani::any());
     kani::assume(target < count);
     let reachable = can_eject(0xFF, 0xFF, th, target, count);
-    assert!(guardian_set_ok(count, th) == reachable);
+    assert!(reachable == (count <= 8 && th >= 2 && count > th));
     if guardian_set_ok(count, th) {
-        assert!(count >= 3 && th >= 2);
+        assert!(reachable && count >= 4 && count >= th + 2);
+    }
+    if (2..=6).contains(&th) {
+        assert!(guardian_set_ok(th + 2, th) && !guardian_set_ok(th + 1, th));
+    }
+}
+
+/// FULL. Live honest guardians at least `threshold` strong eject any rogue,
+/// wherever the slots sit and whoever else is alive: lost keys still inside
+/// their heartbeat interval, other rogues. An ejection removes one rogue and
+/// leaves the honest guardians as they were, so they eject every rogue in
+/// turn (the slot shift is the programs' `eject`, tested in LiteSVM).
+#[kani::proof]
+fn an_honest_live_quorum_ejects_any_rogue() {
+    let (count, th, honest, rogue, alive, target): (u8, u8, u8, u8, u8, u8) = (
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    kani::assume(count <= 8 && th >= 2 && target < count);
+    let members = ((1u16 << count) - 1) as u8;
+    kani::assume(honest & !members == 0 && honest & rogue == 0 && honest & !alive == 0);
+    kani::assume(rogue & (1 << target) != 0);
+    kani::assume(honest.count_ones() >= th as u32);
+    assert!(can_eject(honest, alive, th, target, count));
+}
+
+/// FULL (AUD-2, finding 107). In every accepted set, any two faulty keys,
+/// lost or rogue in any slots, leave a live honest quorum, unless the rogues
+/// are a quorum themselves (two rogues in a 2-of-n set are; out of scope,
+/// 04 T7). That quorum restores or unfreezes alone and ejects each rogue,
+/// and the rogues alone eject no honest guardian. One lost key and one
+/// rogue locked a 2-of-3 set for good.
+#[kani::proof]
+fn accepted_sets_survive_any_two_faults() {
+    let (count, th, lost, rogue, alive, target): (u8, u8, u8, u8, u8, u8) = (
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    kani::assume(guardian_set_ok(count, th) && target < count);
+    let members = ((1u16 << count) - 1) as u8;
+    let faulty = lost | rogue;
+    kani::assume(faulty & !members == 0 && lost & rogue == 0 && faulty.count_ones() <= 2);
+    kani::assume(rogue.count_ones() < th as u32);
+    let honest = members & !faulty;
+    kani::assume(honest & !alive == 0);
+    assert!(honest.count_ones() >= th as u32);
+    assert!(quorum(honest, alive, th));
+    if rogue & (1 << target) != 0 {
+        assert!(can_eject(honest, alive, th, target, count));
+    }
+    if honest & (1 << target) != 0 {
+        assert!(!can_eject(rogue, alive, th, target, count));
     }
 }
 

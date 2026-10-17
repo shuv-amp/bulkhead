@@ -8,8 +8,8 @@ use libfuzzer_sys::fuzz_target;
 const DAY: i64 = 86_400;
 
 /// The rules, stated again: a count byte; 2..=8 guardians; the whole encoding
-/// present; keys not zero, not forbidden, not repeated; 2 <= threshold <
-/// count; an interval of 1-30 days.
+/// present; keys not zero, not forbidden, not repeated; 2 <= threshold <=
+/// count - 2; an interval of 1-30 days.
 fn reference(b: &[u8], forbidden: [&[u8; 32]; 2]) -> Result<(usize, u8, i64, usize), GuardianSetError> {
     let count = *b.first().ok_or(GuardianSetError::Truncated)? as usize;
     if !(2..=8).contains(&count) {
@@ -29,7 +29,7 @@ fn reference(b: &[u8], forbidden: [&[u8; 32]; 2]) -> Result<(usize, u8, i64, usi
         }
     }
     let threshold = b[1 + 32 * count];
-    if !(2 <= threshold as usize && (threshold as usize) < count) {
+    if !(2 <= threshold as usize && threshold as usize + 2 <= count) {
         return Err(GuardianSetError::BadThreshold);
     }
     let interval = i64::from_le_bytes(b[2 + 32 * count..used].try_into().unwrap());
@@ -55,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
     let mut f2: [u8; 32] = data[33..65].try_into().unwrap();
     let mut b = data[65..].to_vec();
     if flags & 1 == 1 {
-        let count = 3 + b[0] % 6;
+        let count = 4 + b[0] % 5;
         b[0] = count;
         let n = count as usize;
         let need = GuardianSet::encoded_len(n);
@@ -63,7 +63,7 @@ fuzz_target!(|data: &[u8]| {
             let i = b.len();
             b.push((i as u8).wrapping_mul(37).wrapping_add(11));
         }
-        b[1 + 32 * n] = 2 + b[1 + 32 * n] % (count - 2);
+        b[1 + 32 * n] = 2 + b[1 + 32 * n] % (count - 3);
         let raw = u64::from_le_bytes(b[2 + 32 * n..10 + 32 * n].try_into().unwrap());
         let interval = DAY + (raw % (29 * DAY as u64 + 1)) as i64;
         b[2 + 32 * n..10 + 32 * n].copy_from_slice(&interval.to_le_bytes());
