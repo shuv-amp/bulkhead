@@ -601,7 +601,6 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       saveIncident();
     }
     log(actionLine(action, {
-      reason: action.reason,
       ticketId: action.ticketId,
       signature: sig,
       reaction_ms: confirmed - started,
