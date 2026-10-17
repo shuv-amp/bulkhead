@@ -4235,8 +4235,8 @@ fn an_exit_stale_after_a_rotation_revives_only_if_the_same_admin_returns() {
 /// made inside them is charged at the lowered capacity, and that reservation
 /// outlives the dip: an ordinary 100,000 payout, instant without the round
 /// trip, queues for 24h and leaves no instant room for a day. Availability
-/// only; G1 is unaffected. This pins today's behaviour so the fix planned for
-/// the audit has to change it on purpose.
+/// only; G1 is unaffected. This pins today's behaviour so that any fix has
+/// to change it on purpose.
 #[test]
 fn a_round_trip_dip_charges_payouts_at_the_dipped_capacity() {
     use bulkhead_core::consts::LOW_WINDOW_S;
@@ -4275,6 +4275,114 @@ fn a_round_trip_dip_charges_payouts_at_the_dipped_capacity() {
     assert_eq!(o.eta_s - paid_at, 86_400, "the payout waits a day, not 6h");
     assert_eq!(after_dip, 0, "the base is back to 10M, yet no instant room");
     assert_eq!(after_21h, 0, "and still none 21 hours after one round trip");
+}
+
+/// Finding 100 needs no position in the vault. In one transaction a borrower
+/// with nothing deposited puts in SOL collateral (it could be flash-borrowed),
+/// borrows 9M USDC backed by it, pays the 9M straight back and takes the SOL
+/// out again. The four instructions fit in one packet. The same honest
+/// 100,000 payout then waits a day, and the lane has no instant room after
+/// the dip, nor 21 hours later. During the dip `attest` reports a worst hour
+/// of 40,000 instead of 400,000. This pins today's behaviour so that any
+/// fix has to change it on purpose.
+#[test]
+fn a_loan_round_trip_with_no_position_dips_the_lane() {
+    use bulkhead_core::consts::LOW_WINDOW_S;
+    for round_trip in [false, true] {
+        let mut w = World::new();
+        let lender = w.user();
+        w.deposit("usdc", &lender, 10_000_000 * USDC);
+        let borrower = w.user();
+        let sol_acc = w.account("sol", &borrower.pubkey());
+        let usdc_acc = w.account("usdc", &borrower.pubkey());
+        w.seal();
+        w.env.advance(2 * DAY);
+        w.refresh_prices();
+        assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 200_000 * USDC);
+        if round_trip {
+            let flash = 72_000 * SOL;
+            w.env.mint_to(&w.sol.mint, &w.sol.mint_authority, &sol_acc, flash, &w.sol.token_program);
+            let put = w.m.deposit_ix(&w.env, &w.sol, &borrower.pubkey(), &sol_acc, flash);
+            let usdc_first = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+            let borrow = w.m.withdraw_ix(&w.env, &w.usdc, &borrower.pubkey(), &usdc_acc, 9_000_000 * USDC, &usdc_first);
+            let repay = w.m.deposit_ix(&w.env, &w.usdc, &borrower.pubkey(), &usdc_acc, 9_000_000 * USDC);
+            let sol_first = vec![(w.sol.asset, w.sol.price), (w.usdc.asset, w.usdc.price)];
+            let take = w.m.withdraw_ix(&w.env, &w.sol, &borrower.pubkey(), &sol_acc, flash, &sol_first);
+            let ixs = [put, borrow, repay, take];
+            let msg = solana_message::Message::new(&ixs, Some(&w.env.payer.pubkey()));
+            assert!(legacy_tx_size(&msg) <= PACKET, "one transaction");
+            assert_eq!(PACKET - legacy_tx_size(&msg), 236, "the room left for a flash venue's own instructions");
+            w.env.ok(&ixs, &[&borrower]);
+            assert_eq!(w.env.balance(&sol_acc), flash, "the collateral is back");
+            assert_eq!(w.env.balance(&usdc_acc), 0, "and no USDC was kept");
+            // A borrow that was partly unbacked would leave the repaid surplus
+            // as a deposit; an empty ledger means all 9M was backed.
+            assert_eq!(ledger_of(&w.env, &w.m.backing(&borrower.pubkey())), vec![], "the loan was fully backed");
+        }
+        w.env.advance(60);
+        // What a guardian reads from `attest` for its freeze threshold.
+        let worst_1h = w.m.attest(&mut w.env, &w.usdc).worst_1h;
+        let paid_at = w.env.time;
+        let user = Keypair::new();
+        let to = w.account("usdc", &user.pubkey());
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), 100_000 * USDC, &w.usdc_prices(false));
+        let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+        w.env.advance(2 * LOW_WINDOW_S + 60);
+        let after_dip = w.m.attest(&mut w.env, &w.usdc).available_now;
+        w.env.advance(20 * 3_600);
+        let after_21h = w.m.attest(&mut w.env, &w.usdc).available_now;
+        if round_trip {
+            assert_eq!((o.instant, o.queued), (0, 100_000 * USDC), "queued after the loan round trip");
+            assert_eq!(o.eta_s - paid_at, DAY, "for a day");
+            assert_eq!((after_dip, after_21h), (0, 0), "no instant room after the dip, nor 21 hours later");
+            assert_eq!(worst_1h, 40_000 * USDC, "attest's worst hour is a tenth during the dip");
+        } else {
+            assert_eq!((o.instant, o.queued), (100_000 * USDC, 0), "without it: instant");
+            assert_eq!((after_dip, after_21h), (198_000 * USDC, 198_000 * USDC), "2% of the 9.9M left");
+            assert_eq!(worst_1h, 400_000 * USDC);
+        }
+    }
+}
+
+/// Finding 100 at 99%: after a holder of 99% of the vault withdraws and
+/// re-deposits in one transaction, an honest 50,000 payout a minute later is
+/// refused (after a 90% round trip, a 100,000 payout is queued instead). At
+/// the dipped capacity its ETA would lie past the queue's horizon
+/// (`QueueFull`), though the queue is empty.
+/// A failed transaction reserves nothing, so a retry two windows later is
+/// instant, unless the round trip is repeated. Without the round trip it is
+/// instant too.
+#[test]
+fn a_99_percent_round_trip_refuses_an_honest_payout() {
+    use bulkhead_core::consts::LOW_WINDOW_S;
+    for round_trip in [false, true] {
+        let mut w = World::new();
+        let small = w.user();
+        let whale = w.user();
+        w.deposit("usdc", &small, 100_000 * USDC);
+        let whale_acc = w.deposit("usdc", &whale, 9_900_000 * USDC);
+        w.seal();
+        w.env.advance(2 * DAY);
+        if round_trip {
+            let out = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_900_000 * USDC, &w.usdc_prices(false));
+            let back = w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 9_900_000 * USDC);
+            w.env.ok(&[out, back], &[&whale]);
+        }
+        w.env.advance(60);
+        let user = Keypair::new();
+        let to = w.account("usdc", &user.pubkey());
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), 50_000 * USDC, &w.usdc_prices(false));
+        if !round_trip {
+            let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+            assert_eq!((o.instant, o.queued), (50_000 * USDC, 0), "without the round trip: instant");
+            continue;
+        }
+        assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::QUEUE_FULL);
+        w.env.advance(2 * LOW_WINDOW_S + 60);
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &user.pubkey(), 50_000 * USDC, &w.usdc_prices(false));
+        let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+        assert_eq!((o.instant, o.queued), (50_000 * USDC, 0), "two windows later: instant");
+    }
 }
 
 /// Finding 101: a reset clamps each bucket to "just emptied", and it used the
