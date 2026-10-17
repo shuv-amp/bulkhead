@@ -28,6 +28,12 @@ const URGENT_WARNINGS = [
   /no 72-hour figure/,
   /was stopped on Floor/,
   /guardian was ejected on Floor/,
+  // A followed Floor config replaying rows at or before the start slot. With
+  // a late start slot (an endpoint ahead of its chain) they landed after the
+  // start, and their events (a key replaced or removed, a restore) are never
+  // reported; a lagging node logs it too, and the two cannot be told apart.
+  // Only rows listed after the first good poll: that poll's replay is silent.
+  /listed transactions at or before the start slot/,
 ];
 
 /** Actions sent on chain: each one is news. */

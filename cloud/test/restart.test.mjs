@@ -9,8 +9,8 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { newState } from "../guardian/policy.mjs";
 import { stateJson, restoreState, writeStateFile } from "../guardian/statefile.mjs";
-import { followAccount, followConfigs } from "../guardian/follow.mjs";
-import { stallWatch, scanAll } from "../guardian/alert.mjs";
+import { followAccount, followConfigs, startSlot } from "../guardian/follow.mjs";
+import { stallWatch, scanAll, alertFor } from "../guardian/alert.mjs";
 import { Keypair } from "../lib/signer.mjs";
 
 const PROTOCOL = "8sZ5d3jB3kGqEoTz6eYpNw2bR3aUqv1uJ8sZtLWGd7Vb";
@@ -144,7 +144,7 @@ test("one Floor config that cannot be followed no longer stops the ones after it
   const part = floorFollow({ C3: [sig(8, 800), sig(7, 700), sig(6, 600)] }, { refuse: { P3: "after one" }, cursors: new Map([["C3", { signature: "s6", slot: 6 }]]), followed: new Set(["C3"]) });
   await assert.rejects(followConfigs(part.configs.slice(2), part.deps), /^Error: P3: transaction not returned$/);
   assert.deepEqual([part.deps.cursors.get("C3"), part.got.saves], [{ signature: "s7", slot: 7 }, 1]);
-  // A restart whose replay fails stays a replay: never acted on next poll.
+  // A restart whose replay fails stays a replay (with no start slot, as here, all of it).
   const replay = floorFollow(history, { refuse: { P2: "ingest" }, cursors: new Map([["C2", { signature: "s4", slot: 4 }]]) });
   await assert.rejects(followConfigs(replay.configs.slice(1, 2), replay.deps), /^Error: P2: transaction not returned$/);
   assert.equal(replay.deps.followed.has("C2"), false);
@@ -168,7 +168,7 @@ test("a Floor config resumes as a replay, is live once followed, and with no sig
   history.C1.unshift(sig(4, 400));
   history.C2.push(sig(1, 100));
   await followConfigs(configs.slice(0, 2), deps);
-  assert.deepEqual(got.ingested.slice(1), [["P1", true, ["s4"]], ["P2", false, []]], "followed: live; the anchored config replays nothing");
+  assert.deepEqual(got.ingested.slice(1), [["P1", true, ["s4"]]], "followed: live; the anchored config ingests nothing");
   assert.deepEqual([[...followed].sort(), cursors.get("C2")], [["C1", "C2"], { signature: "s1", slot: 1 }]);
   assert.equal(got.logs.length, 0);
   // A cursor the node forgot: said, by program, and re-anchored.
@@ -184,7 +184,102 @@ test("a Floor config resumes as a replay, is live once followed, and with no sig
   const restart = floorFollow({}, { cursors: new Map([["C3", { signature: "s5", slot: 5 }]]) });
   restart.deps.page = (address, q) => pages([sig(6, 600)], { gone: "s5" }).fetchPage(q);
   await followConfigs(restart.configs.slice(2), restart.deps);
-  assert.deepEqual([restart.got.logs.map((l) => [l.level, l.program]), restart.got.ingested, [...restart.deps.followed]], [[["error", "P3"]], [["P3", false, []]], ["C3"]]);
+  assert.deepEqual([restart.got.logs.map((l) => [l.level, l.program]), restart.got.ingested, [...restart.deps.followed]], [[["error", "P3"]], [], ["C3"]]);
+});
+
+test("a Floor config resuming acts on what lands after the slot the process started at", async () => {
+  // The process started at slot 4. Its restart replay fails, and then,
+  // before a poll succeeds, s5-s7 land (a replaced recovery key, say).
+  const history = { C1: [sig(3, 300), sig(2, 200)] };
+  const refuse = { P1: "ingest" };
+  const { deps, got, configs } = floorFollow(history, { refuse, cursors: new Map([["C1", { signature: "s2", slot: 2 }]]) });
+  deps.liveAfterSlot = 4;
+  await assert.rejects(followConfigs(configs.slice(0, 1), deps), /^Error: P1: transaction not returned$/);
+  // s4 is in the start slot: replayed. Block times do not decide (s6's is earlier).
+  history.C1.unshift(sig(7, 700), sig(6, 100), sig(5, 500), sig(4, 400));
+  delete refuse.P1;
+  await followConfigs(configs.slice(0, 1), deps);
+  assert.deepEqual(got.ingested, [["P1", false, ["s4", "s3"]], ["P1", true, ["s7", "s6", "s5"]]], "replayed up to the start, then live");
+  assert.deepEqual([[...deps.followed], deps.cursors.get("C1")], [["C1"], { signature: "s7", slot: 7 }]);
+  // A restart whose first poll succeeds: the same line, not a replay of all.
+  const clean = floorFollow({ C1: [sig(5, 500), sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 2 }]]) });
+  clean.deps.liveAfterSlot = 4;
+  await followConfigs(clean.configs.slice(0, 1), clean.deps);
+  assert.deepEqual(clean.got.ingested, [["P1", false, ["s3"]], ["P1", true, ["s5"]]]);
+  assert.deepEqual(clean.got.logs, [], "a replay on a restart is not a lagging node");
+  // All of it after the start: all live.
+  const after = floorFollow({ C1: [sig(5, 500), sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 2 }]]) });
+  after.deps.liveAfterSlot = 2;
+  await followConfigs(after.configs.slice(0, 1), after.deps);
+  assert.deepEqual(after.got.ingested, [["P1", true, ["s5", "s3"]]], "and no empty replay call");
+  // Everything at or before the start slot: all replayed, and an empty live call is not made.
+  const old = floorFollow({ C1: [sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 2 }]]) });
+  old.deps.liveAfterSlot = 3;
+  await followConfigs(old.configs.slice(0, 1), old.deps);
+  assert.deepEqual(old.got.ingested, [["P1", false, ["s3"]]]);
+  // The line holds on every poll, not only the first: a followed config whose
+  // node had not yet listed up to the start replays what it lists later from
+  // before it, says so, and acts on the rest.
+  const lag = floorFollow({ C1: [sig(5, 500), sig(4, 400), sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 2 }]]), followed: new Set(["C1"]) });
+  lag.deps.liveAfterSlot = 4;
+  await followConfigs(lag.configs.slice(0, 1), lag.deps);
+  assert.deepEqual(lag.got.ingested, [["P1", false, ["s4", "s3"]], ["P1", true, ["s5"]]]);
+  assert.deepEqual(lag.got.logs.map((l) => [l.level, l.program, l.rows, l.startSlot, l.slots]), [["warn", "P1", 2, 4, [3, 4]]]);
+  // Those rows are never reported, and the line holds for the life of the
+  // process, so the line that says so reaches a person (finding 76's rule).
+  const alert = alertFor(lag.got.logs[0], new Map(), 0);
+  assert.equal(alert?.severity, "warning");
+  assert.match(alert.detail, /: 2 rows in slots 3-4, start slot 4 \| program P1$/);
+  // A row with no slot last in the replay part (kept by a cursor at slot 0, as
+  // below), and the rows out of slot order, the lowest in the middle: the
+  // slots are the lowest and highest of the rows that have one, not the
+  // first and last.
+  const lagNull = floorFollow({ C1: [sig(5, 500), sig(3, 300), sig(1, 100), sig(4, 400), { signature: "sn", slot: null }, sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 0 }]]), followed: new Set(["C1"]) });
+  lagNull.deps.liveAfterSlot = 4;
+  await followConfigs(lagNull.configs.slice(0, 1), lagNull.deps);
+  assert.deepEqual(lagNull.got.ingested, [["P1", false, ["s3", "s1", "s4", "sn"]], ["P1", true, ["s5"]]]);
+  assert.deepEqual(lagNull.got.logs.map((l) => [l.rows, l.slots]), [[4, [1, 4]]]);
+  // A replay there that fails says nothing (the stall alert covers it), so it is not said each poll.
+  const stuck = floorFollow({ C1: [sig(3, 300), sig(2, 200)] }, { refuse: { P1: "ingest" }, cursors: new Map([["C1", { signature: "s2", slot: 2 }]]), followed: new Set(["C1"]) });
+  stuck.deps.liveAfterSlot = 4;
+  await assert.rejects(followConfigs(stuck.configs.slice(0, 1), stuck.deps), /^Error: P1: transaction not returned$/);
+  assert.deepEqual(stuck.got.logs, []);
+  // A row with no slot (null over JSON-RPC) among the newest is live: acted on twice at worst, never unsaid.
+  const unslotted = floorFollow({ C1: [{ signature: "sn", slot: null }, sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 0 }]]) });
+  unslotted.deps.liveAfterSlot = 4;
+  await followConfigs(unslotted.configs.slice(0, 1), unslotted.deps);
+  assert.deepEqual(unslotted.got.ingested, [["P1", false, ["s3"]], ["P1", true, ["sn"]]]);
+  // ... nor does it end the live part: the line is the first row with a
+  // slot at or before the start (the node lists newest-first by slot).
+  const between = floorFollow({ C1: [sig(7, 700), { signature: "sn", slot: null }, sig(5, 500), sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 0 }]]) });
+  between.deps.liveAfterSlot = 4;
+  await followConfigs(between.configs.slice(0, 1), between.deps);
+  assert.deepEqual([between.got.ingested, between.deps.cursors.get("C1")], [[["P1", false, ["s3"]], ["P1", true, ["s7", "sn", "s5"]]], { signature: "s7", slot: 7 }]);
+  // One below the line is older than it: replayed with the rest, in one pass,
+  // so nothing is left over to be taken for a lagging node next poll.
+  const below = floorFollow({ C1: [sig(4, 400), { signature: "sn", slot: null }, sig(3, 300), sig(2, 200)] }, { cursors: new Map([["C1", { signature: "s2", slot: 0 }]]) });
+  below.deps.liveAfterSlot = 4;
+  await followConfigs(below.configs.slice(0, 1), below.deps);
+  assert.deepEqual([below.got.ingested, below.deps.cursors.get("C1"), [...below.deps.followed]], [[["P1", false, ["s4", "sn", "s3"]]], { signature: "s4", slot: 4 }, ["C1"]]);
+});
+
+test("the start slot is the highest confirmed slot any endpoint gives, and none is fatal", async () => {
+  const asked = [];
+  const endpoint = (slot) => ({ call: async (method, params) => {
+    asked.push([method, params]);
+    if (slot instanceof Error) throw slot;
+    return slot;
+  } });
+  let own = 0;
+  const failover = { call: async () => { own += 1; return 90; }, endpoints: [endpoint(90), endpoint(new Error("fetch failed")), endpoint(120), endpoint(100)] };
+  assert.equal(await startSlot(failover), 120, "one endpoint behind or down does not move the line back");
+  assert.ok(asked.every(([m, p]) => m === "getSlot" && p[0].commitment === "confirmed"));
+  assert.deepEqual([asked.length, own], [4, 0], "every endpoint is asked, and the active one not twice");
+  assert.equal(await startSlot(endpoint(7)), 7, "a plain Rpc is asked itself");
+  // Every endpoint busy when asked on its own (hurried): FailoverRpc.call waits once and answers.
+  const busy = () => endpoint(new Error("429 Too Many Requests"));
+  assert.equal(await startSlot({ ...endpoint(130), endpoints: [busy(), busy()] }), 130);
+  await assert.rejects(startSlot({ ...busy(), endpoints: [busy(), busy()] }), /no RPC endpoint gave its slot/);
 });
 
 test("a Floor config's walk asks the node whether it has the last full page's oldest signature (finding 81)", async () => {
