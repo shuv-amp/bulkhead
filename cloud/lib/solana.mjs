@@ -340,8 +340,8 @@ export const SLOT_LAG_SWITCH = 150;
 export const SIGNATURE_LAG_SWITCH_MS = 30_000;
 
 /**
- * Several endpoints behind one `Rpc` interface. Each call goes to the endpoint
- * that answered last; when it cannot answer (`endpointTrouble`), the next one
+ * Several endpoints behind one `Rpc` interface. Each call goes first to the
+ * active endpoint; when it cannot answer (`endpointTrouble`), the next one
  * is tried at once, after one quick retry instead of the single endpoint's
  * minute of backoff. An answer is never retried elsewhere: a refused
  * simulation is the same on every node. `onSwitch(from, to, error)` reports a
@@ -352,6 +352,7 @@ export class FailoverRpc extends Rpc {
     super(urls[0], { timeoutMs, retries, ...opts });
     this.endpoints = urls.map((url) => new Rpc(url, { timeoutMs, retries, ...opts }));
     this.active = 0;
+    this.switches = 0; // moves of `active`, so a call can tell its evidence is older
     this.onSwitch = onSwitch;
   }
   /** Make endpoint `at` the one asked first, and say so (`onSwitch`). */
@@ -359,6 +360,7 @@ export class FailoverRpc extends Rpc {
     if (at === this.active) return;
     this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, cause);
     this.active = at;
+    this.switches++;
     this.url = this.endpoints[at].url;
   }
 
@@ -423,20 +425,30 @@ export class FailoverRpc extends Rpc {
     return { switched: false, reason: null, slots };
   }
 
+  /**
+   * Ask the active endpoint, then each other one in turn. The order is fixed
+   * when the call starts: calls overlap (a sweep sends several at once), and
+   * one that re-read `active` after another had moved it retried the dead
+   * endpoint and never asked the live one. A call moves `active` to the
+   * endpoint that answered only if the active endpoint failed a request this
+   * call sent after the last move: older evidence would undo a newer call's
+   * move (a slow answer from the old endpoint, or a request sent before
+   * another call's switch).
+   */
   async call(method, params = []) {
+    const start = this.active;
+    const failedAt = new Map(); // endpoint -> this.switches when the failed request was sent
     let last;
     for (let i = 0; i < this.endpoints.length; i++) {
-      const at = (this.active + i) % this.endpoints.length;
+      const at = (start + i) % this.endpoints.length;
+      const sentAt = this.switches;
       try {
         const result = await this.endpoints[at].call(method, params);
-        if (at !== this.active) {
-          this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, last);
-          this.active = at;
-          this.url = this.endpoints[at].url;
-        }
+        if (failedAt.get(this.active) === this.switches) this.switchTo(at, last);
         return result;
       } catch (e) {
         if (!endpointTrouble(e)) throw e;
+        failedAt.set(at, sentAt);
         last = e;
       }
     }
