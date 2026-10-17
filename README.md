@@ -12,8 +12,10 @@
 </p>
 
 <p align="center">
-  <a href="#what-it-does-to-an-attack"><b>The attack</b></a> ·
+  <a href="#the-problem"><b>The problem</b></a> ·
   <a href="#how-it-works"><b>How it works</b></a> ·
+  <a href="#business-model"><b>Business</b></a> ·
+  <a href="#what-it-does-to-an-attack"><b>The attack</b></a> ·
   <a href="#verify-it-yourself"><b>Verify it</b></a> ·
   <a href="#live-on-devnet"><b>Devnet</b></a> ·
   <a href="docs/FAQ.md"><b>FAQ</b></a> ·
@@ -33,6 +35,12 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
   <br>
   <sub>A drain with the admin key, on a local validator (13 Oct 2026, sped up). 1.2M ordered, 100,000 paid; the guardian freezes and cancels the rest.<br>Every script is in this repo: <code>cloud/e2e/attack.mjs</code>, <code>cloud/guardian/main.mjs</code>, <code>cloud/status/</code>.</sub>
 </p>
+
+<br>
+
+| **$285M** | **10M → 9.9M** | **9 days** |
+|:---:|:---:|:---:|
+| lost by Drift in ~12 minutes, through limits its own admin could raise | USDC left in a Bulkhead vault after an attacker with the admin key tried to drain it, on devnet | for half a vault to leave behind Bulkhead with nobody responding at all, instead of 12 minutes |
 
 ## The rules
 
@@ -57,15 +65,20 @@ The one exception is a loan against allowlisted, Pyth-priced collateral. It is b
 
 </details>
 
-## Why the brake has to sit where the money moves
+## The problem
 
-| Fact | Source |
+Drift is not unusual. On Solana, the safety settings that protect depositors are often in the hands of the same keys an attacker would steal.
+
+| | |
 |---|---|
-| Of 54 multisigs governing solgov-tracked Solana protocols, **37 have no timelock**; the longest is **24h**; **16 of 43** have changed theirs | [our census](evidence/solgov_census.py), snapshot 26 Sep 2026, spot-checked on-chain |
-| In 183 DeFi hacks, **1 of 87** protocols with a pause used it within the first hour; **44%** of attacks were a single transaction | Zhou et al., IEEE S&P 2023 |
-| Since 15 Sep 2026, one Solana transaction can be **4,096 bytes** (was 1,232) | SIMD-0296 |
+| **37 of 54** | Multisigs governing tracked Solana protocols with **no timelock**. The longest anywhere is 24 hours, and 16 of 43 have changed theirs. |
+| **1 of 87** | Hacked protocols with an emergency pause that used it within the first hour. |
+| **44%** | Of 183 DeFi attacks were a single transaction, over before anyone could react. |
+| **4,096 bytes** | What one Solana transaction can carry since 15 Sep 2026 (was 1,232), so more fits into a single attack. |
 
-Timelocks are settings, not floors. Stop buttons act after the transaction that did the damage. Only a limit enforced inside every payout bounds an atomic attack.
+<sub>Sources: our on-chain [governance census](evidence/solgov_census.py) (snapshot 26 Sep 2026, spot-checked on-chain); Zhou et al., IEEE S&P 2023; SIMD-0296.</sub>
+
+Timelocks are settings, so an admin can change them. Stop buttons act after the transaction that did the damage. Only a limit enforced inside every payout bounds an attack that happens in one transaction.
 
 **On Solana, the one control an admin or upgrade key can't get around is ownership of the token account. Bulkhead becomes that owner.**
 
@@ -95,8 +108,6 @@ flowchart LR
 
 **Who the guardians are.** When a protocol registers, it names 3–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and a security firm. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly (the threshold is always below the number of guardians, so the others can always reach one), so a stolen guardian key means denial of service until then, never theft.
 
-**Who pays.** The core is free and open source. Protocols pay for Bulkhead Cloud: a hosted guardian, limit calibration on their own flows, and an attestation feed. They pay because the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised, and the program publishes it (`attest`): "at most $X now, $Y in the next hour, $Z in a day" through the unbacked lane, with absolute caps set. It excludes oracle risk on backed loans. A patient attacker who paces payouts under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2).
-
 <details>
 <summary><b>Why not just an abort binary?</b></summary>
 
@@ -110,6 +121,27 @@ Dean Little's `sbpf-asm-abort` showed that a program can be stopped by upgrading
 Floor separates stopping from upgrading. Any guardian stops, new code waits 72h, and a quorum restores the stopped code, verified byte-identical. No stop button, bare or Floor's, reaches inside a transaction, and none bounds a drain through admin instructions. That is Vault's job. Details: [`06 §2`](docs/06-FLOOR.md#2-floor-versus-a-bare-abort-binary). More questions: [FAQ](docs/FAQ.md).
 
 </details>
+
+## Business model
+
+**The core is free and open source. Protocols pay for Bulkhead Cloud**, the operations that keep the worst case small: a hosted guardian, limit calibration on their own flows, and an attestation feed.
+
+**Why they pay:** the capital under the admin asks for it. Depositors, curators and allocators want a worst case that is enforced, not promised. The program publishes it on-chain (`attest`):
+
+> *"At most $X now, $Y in the next hour, $Z in a day."*
+
+<sub>That figure covers the unbacked lane, with absolute caps set. It excludes oracle risk on backed loans. A patient attacker who paces payouts under the bot's thresholds is bounded by the on-chain limits, not by the bot ([15](docs/15-ADVERSARIAL-REVIEW.md) A2).</sub>
+
+| Tier | Includes | Price |
+|---|---|---|
+| **Core** | Vault and Floor programs, client, self-hosted guardian, status page, `floor_check` CLI | Free, Apache-2.0 |
+| **Cloud Starter** | Hosted status page, alerts, community guardian | Free under $10M TVL |
+| **Cloud Pro** | Hosted guardian (freezes within 2 minutes, 24/7), 90-day calibration report, attestation API, STRIDE evidence pack | $2,500 / month |
+| **Cloud Enterprise** | Guardian operations with a named security partner, SLAs, incident drills, custom rules | $10,000+ / month |
+
+<sub>Prices are a working hypothesis, to be tested with the first ten conversations. No on-chain fee (a fee in the enforcement path is attack surface) and no token (nothing needs one).</sub>
+
+**The market** (measured 26–27 Sep 2026): Solana DeFi holds **$6.64B**, and **28** Solana protocols above $10M fit Vault today. Floor is the free way in, for every upgradeable program: **179 of 181** upgradeable programs of tracked protocols are not yet on sBPF v3, the SIMD-0500 readiness that `floor_check` reports for free. Full plan: [11 Business](docs/11-BUSINESS.md).
 
 ## What it does to an attack
 
@@ -179,6 +211,22 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 ### What the checks show
 
+Every rule is written three independent times (Rust, Python and property tests), so a bug in one shows up as a disagreement with the others.
+
+| In plain words | Result |
+|---|---|
+| The on-chain programs pass every scenario and attack test on the real Solana runtime | **123 of 123** pass |
+| A math checker proves the core rules for every input in range | **15 of 15** proofs verified |
+| Two independent versions of the math, Rust and Python, agree | **6,943,561** lines identical |
+| We planted 669 deliberate bugs; the tests must catch them | **every one that changes behavior** caught |
+| Random actions on-chain match what the math predicts | **512,000** steps, all equal |
+| Problems we found in our own work, and published | **104**, each fixed or stated |
+
+<details>
+<summary><b>Every check, in full</b></summary>
+
+<br>
+
 | Check | Result (latest run of each) |
 |---|---|
 | Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **123/123**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
@@ -192,6 +240,8 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | End to end | [Above](#what-it-does-to-an-attack) |
 | On devnet | All three programs run this tree's build (PR #85, 15 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
 | What this process found in our own code and docs | **104 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–104 were found after the submission: 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+
+</details>
 
 ## Live on devnet
 
@@ -224,17 +274,17 @@ Every signature: [`08`](docs/08-SCENARIOS.md#devnet-signatures).
 
 ## Guarantees
 
-| | Guarantee |
-|---|---|
-| G1 | Unbacked outflow ≤ `min(C_s(W_s+T)/W_s, C_l(W_l+T)/W_l)` within any `T`, even with admin and upgrade keys stolen ([proof](docs/03-MECHANISM.md#25-proof-of-g1)). For a vault with absolute caps set: without them, capital parked in the vault first widens the base (A1b) |
-| G2 | An owner who owes nothing is never throttled, frozen or priced taking back their own deposit. (Whether the tokens are in the pool is the pool's liquidity; [`03 §4.6`](docs/03-MECHANISM.md#46-guarantees-of-the-ledger).) |
-| G3 | Backed payouts never leave an owner's ledger unsound at conservative prices |
-| G4 | Tighten instantly; loosen only after ≥ 72h, public, vetoable |
-| G5 | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one, in any set larger than its threshold (run at least `threshold + 2`; [finding 96](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). |
-| G6 | Emergency moves go only into a Bulkhead-held lifeboat. Exits wait 72h, and go only to a destination committed 72h earlier. |
-| G7 | Missing, stale or wide prices, unknown assets and overflow only ever reduce what is backed |
-| G8 | (Floor) A new binary deploys only after ≥ 72h without veto. While the program is stopped, a live quorum's approval of that exact frozen buffer can deploy it sooner. Any live guardian stops the program instantly; a live quorum restores the snapshot, verified byte-identical to the stopped code. |
-| G9 | Bulkhead's and Floor's own upgrade authorities are burned after audit (on devnet: a team key, disclosed) |
+| | In plain words | Exactly |
+|---|---|---|
+| G1 | **Money can only leave slowly** | Unbacked outflow ≤ `min(C_s(W_s+T)/W_s, C_l(W_l+T)/W_l)` within any `T`, even with admin and upgrade keys stolen ([proof](docs/03-MECHANISM.md#25-proof-of-g1)). For a vault with absolute caps set: without them, capital parked in the vault first widens the base (A1b) |
+| G2 | **Your own deposit always comes back** | An owner who owes nothing is never throttled, frozen or priced taking back their own deposit. (Whether the tokens are in the pool is the pool's liquidity; [`03 §4.6`](docs/03-MECHANISM.md#46-guarantees-of-the-ledger).) |
+| G3 | **Backed payouts stay sound** | Backed payouts never leave an owner's ledger unsound at conservative prices |
+| G4 | **Tighten fast, loosen slow** | Tighten instantly; loosen only after ≥ 72h, public, vetoable |
+| G5 | **Guardians stop, never steal** | Guardians can stop, never steal. Only live (heart-beating) guardians act. Unfreezing needs a live quorum. A live quorum of the other guardians can eject a rogue one, in any set larger than its threshold (run at least `threshold + 2`; [finding 96](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). |
+| G6 | **Emergency moves go to a lifeboat** | Emergency moves go only into a Bulkhead-held lifeboat. Exits wait 72h, and go only to a destination committed 72h earlier. |
+| G7 | **Bad prices only make it stricter** | Missing, stale or wide prices, unknown assets and overflow only ever reduce what is backed |
+| G8 | **New code waits; stops are instant** | (Floor) A new binary deploys only after ≥ 72h without veto. While the program is stopped, a live quorum's approval of that exact frozen buffer can deploy it sooner. Any live guardian stops the program instantly; a live quorum restores the snapshot, verified byte-identical to the stopped code. |
+| G9 | **After audit, nobody can change Bulkhead** | Bulkhead's and Floor's own upgrade authorities are burned after audit (on devnet: a team key, disclosed) |
 
 ## Repository
 
