@@ -148,6 +148,8 @@ test("the line for a sent or failed action says what it acts on", () => {
   assert.ok(sent(cancel(1, "M1"), 0));
   assert.equal(sent(cancel(2, "M2"), 1_000), null);
   assert.deepEqual(actionLine(change(4), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 4 });
+  // An id of 0 is kept: change ids start at 0 (see the next test).
+  assert.deepEqual(actionLine(change(0n), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 0n });
 });
 
 test("an alert names what it is about when its text does not", () => {
@@ -169,6 +171,13 @@ test("an alert names what it is about when its text does not", () => {
   assert.equal(detail(actionLine(exit, { reason: exit.reason, signature: "S" })), `lifeboat exit of 5 is not pre-approved | mint ${M} | tx S`);
   assert.equal(detail({ action: "execute", what: "change 5", signature: "S" }), "change 5 | tx S");
   assert.equal(detail({ level: "error", msg: "this key is no longer a live guardian", target: "vault" }), "this key is no longer a live guardian | on vault");
+  // Change and ticket ids start at 0 (next_change_id and next_ticket_id
+  // in programs/vault/src/genesis.rs), and the guardian reads them as
+  // BigInt: a protocol's first loosening is change 0n, its first queued
+  // payout ticket 0n. Each is named.
+  assert.equal(detail({ level: "error", msg: "could not be read", changeId: 0n }), "could not be read | change 0");
+  const firstTicket = { type: "cancel", ticketId: 0n, address: "A", mint: M, vault: "V", reason: "incident: ticket to O" };
+  assert.equal(detail(actionLine(firstTicket, { reason: firstTicket.reason, ticketId: firstTicket.ticketId, signature: "S" })), "incident: ticket to O | ticket 0 | tx S");
   // Named once: not again when the reason, the text or a part before it
   // already says it, as a whole word, in any case; a key only exactly.
   assert.equal(detail({ action: "floor_veto", reason: `floor ${P} proposal 7 is still pending`, program: P, proposalId: 7, signature: "S" }), `floor ${P} proposal 7 is still pending | tx S`);
