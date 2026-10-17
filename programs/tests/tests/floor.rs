@@ -1909,6 +1909,78 @@ fn a_stop_names_its_own_program_sysvars_and_authority() {
     assert_eq!(env.call(&q.f.program).map(|_| ()), Ok(()), "the other program still runs");
 }
 
+/// A snapshot restore and an upgrade name their own programdata, program and
+/// Floor authority, and a close and a release their own Floor authority, as a
+/// stop does, each refused with Floor's code. Without these checks the loader
+/// would still refuse the CPI, with no code saying which account was wrong
+/// (the sweep sees only that it fails).
+#[test]
+fn each_loader_call_names_its_own_program_and_authority() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let (f, gs) = (&p.f, p.guardians());
+    let owner = p.owner.pubkey();
+    // Each account at `at` replaced on its own by the other program's, which
+    // passes every other check.
+    let refused = |env: &mut Env, ix: &solana_instruction::Instruction, swaps: &[(usize, solana_address::Address, u32)], signers: &[&Keypair]| {
+        for &(at, other, code) in swaps {
+            let mut wrong = ix.clone();
+            wrong.accounts[at].pubkey = other;
+            let e = match env.send(&[wrong], signers) {
+                Ok(m) => panic!("account {at} accepted:\n{}", m.logs.join("\n")),
+                Err(e) => e,
+            };
+            assert_eq!(custom_code(&e), Some(code), "account {at}: {:?}\n{}", e.err, e.meta.logs.join("\n"));
+        }
+    };
+    // Accounts 1 programdata, 2 program, 7 authority.
+    let upgrade_swaps = [
+        (1, q.f.programdata, err::PROGRAM_MISMATCH),
+        (2, q.f.program, err::PROGRAM_MISMATCH),
+        (7, q.f.authority, err::WRONG_AUTHORITY_ADDRESS),
+    ];
+
+    // The quorum's restore of the snapshot after a stop.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    let restore = f.restore_snapshot(&p.snapshot, &owner, &gs[0..2]);
+    refused(&mut env, &restore, &upgrade_swaps, &[&p.g[0], &p.g[1]]);
+    env.ok(&[restore], &[&p.g[0], &p.g[1]]);
+    env.next_slot();
+
+    // A close of a cancelled proposal's buffer (authority is account 3; its
+    // programdata is checked in `each_instruction_names_its_own_accounts_and_state`).
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    env.ok(&[f.cancel(&owner)], &[&p.owner]);
+    let close = f.close_buffer(&owner, &v2);
+    refused(&mut env, &close, &[(3, q.f.authority, err::WRONG_AUTHORITY_ADDRESS)], &[&p.owner]);
+    env.ok(&[close], &[&p.owner]);
+
+    // An upgrade once its delay is over.
+    let v3 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v3, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, UPGRADE, &v3, &[], Some(&v3))], &[&p.owner]);
+    env.advance(3 * DAY);
+    let upgrade = f.execute_code(&v3, &owner);
+    refused(&mut env, &upgrade, &upgrade_swaps, &[]);
+    env.ok(&[upgrade], &[]);
+    env.next_slot();
+
+    // A release (authority is account 2; its programdata is checked in
+    // `a_proposal_has_a_known_kind_and_a_release_its_own_programdata`).
+    let new_key = Keypair::new();
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &new_key.pubkey(), &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    let release = f.execute_release(&owner, Some(&new_key.pubkey()), &[]);
+    refused(&mut env, &release, &[(2, q.f.authority, err::WRONG_AUTHORITY_ADDRESS)], &[&new_key]);
+    env.ok(&[release], &[&new_key]);
+    assert_eq!(env.upgrade_authority(&f.programdata), Some(new_key.pubkey().to_bytes()));
+    assert_eq!(env.upgrade_authority(&q.f.programdata), Some(q.f.authority.to_bytes()));
+}
+
 /// A quorum restore needs a stop, and a stop needs a staged abort buffer,
 /// each refused with its own code. Without the first, a restore while live
 /// is still refused (no snapshot is valid while live). Without the second, a
