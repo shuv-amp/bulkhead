@@ -427,6 +427,34 @@ export function floorCheck(reported, program, fl) {
 }
 
 /**
+ * Check each watched Floor program: its guardian set (`checkSet`) and its
+ * readiness (floorCheck, logged through `log`). `programs` is `[program,
+ * read]` pairs, where `read()` resolves to the decoded config or null. One
+ * program whose read or decode fails no longer skips the programs after it:
+ * the others are checked, and then this throws, naming each that failed, so
+ * a failure that lasts raises the stall alert. A plain loop used to stop at
+ * the first failure, and the programs after it went unchecked until it
+ * recovered. The reads run together, so an RPC outage costs one timeout,
+ * not one per program. A failed read leaves what was last said about its
+ * program, so a flaky RPC does not say it again after each failure.
+ */
+export async function checkFloors(programs, reported, checkSet, log) {
+  const reads = await Promise.allSettled(programs.map(async ([, read]) => read()));
+  const failed = [];
+  reads.forEach((r, i) => {
+    const program = programs[i][0];
+    if (r.status === "rejected") {
+      failed.push(`${program}: ${r.reason?.message ?? r.reason}`);
+      return;
+    }
+    if (r.value) checkSet(program, r.value);
+    const line = floorCheck(reported, program, r.value);
+    if (line) log(line);
+  });
+  if (failed.length) throw new Error(failed.join("; "));
+}
+
+/**
  * What to log about a guardian set against finding 107's margin, once per set
  * shape, or null. `which` is "protocol" for the Vault protocol's set, or the
  * program a Floor config protects; `shapes` remembers each set's last shape.
