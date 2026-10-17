@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { newState } from "../guardian/policy.mjs";
+import { newState, GENESIS } from "../guardian/policy.mjs";
 import { stateJson, restoreState, writeStateFile } from "../guardian/statefile.mjs";
 import { followAccount, followConfigs, startSlot } from "../guardian/follow.mjs";
 import { stallWatch, scanAll, alertFor } from "../guardian/alert.mjs";
@@ -362,5 +362,127 @@ test("a guardian whose key file is refused alerts the webhook before it exits (f
     assert.match(alert.detail, /guardian stopped: .*open to group or others/);
   } finally {
     server.close();
+  }
+});
+
+// A JSON-RPC server answering each method from `answers` (null otherwise).
+async function fakeRpc(answers) {
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => { b += c; });
+    req.on("end", () => {
+      const { id, method } = JSON.parse(b);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result: answers[method] ?? null }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { server, url: `http://127.0.0.1:${server.address().port}` };
+}
+
+// Starts the guardian on `rpc` and `rpcs` for cluster devnet; resolves with
+// its exit code and output once it exits, or once `until` matches its output
+// (then it is killed, code null).
+async function startGuardian(rpc, rpcs, until) {
+  const dir = mkdtempSync(`${tmpdir()}/bh-cluster-`);
+  const keyPath = `${dir}/guardian.json`;
+  Keypair.generate().save(keyPath);
+  const cfgPath = `${dir}/g.json`;
+  writeFileSync(cfgPath, JSON.stringify({
+    rpc, rpcs, cluster: "devnet", vaultProgram: "11111111111111111111111111111111", protocolProgram: "11111111111111111111111111111111",
+    mints: [], guardianKey: keyPath, stateFile: `${dir}/state.json`,
+  }));
+  const main = fileURLToPath(new URL("../guardian/main.mjs", import.meta.url));
+  const child = spawn(process.execPath, [main, cfgPath], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  const timer = setTimeout(() => child.kill(), 20_000);
+  for (const s of [child.stdout, child.stderr]) s.on("data", (c) => { out += c; if (until?.test(out)) child.kill(); });
+  const code = await new Promise((r) => child.on("exit", r));
+  clearTimeout(timer);
+  return { code, out };
+}
+
+test("a guardian whose backup endpoint serves another cluster refuses to start (finding 114)", async () => {
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.devnet });
+  const backup = await fakeRpc({ getGenesisHash: GENESIS.testnet });
+  try {
+    // The old check asked the active endpoint alone, passed, and went on.
+    const { code, out } = await startGuardian(primary.url, [backup.url]);
+    assert.equal(code, 1, out);
+    const host = new URL(backup.url).host.replaceAll(".", "\\.");
+    assert.match(out, new RegExp(`guardian stopped: config.cluster is devnet, but RPC endpoint ${host} \\(rpcs\\[0\\]\\) serves another cluster \\(genesis ${GENESIS.testnet}\\)`));
+  } finally {
+    primary.server.close();
+    backup.server.close();
+  }
+});
+
+test("a guardian whose backup endpoint does not answer starts, and says its cluster is unchecked (finding 114)", async () => {
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.devnet });
+  try {
+    // Killed at a later startup step: it went on past the check.
+    const { code, out } = await startGuardian(primary.url, ["http://127.0.0.1:9"], /no record of executed changes yet/);
+    assert.equal(code, null, out);
+    assert.match(out, /RPC endpoint 127\.0\.0\.1:9 \(rpcs\[0\]\): getGenesisHash: fetch failed \(.+\): no answer to getGenesisHash, so not used until it answers on devnet/);
+    assert.doesNotMatch(out, /guardian stopped/);
+  } finally {
+    primary.server.close();
+  }
+});
+
+// As before finding 114's change: with no endpoint answering, the start is refused.
+test("a guardian none of whose endpoints answers the cluster check refuses to start (finding 114)", async () => {
+  const { code, out } = await startGuardian("http://127.0.0.1:9", ["http://127.0.0.1:7"]);
+  assert.equal(code, 1, out);
+  assert.match(out, /guardian stopped: getGenesisHash: /);
+});
+
+test("a guardian whose primary is on another cluster says so, even with its backup down (finding 114)", async () => {
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.testnet });
+  try {
+    const { code, out } = await startGuardian(primary.url, ["http://127.0.0.1:9"]);
+    assert.equal(code, 1, out);
+    const host = new URL(primary.url).host.replaceAll(".", "\\.");
+    assert.match(out, new RegExp(`guardian stopped: config.cluster is devnet, but RPC endpoint ${host} \\(rpc\\) serves another cluster \\(genesis ${GENESIS.testnet}\\)`));
+  } finally {
+    primary.server.close();
+  }
+});
+
+test("a guardian whose primary does not answer at start moves to the checked backup at once (finding 114)", async () => {
+  const backup = await fakeRpc({ getGenesisHash: GENESIS.devnet });
+  const silent = createServer(() => {}); // takes the request, never answers
+  await new Promise((r) => silent.listen(0, "127.0.0.1", r));
+  try {
+    // Without the move, the first read waits out the primary's 10 s timeout.
+    const t0 = Date.now();
+    const primary = `http://127.0.0.1:${silent.address().port}`;
+    const { code, out } = await startGuardian(primary, [backup.url], /no record of executed changes yet/);
+    assert.equal(code, null, out);
+    assert.ok(Date.now() - t0 < 8_000, `took ${Date.now() - t0} ms`);
+    const [from, to] = [new URL(primary).host, new URL(backup.url).host].map((h) => h.replaceAll(".", "\\."));
+    assert.match(out, new RegExp(`RPC endpoint ${from} is failing; now using ${to}`));
+    assert.match(out, new RegExp(`RPC endpoint ${from} \\(rpc\\): no answer within 2 s`));
+  } finally {
+    backup.server.close();
+    silent.closeAllConnections();
+    silent.close();
+  }
+});
+
+test("a backup that never answers holds the start up for the grace, not its timeout (finding 114)", async () => {
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.devnet });
+  const silent = createServer(() => {}); // takes the request, never answers
+  await new Promise((r) => silent.listen(0, "127.0.0.1", r));
+  try {
+    const t0 = Date.now();
+    const { code, out } = await startGuardian(primary.url, [`http://127.0.0.1:${silent.address().port}`], /did not answer|no answer to getGenesisHash/);
+    assert.equal(code, null, out);
+    assert.match(out, /\(rpcs\[0\]\): no answer within 2 s: no answer to getGenesisHash/);
+    assert.ok(Date.now() - t0 < 8_000, `took ${Date.now() - t0} ms`);
+  } finally {
+    primary.server.close();
+    silent.closeAllConnections();
+    silent.close();
   }
 });

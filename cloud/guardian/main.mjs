@@ -28,8 +28,8 @@
 // cross-checked for a primary that answers but is stale (FailoverRpc.crossCheck).
 //
 // Production (docs/07 §6; docs/09, finding 83): `cluster` ("mainnet-beta",
-// "devnet", "testnet" or "localnet") is checked against the RPC's genesis
-// hash, and "mainnet-beta" requires `rpcs` and `alert`. `liveness`
+// "devnet", "testnet" or "localnet") is checked against each RPC endpoint's
+// genesis hash, and "mainnet-beta" requires `rpcs` and `alert`. `liveness`
 // ({ url, everyS: 60 }) is pinged every pass's minute: a dead-man's switch
 // for when this process or its host dies. `minBalanceSol` (default 0.05):
 // below it, an urgent alert. `startupMaxSignatures` (default 50,000): the
@@ -129,9 +129,21 @@ const policy = await must(() => checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy 
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
 // only in the log: RPC URLs often carry an API key.
 const hostOf = (url) => { try { return new URL(url).host; } catch { return "(endpoint)"; } };
+// With `cluster`, a backup is used only once its genesis hash matches (finding 114).
+const rpcUrls = [cfg.rpc, ...(cfg.rpcs ?? [])];
+const endpointName = (i) => `${hostOf(rpcUrls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
+const genesisSeen = []; // by endpoint: the genesis hash it gave
+let clusterChecked = false; // the start's check is over: later news is logged
 const rpc = cfg.rpcs?.length
-  ? new FailoverRpc([cfg.rpc, ...cfg.rpcs], {
+  ? new FailoverRpc(rpcUrls, {
     onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, cause: e?.message?.slice(0, 160) }),
+    genesis: GENESIS[cfg.cluster] ?? null,
+    onCluster: (url, got, at) => {
+      genesisSeen[at] = got;
+      if (!clusterChecked) return;
+      if (got !== GENESIS[cfg.cluster]) log({ level: "error", msg: `RPC endpoint ${endpointName(at)} serves another cluster than ${cfg.cluster} (genesis ${got}): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config` });
+      else log({ msg: `RPC endpoint ${endpointName(at)} answers on ${cfg.cluster}: it may be used from now on` });
+    },
   })
   : new Rpc(cfg.rpc);
 // Extra endpoints every guardian transaction is also sent to (optional).
@@ -252,6 +264,8 @@ let lastFloorCheck = 0;
 const ingestBudgetMs = cfg.ingestBudgetMs ?? 3_000;
 const lagAlertS = cfg.lagAlertS ?? 60;
 const freshnessEveryMs = (cfg.freshnessCheckS ?? 60) * 1000;
+/** At start, how long the other endpoints may take to answer the cluster check once one has (finding 114). */
+const CLUSTER_GRACE_MS = 2_000;
 let nextChangeScanAt = 0;
 let sweptFreezeUntil = 0;
 
@@ -1301,12 +1315,35 @@ function rebuildIncident() {
 /**
  * A config naming its cluster is checked against the node's genesis hash: a
  * mainnet guardian pointed at a devnet RPC (or the reverse) watched nothing
- * real and looked healthy (docs/09, finding 83).
+ * real and looked healthy (docs/09, finding 83). Every endpoint is asked, not
+ * only the one that answers first (finding 114). One found on another
+ * cluster refuses the start. One that does not answer in time is used only
+ * once it answers on the right cluster (FailoverRpc asks it before its first
+ * use and before each freshness check), and if it answers from another
+ * cluster later, that is logged.
  */
 async function checkCluster() {
   if (!cfg.cluster || cfg.cluster === "localnet") return;
-  const got = await rpc.call("getGenesisHash", []);
-  if (got !== GENESIS[cfg.cluster]) throw new Error(`config.cluster is ${cfg.cluster}, but the RPC serves another cluster (genesis ${got})`);
+  if (!(rpc instanceof FailoverRpc)) {
+    const got = await rpc.call("getGenesisHash", []);
+    if (got !== GENESIS[cfg.cluster]) throw new Error(`config.cluster is ${cfg.cluster}, but the RPC serves another cluster (genesis ${got})`);
+    return;
+  }
+  const causes = [];
+  const asks = rpc.endpoints.map((_, i) => rpc.admit(i).catch((e) => { causes[i] = e.message; }));
+  // Once one endpoint is on the right cluster, the rest get CLUSTER_GRACE_MS:
+  // a silent backup does not hold up a restart by its timeout.
+  const anyOk = Promise.any(asks.map((p, i) => p.then(() => (rpc.cluster[i] === "ok" ? true : Promise.reject()))));
+  await Promise.race([Promise.all(asks), anyOk.then(() => new Promise((r) => setTimeout(r, CLUSTER_GRACE_MS)), () => Promise.all(asks))]);
+  // None answered: ask once more as any call does (a busy endpoint's wait is
+  // waited out once); its error stops the start.
+  if (!rpc.cluster.includes("ok") && !rpc.cluster.includes("wrong")) await rpc.call("getGenesisHash", []);
+  const wrong = rpcUrls.flatMap((_, i) => (rpc.cluster[i] === "wrong" ? [`${endpointName(i)} serves another cluster (genesis ${genesisSeen[i]})`] : []));
+  if (wrong.length) throw new Error(`config.cluster is ${cfg.cluster}, but RPC endpoint ${wrong.join("; ")}`);
+  if (rpc.cluster[rpc.active] !== "ok") rpc.switchTo(rpc.cluster.indexOf("ok"), new Error("no answer to getGenesisHash at start"));
+  const silent = rpcUrls.flatMap((_, i) => (rpc.cluster[i] === "unknown" ? [`${endpointName(i)}: ${(causes[i] ?? `no answer within ${CLUSTER_GRACE_MS / 1000} s`).slice(0, 160)}`] : []));
+  if (silent.length) log({ level: "error", msg: `RPC endpoint ${silent.join("; ")}: no answer to getGenesisHash, so not used until it answers on ${cfg.cluster} (asked again before each freshness check)` });
+  clusterChecked = true;
 }
 
 /**
