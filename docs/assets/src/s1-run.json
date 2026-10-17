@@ -1,0 +1,131 @@
+{
+ "recorded": "2026-10-17",
+ "tvl": 10000000,
+ "orders": [
+  {
+   "i": 0,
+   "amount": 100000.0,
+   "instant": 100000.0,
+   "queued": 0.0,
+   "sent": 0.0,
+   "confirmed": 4.025,
+   "cancelled": null,
+   "signature": "6RRDgijLaiVNQxYxHu6X2uUVzYnyzV9Tnup3jfBmN8MSZ2mvWYKRCKKZWVWNyKc3XStA7eDpEtUX5CrdKgcVXZa"
+  },
+  {
+   "i": 1,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 4.826,
+   "confirmed": 8.026,
+   "cancelled": 7.008,
+   "signature": "3ZEJ5a9EJhQvK7nAwbWrf995hx8wQZ9WHd4rMuarreKqyrjye9kHUj9GcoweHgUKMjfVVNfaLsJu7f6S2ryjGcV7"
+  },
+  {
+   "i": 2,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 8.83,
+   "confirmed": 12.837,
+   "cancelled": 10.012,
+   "signature": "67eLPzSYVtkU22QBd78HCk4ZP8VQWqYVuLrotyNiSfqycqtUrhGGb5GkokRmCvom2UNpffNqTdnbHqxLnxS6N3Z6"
+  },
+  {
+   "i": 3,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 13.637,
+   "confirmed": 16.835,
+   "cancelled": 16.039,
+   "signature": "3xpc1eFYByuQSVHbWHC19mhzE7ovhZ6KQJ6vVESTaY74FQw4PxRt9MiaUL8i7ECQAN7kczV8KvY3LzbZF78psaN6"
+  },
+  {
+   "i": 4,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 17.637,
+   "confirmed": 21.641,
+   "cancelled": 20.054,
+   "signature": "MecA8sRYVaoBXT1RgqDhqL1pSSLMWJTRhMQsvnTYmHQTi16MDwK65GQK98VgMzvXv7BCA2J4D6gr5zcNN8Y6ydk"
+  },
+  {
+   "i": 5,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 22.443,
+   "confirmed": 25.643,
+   "cancelled": 27.068,
+   "signature": "4oomtZmW5fjkWgeUtP1xz65GtgeZ8kFEocy5WntY3uVVR5eoemgVoJ2PYeqmXErgJLq5VzDcZqpTXWECzjsCrhkH"
+  },
+  {
+   "i": 6,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 26.446,
+   "confirmed": 29.646,
+   "cancelled": 28.086,
+   "signature": "2NyW5PGhuLdkY3zNTe2dvsSqKd5LMHTLmpNZ75NFd4Sma6bAXS3oLU9d29H82edSqoig8mmAXeUyg4oJUjTB5BhF"
+  },
+  {
+   "i": 7,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 30.446,
+   "confirmed": 33.647,
+   "cancelled": 33.096,
+   "signature": "5t3b3RSL9izGjQQrGciaheCxbdPvZtZ9qy3AFZ1xaJMewa2apSRGrm8cSYXG54Yh1zUeBMX3YVxdevB9DSmGpXyS"
+  },
+  {
+   "i": 8,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 34.449,
+   "confirmed": 35.33,
+   "cancelled": 36.166,
+   "signature": "4pkAh86322aC4kqsEdCB5ijvmQDojRuuMNfqQAHHs6cMvYoa7LZa3y4DUrGKDMuRQuKeNVpkxooQvo87q6dcVqzK"
+  },
+  {
+   "i": 9,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 36.131,
+   "confirmed": 37.65,
+   "cancelled": 38.099,
+   "signature": "3ix7peJFBas6hUuzUKUj5urWj369hzLxsbCFHkxNrt1qNs6dfe6znnLiw8QnFFihkBkXKVNWzWe9vuRhUApuPSSJ"
+  },
+  {
+   "i": 10,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 38.453,
+   "confirmed": 39.336,
+   "cancelled": 40.637,
+   "signature": "4adMBfUnNQnSCbNvQD3D3DuMYyfkgK1GbXrk1KATW6LvCfsmVxUiGyjdAwSc1cV4yB4aCYdUyunyyZxfK167udBS"
+  },
+  {
+   "i": 11,
+   "amount": 100000.0,
+   "instant": 0.0,
+   "queued": 100000.0,
+   "sent": 40.134,
+   "confirmed": 42.834,
+   "cancelled": 42.649,
+   "signature": "xdouVgeWaQ2dKyCtLqE4QsFyg8piNATJgfv2jJrsEccGEgkU4KgBiTJvvvVUhpQmGeMjshk6nEFiG4tzS7ws63r"
+  }
+ ],
+ "freeze": {
+  "at": 6.004,
+  "signature": "2TsAGRQnGjFsw4gnFLExKAvKRpcv8p8T2gsYnNnA4uZmjnHY6JZ6sW2Rj9YMP1RsSWgLpbo8bJSxZHnpKCve6kcN",
+  "reason": "unbacked outflow to non-allowlisted owners in the last hour: 200000000000 \u2265 200000000000 (0.5 \u00d7 worst_1h)"
+ }
+}
