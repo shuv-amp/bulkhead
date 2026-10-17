@@ -31,6 +31,7 @@ pub mod verr {
     pub const NO_QUORUM: u32 = 8007;
     pub const INVALID_GUARDIANS: u32 = 8023;
     pub const WRONG_CALLER: u32 = 8009;
+    pub const WRONG_MINT: u32 = 8011;
     pub const EXTENSION_NOT_ALLOWED: u32 = 8013;
     pub const RECIPIENT_OWNER_MISMATCH: u32 = 8014;
     pub const BAD_PRICE_ACCOUNT: u32 = 8015;
@@ -580,8 +581,8 @@ impl Market {
         self.vault_ix(13, &[scope_vault.is_some() as u8], a)
     }
 
-    pub fn attest(&self, env: &mut Env, v: &VaultRef) -> Attestation {
-        let ix = self.vault_ix(
+    pub fn attest_ix(&self, v: &VaultRef) -> Instruction {
+        self.vault_ix(
             22,
             &[],
             vec![
@@ -589,7 +590,24 @@ impl Market {
                 AccountMeta::new_readonly(v.vault, false),
                 AccountMeta::new_readonly(v.vault_tokens, false),
             ],
+        )
+    }
+
+    /// quote_release: the caller, then the release's accounts, all read-only
+    /// and none marked signing (no writes, no signer). The payer slot is the
+    /// fee payer, which the runtime still makes a writable signer.
+    pub fn quote_ix(&self, env: &Env, v: &VaultRef, recipient: &Address, owner: &Address, amount: u64, prices: &[(Address, Address)]) -> Instruction {
+        let mut a = vec![AccountMeta::new_readonly(self.caller, false)];
+        a.extend(
+            self.release_accounts(env, v, recipient, owner, prices)
+                .into_iter()
+                .map(|m| AccountMeta::new_readonly(m.pubkey, false)),
         );
+        self.vault_ix(23, &amount.to_le_bytes(), a)
+    }
+
+    pub fn attest(&self, env: &mut Env, v: &VaultRef) -> Attestation {
+        let ix = self.attest_ix(v);
         let m = env.ok(&[ix], &[]);
         let d = m.return_data.data;
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());

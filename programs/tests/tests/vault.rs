@@ -1327,6 +1327,9 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
     assert_eq!(w.env.balance(&stray), 0);
+    // A quote refuses what its release refuses, so it never promises a payout.
+    let q = w.m.quote_ix(&w.env, &w.usdc, &stray, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote");
     // The vault token account is one of them: a payout to it would debit the
     // ledger while the tokens stay. Its address check (custody.rs) refuses it
     // first, and the owner check behind it would too, so this case cannot tell
@@ -1334,6 +1337,39 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     let own = w.usdc.vault_tokens;
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &own, &vault, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "the vault's own account");
+    let q = w.m.quote_ix(&w.env, &w.usdc, &own, &vault, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: the vault's own account");
+    // What pins the address check alone: the vault token account with another
+    // owner written into it. No instruction can do that (only the vault PDA
+    // could sign the change), so the test writes the account directly. The
+    // owner check then passes, and only the address check refuses.
+    let mut forged = w.env.svm.get_account(&own).unwrap();
+    forged.data[32..64].copy_from_slice(whale.pubkey().as_ref());
+    w.env.svm.set_account(own, forged).unwrap();
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &own, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "re-owned vault account");
+    let q = w.m.quote_ix(&w.env, &w.usdc, &own, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: re-owned vault account");
+}
+
+/// A payout goes only to an account of the vault's mint, for a release and
+/// its quote alike. The owner's USDC account is quoted first, as a control:
+/// the same call to the owner's SOL account is refused by the mint check
+/// alone. Without it the release fails later in the token program, with its
+/// own error, and the quote succeeds.
+#[test]
+fn a_release_and_its_quote_refuse_another_mints_account() {
+    let mut w = World::new();
+    let whale = w.user();
+    let usdc_acc = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let q = w.m.quote_ix(&w.env, &w.usdc, &usdc_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(outcome(&w.env.ok(&[q], &[])).backed, 1_000 * USDC, "control: the owner's USDC account");
+    let sol_acc = w.account("sol", &whale.pubkey());
+    let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &sol_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::WRONG_MINT, "release");
+    let q = w.m.quote_ix(&w.env, &w.usdc, &sol_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::WRONG_MINT, "quote");
 }
 
 #[test]
@@ -1360,9 +1396,7 @@ fn a_quote_cannot_promise_more_than_the_vault_holds() {
     assert_eq!(w.env.balance(&w.usdc.vault_tokens), 100_000 * USDC);
 
     let too_much = 1_000_000 * USDC;
-    let mut quote_accounts = vec![AccountMeta::new_readonly(w.m.caller, false)];
-    quote_accounts.extend(w.m.release_accounts(&w.env, &w.usdc, &to, &whale.pubkey(), &w.usdc_prices(true)));
-    let quote = w.m.vault_ix(23, &too_much.to_le_bytes(), quote_accounts);
+    let quote = w.m.quote_ix(&w.env, &w.usdc, &to, &whale.pubkey(), too_much, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[quote], &[]), verr::INSUFFICIENT_BALANCE);
     let pay = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &to, too_much, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&whale]), verr::INSUFFICIENT_BALANCE);
@@ -1551,15 +1585,7 @@ fn compute_units_are_within_the_spec_targets() {
     w.env.advance(eta - w.env.time);
     let ix = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
     let settle = w.env.ok(&[ix], &[]).compute_units_consumed;
-    let attest_ix = w.m.vault_ix(
-        22,
-        &[],
-        vec![
-            AccountMeta::new_readonly(w.m.protocol, false),
-            AccountMeta::new_readonly(w.usdc.vault, false),
-            AccountMeta::new_readonly(w.usdc.vault_tokens, false),
-        ],
-    );
+    let attest_ix = w.m.attest_ix(&w.usdc);
     let attest = w.env.ok(&[attest_ix], &[]).compute_units_consumed;
     println!("CU  deposit (new ledger) {first_deposit}  deposit {deposit}  release G2 {g2}  release priced {priced}  release to ticket {}  settle {settle}  attest {attest}", ticketed.compute_units_consumed);
     assert!(deposit <= 25_000 + 12_000, "deposit incl. Harbor CPI");
@@ -2452,6 +2478,19 @@ fn every_account_substitution_is_refused() {
         w.m.settle_ix(&w.usdc, &t2, &payee_acc, &w.env.payer.pubkey());
     s.run(&mut w.env, "settle ticket", ix, &[], &[]);
 
+    // --- views: attest, quote ------------------------------------------------
+    s.run(&mut w.env, "attest", w.m.attest_ix(&w.usdc), &[], &[]);
+    let ix = w.m.quote_ix(&w.env, &w.usdc, &whale_acc, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    // A quote has the release's Vault accounts, behind the caller alone
+    // instead of Harbor's H slots, and returns before any ticket.
+    let q = |at: usize| at - H + 1;
+    let mut free = vec![
+        any(0, "caller: checked only for a real release"),
+        any(q(H + 7), "payer: a quote never creates a ticket"),
+    ];
+    free.extend(unqueued.iter().map(|a| any(q(a.at), a.why)));
+    s.run(&mut w.env, "quote release", ix, &[], &free);
+
     // --- brakes -------------------------------------------------------------
     let ix = w.m.freeze_ix(&g0, Some(&w.usdc), 60);
     s.run(
@@ -2507,6 +2546,18 @@ fn every_account_substitution_is_refused() {
         &[],
         &[
             any(1, "the vault slot is unused for the protocol scope"),
+            role(2, guardians.clone(), "any quorum"),
+            role(3, guardians.clone(), "any quorum"),
+        ],
+    );
+    let ix = w.m.unfreeze_ix(Some(&w.usdc), &[g1, g2]);
+    s.run(
+        &mut w.env,
+        "unfreeze (vault)",
+        ix,
+        &[],
+        &[
+            role(1, protocol_vaults.clone(), "any vault of this protocol"),
             role(2, guardians.clone(), "any quorum"),
             role(3, guardians.clone(), "any quorum"),
         ],
@@ -3957,6 +4008,78 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     assert_eq!(o.backed, 10_000 * USDC, "signed: a backed loan against the SOL");
 }
 
+/// A quote is its release's dry run, for a loan too: the owner's signature
+/// (finding 74), not just the owner's key, and a freeze (finding 90) decide
+/// what is backed in both.
+#[test]
+fn a_quote_gives_the_releases_outcome_for_a_loan() {
+    let mut w = World::new();
+    let lender = w.user();
+    w.deposit("usdc", &lender, 1_000_000 * USDC);
+    let holder = w.user();
+    w.deposit("sol", &holder, 700 * SOL);
+    w.seal();
+    let both = vec![(w.usdc.asset, w.usdc.price), (w.sol.asset, w.sol.price)];
+    let holder_usdc = w.account("usdc", &holder.pubkey());
+    let ask = 10_000 * USDC;
+    let signed_quote = |w: &World| {
+        let mut q = w.m.quote_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+        q.accounts.push(AccountMeta::new_readonly(holder.pubkey(), true));
+        q
+    };
+
+    // Unsigned (the admin pays the holder): not a loan.
+    let q = w.m.quote_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    let quoted = outcome(&w.env.ok(&[q], &[]));
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(quoted.backed, 0, "unsigned: not a loan");
+    assert_eq!(quoted, paid, "unsigned");
+
+    // The holder's key listed but not signing: still not a loan. Only the
+    // signature is consent, not the key being there.
+    let listed = AccountMeta::new_readonly(holder.pubkey(), false);
+    let mut q = w.m.quote_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    q.accounts.push(listed.clone());
+    let quoted = outcome(&w.env.ok(&[q], &[]));
+    let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), ask, &both);
+    ix.accounts.push(listed);
+    let paid = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(quoted.backed, 0, "listed, unsigned: not a loan");
+    assert_eq!(quoted, paid, "listed, unsigned");
+
+    // Signed by the holder: a backed loan against the SOL.
+    let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!(quoted.backed, ask, "signed: a loan");
+    assert_eq!(quoted, paid, "signed");
+
+    // Signed but this vault frozen: no loan is backed, the ask waits.
+    // Each frozen case first shows the loan is backed without its freeze.
+    let backed_now = |w: &mut World| outcome(&w.env.ok(&[signed_quote(w)], &[&holder])).backed;
+    assert_eq!(backed_now(&mut w), ask, "control: a loan before the vault freeze");
+    let g0 = w.m.g[0].pubkey();
+    w.env.ok(&[w.m.freeze_ix(&g0, Some(&w.usdc), 60)], &[&w.m.g[0]]);
+    let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!((quoted.backed, quoted.queued), (0, ask), "vault frozen: queued");
+    assert_eq!(quoted, paid, "vault frozen");
+    // Past the vault freeze, and past the 60 s price age.
+    w.env.advance(61);
+    w.refresh_prices();
+    assert_eq!(backed_now(&mut w), ask, "control: a loan before the protocol freeze");
+
+    // Signed but the protocol frozen: the same.
+    w.env.ok(&[w.m.freeze_ix(&g0, None, 86_400)], &[&w.m.g[0]]);
+    let quoted = outcome(&w.env.ok(&[signed_quote(&w)], &[&holder]));
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &holder.pubkey(), &holder_usdc, ask, &both);
+    let paid = outcome(&w.env.ok(&[ix], &[&holder]));
+    assert_eq!((quoted.backed, quoted.queued), (0, ask), "protocol frozen: queued");
+    assert_eq!(quoted, paid, "protocol frozen");
+}
+
 /// Finding 98: the caller PDA signs every release, so its signature counted
 /// as consent when it owned the ledger itself (an integrator that deposits
 /// through its caller PDA, a pooled design). A compromised protocol program
@@ -4181,6 +4304,8 @@ fn a_release_cannot_pay_an_account_the_protocol_owns() {
     let stray = w.env.token_account(&mint, &protocol, &program);
     let pay = w.m.admin_payout_ix(&w.env, &w.usdc, &stray, &protocol, 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT);
+    let q = w.m.quote_ix(&w.env, &w.usdc, &stray, &protocol, 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote");
 }
 
 /// Finding 91, stated: an exit records its proposer's key, not the admin
