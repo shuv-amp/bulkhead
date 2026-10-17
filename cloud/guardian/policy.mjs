@@ -409,6 +409,24 @@ export function floorAlerts(fl) {
 }
 
 /**
+ * What to log about a Floor program's readiness, once per change, or null.
+ * `fl` is its decoded config, or null when there is none; `reported`
+ * remembers each program's last answer. The message names the missing
+ * pieces, codes first, so they stay inside the first 60 characters that
+ * alertFor keys its repeats on. It used to be "floor not ready" alone: the
+ * alert didn't say what was missing, and a second missing piece within 10
+ * minutes of the first was muted.
+ */
+export function floorCheck(reported, program, fl) {
+  const alerts = fl ? floorAlerts(fl) : [{ code: "missing", msg: "no Floor config for this program" }];
+  const codes = alerts.map((a) => a.code).join(", ");
+  if (reported.get(program) === codes) return null;
+  reported.set(program, codes);
+  if (!alerts.length) return { msg: "floor ready", program };
+  return { level: "warn", msg: `floor not ready (${codes}): ${alerts.map((a) => a.msg).join("; ")}`, program, alerts };
+}
+
+/**
  * What to log about a guardian set against finding 107's margin, once per set
  * shape, or null. `which` is "protocol" for the Vault protocol's set, or the
  * program a Floor config protects; `shapes` remembers each set's last shape.

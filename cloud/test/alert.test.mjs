@@ -161,7 +161,7 @@ test("an alert names what it is about when its text does not", () => {
   const P = "Prog1111111111111111111111111111111111111111";
   const M = "Mint1111111111111111111111111111111111111111";
   const detail = (line) => alertFor(line, new Map(), 0).detail;
-  assert.equal(detail({ level: "warn", msg: "floor not ready", program: P, alerts: [{ code: "unarmed" }] }), `floor not ready | program ${P}`);
+  assert.equal(detail({ level: "warn", msg: "floor not ready (unarmed): no abort buffer staged", program: P, alerts: [{ code: "unarmed" }] }), `floor not ready (unarmed): no abort buffer staged | program ${P}`);
   assert.equal(detail({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short", mint: M, amount: 5 }), `the admin moved tokens into the lifeboat: depositors may be short | mint ${M}`);
   const change = { type: "veto_change", changeId: 4, reason: "loosening 4 (kind 1) is not pre-approved" };
   assert.equal(detail(actionLine(change, { signature: "S" })), "loosening 4 (kind 1) is not pre-approved | change 4 | tx S");

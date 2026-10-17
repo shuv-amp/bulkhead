@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, floorCheck, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -193,6 +193,38 @@ test("floor readiness: an unarmed stop button and an unpinned snapshot are repor
   assert.deepEqual(floorAlerts({ ...ready, abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["unarmed", "no_snapshot"]);
   // Stopped: arming is moot until it is restored; that is the one thing to say.
   assert.deepEqual(floorAlerts({ status: "aborted", abortStaged: false, snapshotPinned: false }).map((a) => a.code), ["stopped"]);
+});
+
+test("floor readiness is logged once per change, names what is missing, and each change alerts (A5)", async () => {
+  const { alertFor } = await import("../guardian/alert.mjs");
+  const [P, P2] = [PROTOCOL_ID, owner];
+  const ready = { status: "live", abortStaged: true, snapshotPinned: true };
+  const reported = new Map(), seen = new Map();
+  assert.deepEqual(floorCheck(reported, P, ready), { msg: "floor ready", program: P });
+  assert.equal(floorCheck(reported, P, ready), null, "said once");
+  const unarmed = floorCheck(reported, P, { ...ready, abortStaged: false });
+  assert.equal(unarmed.level, "warn");
+  assert.equal(unarmed.msg, "floor not ready (unarmed): no abort buffer staged: no guardian can stop the program until one is");
+  assert.deepEqual(unarmed.alerts.map((a) => a.code), ["unarmed"]);
+  assert.equal(floorCheck(reported, P, { ...ready, abortStaged: false }), null, "said once per change");
+  assert.equal(floorCheck(reported, P2, { ...ready, abortStaged: false })?.msg, unarmed.msg, "each program is remembered on its own");
+  // The alert says what is missing; it used to be "floor not ready | program P".
+  assert.equal(alertFor(unarmed, seen, 0).detail, `${unarmed.msg} | program ${P}`);
+  // A second piece missing a minute later is news: it used to be muted for
+  // 10 minutes as the same "floor not ready".
+  const both = floorCheck(reported, P, { ...ready, abortStaged: false, snapshotPinned: false });
+  assert.equal(both.msg, "floor not ready (unarmed, no_snapshot): no abort buffer staged: no guardian can stop the program until one is; no snapshot pinned: after a stop, restoring needs a new frozen buffer and a quorum");
+  assert.notEqual(alertFor(both, seen, 60_000), null);
+  const gone = floorCheck(reported, P, null);
+  assert.equal(gone.msg, "floor not ready (missing): no Floor config for this program");
+  assert.notEqual(alertFor(gone, seen, 120_000), null);
+  const stopped = floorCheck(reported, P, { status: "aborted", abortStaged: false, snapshotPinned: false });
+  assert.match(stopped.msg, /^floor not ready \(stopped\): the program is stopped: /);
+  assert.notEqual(alertFor(stopped, seen, 180_000), null);
+  // Ready again is logged, and is not an alert.
+  const back = floorCheck(reported, P, ready);
+  assert.deepEqual(back, { msg: "floor ready", program: P });
+  assert.equal(alertFor(back, seen, 240_000), null);
 });
 
 test("a guardian set without two keys beyond its threshold is warned about once per shape, alerting on mainnet only (finding 107)", async () => {
