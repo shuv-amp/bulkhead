@@ -276,6 +276,22 @@ test("failover: with no endpoint answering, the shortest Retry-After is waited o
   } finally {
     f.restore();
   }
+  // A busy primary and a backup that is free first and answers when asked
+  // again: the call moves to the backup, naming the primary's 429.
+  asked = 0;
+  f = stubFetch({ "a.invalid": busyFor(30), "b.invalid": () => (asked++ ? { result: 6 } : busyFor(3)) });
+  try {
+    const switches = [];
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], {
+      onSwitch: (from, to, err) => switches.push([from, to, err?.rpcError?.code]),
+    });
+    assert.equal(await rpc.call("getSlot"), 6);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "b.invalid", "b.invalid"]);
+    assert.equal(rpc.active, 1, "the backup that answered is now asked first");
+    assert.deepEqual(switches, [["http://a.invalid", "http://b.invalid", 429]]);
+  } finally {
+    f.restore();
+  }
 });
 
 test("failover: the one wait ends when the first busy endpoint is free, and follows only an endpoint left early", async () => {
