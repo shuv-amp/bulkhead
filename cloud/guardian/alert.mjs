@@ -113,14 +113,16 @@ function says(s, word, fold = false) {
 
 /**
  * The line the guardian logs for an action it sent or failed to send: `fields`
- * plus what the action acts on (a change, a proposal and its program, a
- * mint), which alertFor keys its repeats on. The line used to carry only the
- * reason and the ticket, so two vetoes of different loosenings, exits or
- * proposals were one kind, and the second was muted for the window. A
- * cancel's mint is left out: the cancels of one sweep are one alert.
+ * plus why it was sent (its reason) and what it acts on (a change, a
+ * proposal and its program, a mint), which alertFor keys its repeats on. The
+ * line used to carry only the reason and the ticket, so two vetoes of
+ * different loosenings, exits or proposals were one kind, and the second was
+ * muted for the window. A failed action's line had no reason at all, so
+ * "freeze failed | blockhash not found" didn't say which breach. A cancel's
+ * mint is left out: the cancels of one sweep are one alert.
  */
 export function actionLine(action, fields) {
-  const line = { action: action.type, ...fields };
+  const line = { action: action.type, ...(action.reason != null && { reason: action.reason }), ...fields };
   for (const k of ["changeId", "proposalId", "program", "mint"]) {
     if (action[k] != null && !(k === "mint" && action.type === "cancel")) line[k] = action[k];
   }
