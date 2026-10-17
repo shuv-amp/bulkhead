@@ -5,7 +5,7 @@
 // veto proposals, and (under Floor) abort. It can never move funds or choose a
 // recipient; the programs enforce that, not this file.
 
-import { b58encode, Reader, decodeChange, parseLogs } from "../lib/solana.mjs";
+import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, MAX_GUARDIANS, guardianMarginProblem } from "../lib/solana.mjs";
 
 const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -406,6 +406,41 @@ export function floorAlerts(fl) {
     alerts.push({ code: "no_snapshot", msg: "no snapshot pinned: after a stop, restoring needs a new frozen buffer and a quorum" });
   }
   return alerts;
+}
+
+/**
+ * What to log about a guardian set against finding 107's margin, once per set
+ * shape, or null. `which` is "protocol" for the Vault protocol's set, or the
+ * program a Floor config protects; `shapes` remembers each set's last shape.
+ * A set with fewer than threshold + GUARDIAN_MARGIN members can lose
+ * governance for good: with one spare key, a lost key and a rogue guardian
+ * leave no quorum to eject the rogue, whose veto stops the owner's new set
+ * (docs/16 §4.4, AUD-2). In an n-of-n set (registered before finding 96, or
+ * ejected down to its threshold) the rogue alone does that (docs/09, finding
+ * 96). A lost key alone does not, but it never approves, so the others
+ * fall short of the threshold until the owner's new set executes. A set gets
+ * short when it was registered before finding 107, or after any ejection
+ * from a set at the margin, and only the owner's new set fixes it: with more
+ * keys or a lower threshold. The advice is more keys, keeping the threshold,
+ * unless threshold + GUARDIAN_MARGIN is over MAX_GUARDIANS. On mainnet
+ * the warning and the line saying it was fixed both alert. A Floor line
+ * names its program after the shape (the alert shows only the text), so the
+ * shape stays inside the first 60 characters that alertFor keys its repeats
+ * on.
+ */
+export function guardianSetCheck(shapes, which, { guardians, threshold }, mainnet) {
+  const n = guardians.length;
+  const shape = `${threshold}/${n}`;
+  const was = shapes.get(which);
+  if (was?.shape === shape) return null;
+  const short = guardianMarginProblem(n, threshold) !== null;
+  shapes.set(which, { shape, short });
+  const [name, tag, of] = which === "protocol" ? ["the Vault protocol's guardians", {}, ""] : ["the Floor guardians", { program: which }, ` for ${which}`];
+  if (!short) return was?.short ? { notify: mainnet, ...tag, msg: `${name} are now ${threshold}-of-${n}${of}, with the margin` } : null;
+  const need = threshold + GUARDIAN_MARGIN;
+  const fix = need <= MAX_GUARDIANS ? `run at least ${threshold}-of-${need}` : `lower the threshold to at most ${MAX_GUARDIANS - GUARDIAN_MARGIN}-of-${MAX_GUARDIANS}`;
+  const faults = n > threshold ? "one lost key and one rogue guardian lock governance" : "one rogue guardian alone locks governance, and one lost key leaves no quorum until a new set executes";
+  return { level: "warn", notify: mainnet, ...tag, msg: `${name} are ${threshold}-of-${n}${of}: ${faults}; ${fix} with independent operators (docs/07 §6)` };
 }
 
 export function newState() {
