@@ -18,13 +18,15 @@ echo "== tests";    BULKHEAD_CASES="${BULKHEAD_CASES:-5000}" cargo test --releas
 echo "== golden";   python3 reference/golden.py --check
 echo "== regressions"
 for f in reference/regressions/*.txt; do python3 reference/diff_runner.py --replay "$f" >/dev/null; done
+# --replay skips blank and comment lines (indented too) exactly as both sides do.
+out=$(python3 reference/diff_runner.py --replay reference/fixtures/replay-comments.txt); grep -q " lines=2 identical" <<<"$out" || { echo "replay counted comment lines: $out"; exit 1; }
 echo "== differential (python reference vs rust core, $CASES cases x 3 seeds)"
 for seed in 11 12 13; do python3 reference/diff_runner.py --cases "$CASES" --seed "$seed"; done
-echo "== extreme values (full-range i64/i32/u128 inputs, time going backwards; python vs rust)"
+echo "== extreme values (full-range i64/i32/u128 inputs, time going backwards, limiter sessions; python vs rust)"
 for seed in 5 9 11; do python3 reference/extreme_diff.py "$seed"; done
 echo "== model";    python3 reference/drift_model.py > /dev/null
 echo "== floor_check self-test (curve25519 vectors, PDA derivation)"
 python3 tools/floor_check.py --self-test
-echo "== cloud (zero-dependency JavaScript: codecs, limiter port vs Python, guardian policy)"
+echo "== cloud (zero-dependency JavaScript: codecs, limiter port vs Python and Rust, guardian policy)"
 node --test cloud/test/*.test.mjs
 echo "ALL CHECKS PASSED"

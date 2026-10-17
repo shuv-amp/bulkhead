@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Extreme-value differential: full-range i64/i32/u32 inputs for the pure
-pricing, valuation, EMA and low-water functions, which `diff_runner.py`'s
-generator only samples in realistic ranges. Python reference vs Rust worker."""
+pricing, valuation, EMA and low-water functions, then the capacity and
+G1-bound functions and limiter sessions with full-range capacities and
+windows (diff_runner.gen_full_range*), which `diff_runner.py`'s generator
+only samples in realistic ranges. Python reference vs Rust worker."""
 import os
 import random
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import diff_runner  # noqa: E402
 import protocol  # noqa: E402
 
+diff_runner.check_worker()  # a worker older than the core compares against yesterday's Rust
+
 r = random.Random(int(sys.argv[1]) if len(sys.argv) > 1 else 5)
-I64 = (1 << 63) - 1
-U64 = (1 << 64) - 1
+I64, U64 = diff_runner.I64, diff_runner.U64
 
 
 def i64():
@@ -47,12 +49,17 @@ for _ in range(40000):
         now = r.randrange(-(1 << 50), 1 << 50)
         w = now // 1800 + r.choice([-2, -1, 0, 1, 2, 3, r.randrange(-(1 << 30), 1 << 30)])
         L.append(f"EL {u64()} {u64()} {w} {u64()} {now} {r.randrange(2)}")
+for _ in range(20000):
+    L.append(diff_runner.gen_full_range(r))
+for _ in range(300):
+    L += diff_runner.gen_full_range_session(r)
 
 exp = protocol.run_lines(L)
-act = subprocess.run([os.path.join(ROOT, "target/release/bulkhead-diff-worker")],
-                     input="\n".join(L) + "\n", capture_output=True, text=True).stdout.splitlines()
+act = diff_runner.run_worker(L)  # exits naming the first unanswered line if the worker fails
 bad = [i for i, (a, b) in enumerate(zip(exp, act)) if a != b]
 print(len(L), len(exp), len(act), "mismatches", len(bad))
 for i in bad[:8]:
     print(L[i], "| py", exp[i], "| rs", act[i])
+if bad:
+    print("replay the first (diff_runner.py --replay):", *diff_runner.fixture_for(L, bad[0]), sep="\n")
 sys.exit(1 if bad or len(exp) != len(act) else 0)

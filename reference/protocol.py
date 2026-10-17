@@ -194,12 +194,12 @@ def _key(opt) -> str:
     return "-" if opt[0] == "none" else opt[1].hex()
 
 
+def runnable(lines):
+    """The lines a session runs, as both sides read them: blank and comment
+    lines are skipped (bulkhead-diff's main.rs does the same)."""
+    return [s for s in (l.strip() for l in lines) if s and not s.startswith("#")]
+
+
 def run_lines(lines):
     s = Session()
-    out = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        out.append(s.run_line(line))
-    return out
+    return [s.run_line(line) for line in runnable(lines)]

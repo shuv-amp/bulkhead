@@ -1,6 +1,8 @@
 // Cross-language differential: the JavaScript limiter views against the Python
-// reference (which is itself checked against the Rust core on millions of
-// cases). Python generates random edge cases and the expected outputs.
+// reference and the Rust core (the worker `cargo build --release -p
+// bulkhead-diff` builds; so does scripts/check.sh's `cargo test` step).
+// Python generates the cases and both answer; JS must agree with both (the
+// arbitrary states at the end are checked against Python only).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -12,14 +14,32 @@ const script = `
 import random, sys, json
 sys.path.insert(0, ${JSON.stringify(reference)})
 import bulkhead_ref as ref, diff_runner as D, protocol as P
+D.check_worker()
 r = random.Random(20260927)
-s = P.Session()
-out = []
-while len(out) < 30000:
+lines, source = [], []
+def add(new, src):
+    lines.extend(new)
+    source.extend([src] * len(new))
+while len(lines) < 30000:
     line = D.gen_pure(r)
     if (line[0] in "KEM" and line[1] == " ") or line.startswith("EL "):
-        out.append([line, s.run_line(line)])
-# available_now: random bucket states
+        add([line], "realistic")
+# Full-range inputs, which gen_pure samples only in realistic ranges.
+for _ in range(10000):
+    add([D.gen_full_range(r)], "full")
+# Limiter sessions: the JS side follows each state through the R/Z/W answers
+# and computes every A (available now) from it. A third at full range.
+for i in range(1500):
+    if i % 3 == 0:
+        add(D.gen_full_range_session(r), "full")
+    else:
+        add(D.gen_limiter_session(r), "realistic")
+py = P.run_lines(lines)
+rs = D.run_worker(lines)
+assert len(py) == len(rs) == len(lines), (len(lines), len(py), len(rs))
+out = [list(c) for c in zip(lines, py, rs, source)]
+# available_now on arbitrary bucket states, against Python only: the worker
+# has no command that sets a state. Rust sees the states the sessions reach.
 for _ in range(10000):
     c1, w1 = r.choice([0, 1, 200_000_000_000, r.randrange(0, 1 << 64)]), r.randrange(1, 10**9)
     c2, w2 = r.choice([0, 1, 500_000_000_000, r.randrange(0, 1 << 64)]), r.randrange(1, 10**10)
@@ -27,15 +47,25 @@ for _ in range(10000):
     lim = ref.Limiter(c1, w1, c2, w2, 0, 1)
     lim.tat1 = now + r.choice([-w1, 0, 1, w1 // 2, w1, w1 + 1, r.randrange(-(1 << 40), 1 << 40)])
     lim.tat2 = now + r.choice([-w2, 0, 1, w2 // 2, w2, r.randrange(-(1 << 40), 1 << 40)])
-    out.append([f"A* {c1} {w1} {c2} {w2} {lim.tat1} {lim.tat2} {now}", f"A {lim.available_now(now)}"])
+    out.append([f"A* {c1} {w1} {c2} {w2} {lim.tat1} {lim.tat2} {now}", f"A {lim.available_now(now)}", None, "state"])
 print(json.dumps(out))
 `;
 
-test("JS limiter views match the Python reference on 40,000 edge cases", () => {
+test("JS limiter views match Python and Rust on 40,000 edge cases and every available-now view in 1,500 limiter sessions, and Python on 10,000 states", () => {
   const cases = JSON.parse(execFileSync("python3", ["-c", script], { maxBuffer: 1 << 28 }).toString());
   const counts = {};
-  for (const [line, want] of cases) {
+  const bucketPair = (t) => ({ short: { capacity: BigInt(t[1]), windowMs: BigInt(t[2]) }, long: { capacity: BigInt(t[3]), windowMs: BigInt(t[4]) } });
+  let session = null;
+  // A failure prints its line with the session before it: a fixture for
+  // diff_runner.py --replay. Not for an `A*` line: that state is built on the
+  // Python side only, and neither protocol.Session nor the worker reads `A*`.
+  let replay = [];
+  for (const [line, want, rust, source] of cases) {
     const t = line.split(" ");
+    if (t[0] === "L") replay = [];
+    if (["L", "R", "Z", "W", "A"].includes(t[0])) replay.push(line);
+    else replay = [line];
+    if (rust !== null && rust !== want) assert.fail(`Rust ${rust} vs Python ${want}:\n${replay.join("\n")}`);
     let got;
     switch (t[0]) {
       case "K":
@@ -49,21 +79,48 @@ test("JS limiter views match the Python reference on 40,000 edge cases", () => {
         got = `EL ${l.prev} ${l.cur} ${l.window}`;
         break;
       }
-      case "M": {
-        const p = { short: { capacity: BigInt(t[1]), windowMs: BigInt(t[2]) }, long: { capacity: BigInt(t[3]), windowMs: BigInt(t[4]) } };
-        got = `M ${maxUnbackedOver(p, BigInt(t[5]))}`;
+      case "M":
+        got = `M ${maxUnbackedOver(bucketPair(t), BigInt(t[5]))}`;
         break;
-      }
-      case "A*": {
-        const p = { short: { capacity: BigInt(t[1]), windowMs: BigInt(t[2]) }, long: { capacity: BigInt(t[3]), windowMs: BigInt(t[4]) } };
-        got = `A ${availableNow(BigInt(t[5]), BigInt(t[6]), p, BigInt(t[7]))}`;
+      case "A*":
+        got = `A ${availableNow(BigInt(t[5]), BigInt(t[6]), bucketPair(t), BigInt(t[7]))}`;
+        break;
+      // A session: the state comes from the answers, the view from the port.
+      case "L":
+        assert.equal(want, "L ok", line);
+        session = { params: bucketPair(t), tatShort: 0n, tatLong: 0n };
+        continue;
+      case "R":
+      case "Z":
+      case "W":
+        if (t[0] === "W") {
+          session.params.short.windowMs = BigInt(t[2]);
+          session.params.long.windowMs = BigInt(t[3]);
+        }
+        if (!want.startsWith("X ")) [session.tatShort, session.tatLong] = want.split(" ").slice(-2).map(BigInt);
+        continue;
+      case "A": {
+        const now = BigInt(t[1]);
+        got = `A ${availableNow(session.tatShort, session.tatLong, session.params, now)}`;
+        // A view of a bucket with a backlog, not just a full one.
+        if (session.tatShort > now || session.tatLong > now) counts[`${source} A backlog`] = (counts[`${source} A backlog`] ?? 0) + 1;
         break;
       }
     }
-    assert.equal(got, want, line);
-    counts[t[0]] = (counts[t[0]] ?? 0) + 1;
+    if (got !== want) {
+      const how = t[0] === "A*"
+        ? "an arbitrary state, Python only (not replayable): A* c1 w1 c2 w2 tat1 tat2 now"
+        : "replay with diff_runner.py --replay";
+      assert.fail(`JS ${got} vs Python ${want} (${how}):\n${replay.join("\n")}`);
+    }
+    const k = `${source} ${t[0]}`;
+    counts[k] = (counts[k] ?? 0) + 1;
   }
-  for (const k of ["K", "E", "EL", "M", "A*"]) assert.ok(counts[k] > 2000, `coverage ${k}: ${counts[k]}`);
+  for (const src of ["realistic", "full"]) {
+    for (const k of ["K", "E", "EL", "M", "A"]) assert.ok(counts[`${src} ${k}`] > 2000, `coverage ${src} ${k}: ${counts[`${src} ${k}`]}`);
+    assert.ok(counts[`${src} A backlog`] > 1000, `coverage ${src} A with a backlog: ${counts[`${src} A backlog`]}`);
+  }
+  assert.ok(counts["state A*"] > 2000, `coverage A*: ${counts["state A*"]}`);
 });
 
 test("the base is the least of the reference, the balance and the low-water balance (finding 65)", () => {
