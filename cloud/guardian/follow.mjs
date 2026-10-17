@@ -179,9 +179,10 @@ export async function followAccount(fetchPage, { cursor = null, oldestWanted = n
 /**
  * One poll of each watched Floor config (`configs`: `{ address, program }`):
  * followAccount from its cursor in `cursors`, then `ingest(sigs, live,
- * checkpoint, program)`. A config not yet in `followed` resumes as a replay
- * (not live), walking back to `oldestWanted()` at most (a day back, as the gap
- * message says). One config whose walk or ingest fails no longer stops the
+ * checkpoint, program)`. A config not yet in `followed` resumes, walking back
+ * to `oldestWanted()` at most (a day back, as the gap message says), and what
+ * landed before the start is a replay (not live; see below). One config whose
+ * walk or ingest fails no longer stops the
  * configs after it: the others are followed, and then this throws, naming
  * each that failed, so a failure that lasts raises the stall alert. A plain
  * loop used to stop at the first failure, and the later programs' executions
@@ -190,8 +191,22 @@ export async function followAccount(fetchPage, { cursor = null, oldestWanted = n
  * scanAll's scans do: ingesting acts and checkpoints, and walked together, a
  * config listed twice would be read twice from the same cursor. So an outage
  * of every endpoint costs one timeout per config.
+ *
+ * The line is the slot this process started at (`liveAfterSlot`, from
+ * startSlot), on every poll: the first signature listed in a slot at or
+ * before it, and all listed after it, are replayed; the newer ones are
+ * live. It used to be the first good poll: a restart
+ * whose replay failed stayed a replay until one succeeded, and one that
+ * succeeded replayed what landed during the Vault startup, so a recovery
+ * key replaced, a stop or an ejection after the start was read silently.
+ * Without `liveAfterSlot`, a config resuming replays all it reads, and a
+ * followed one acts on all. The node lists newest-first by slot (the walk
+ * relies on it too), so the older part is replayed first and the newer one
+ * then ingested live. A followed config that lists rows from before the
+ * start (a lagging node, or a start slot from an endpoint ahead of its
+ * chain) says so, with the slots, once they are read.
  */
-export async function followConfigs(configs, { page, cursors, followed, oldestWanted, knows, ingest, log, saved = () => {} }) {
+export async function followConfigs(configs, { page, cursors, followed, oldestWanted, knows, ingest, log, saved = () => {}, liveAfterSlot = null }) {
   const failed = [];
   for (const { address, program } of configs) {
     try {
@@ -206,7 +221,19 @@ export async function followConfigs(configs, { page, cursors, followed, oldestWa
       else cursors.delete(address);
       // No signature at all yet: ask again next poll, never from genesis.
       if (r.status === "empty") continue;
-      await ingest(r.sigs, !resuming, (signature, s) => cursors.set(address, { signature, slot: s.slot ?? 0 }), program);
+      const checkpoint = (signature, s) => cursors.set(address, { signature, slot: s.slot ?? 0 });
+      const k = liveAfterSlot == null ? (resuming ? 0 : r.sigs.length) : newerThan(r.sigs, liveAfterSlot);
+      const live = r.sigs.slice(0, k);
+      const replay = r.sigs.slice(k);
+      if (replay.length) await ingest(replay, false, checkpoint, program);
+      // Once read, so a replay that keeps failing is not said again each poll.
+      if (!resuming && replay.length) {
+        // A row with no slot can sit in the replay part; the first row has one.
+        const known = replay.map((s) => s.slot).filter((s) => s != null);
+        const slots = [Math.min(...known), Math.max(...known)];
+        log({ level: "warn", msg: `a followed Floor config listed transactions at or before the start slot: replayed, not acted on. A lagging RPC node (they landed before this process started), or a start slot from an endpoint ahead of its chain (they landed after it, and their events were not reported): ${replay.length} rows in slots ${slots[0]}-${slots[1]}, start slot ${liveAfterSlot}`, program, rows: replay.length, startSlot: liveAfterSlot, slots });
+      }
+      if (live.length) await ingest(live, true, checkpoint, program);
       followed.add(address);
     } catch (e) {
       failed.push(`${program}: ${e?.message ?? e}`);
@@ -215,6 +242,32 @@ export async function followConfigs(configs, { page, cursors, followed, oldestWa
     }
   }
   if (failed.length) throw new Error(failed.join("; "));
+}
+
+/** How many of newest-first `sigs` come before the first in a slot at or
+ * before `slot`. A row with no slot (null over JSON-RPC) never ends them, so
+ * one among the newest is acted on (twice at worst, never unsaid); one below
+ * the line is older than it, and replayed with it. */
+function newerThan(sigs, slot) {
+  const k = sigs.findIndex((s) => s.slot != null && s.slot <= slot);
+  return k < 0 ? sigs.length : k;
+}
+
+/**
+ * The slot a restart's Floor replay runs up to (followConfigs'
+ * `liveAfterSlot`): the highest confirmed slot that any of a FailoverRpc's
+ * endpoints gives. One endpoint behind would put the line early, and what
+ * landed while the guardian was down would be acted on as new. If none
+ * answers, or `rpc` has no endpoints (a plain Rpc), `rpc` itself is asked:
+ * an endpoint asked directly leaves at once when busy (`hurry`), and
+ * FailoverRpc.call waits for one once. Throws when that fails too.
+ */
+export async function startSlot(rpc) {
+  const ask = (e) => e.call("getSlot", [{ commitment: "confirmed" }]).catch(() => null);
+  let slots = (await Promise.all((rpc.endpoints ?? []).map(ask))).filter(Number.isInteger);
+  if (!slots.length) slots = [await ask(rpc)].filter(Number.isInteger);
+  if (!slots.length) throw new Error("no RPC endpoint gave its slot, so the Floor replay has no start");
+  return Math.max(...slots);
 }
 
 /** Process one oldest-first signature batch, checkpointing only completed items. */

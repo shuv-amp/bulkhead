@@ -82,7 +82,7 @@ import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeF
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
-import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
+import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, startSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll, actionLine } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
@@ -1240,8 +1240,10 @@ async function step(name, run) {
   }
 }
 
-// Watched Floor configs read at least once by this process (followFloor).
+// Watched Floor configs read at least once by this process (followFloor), and
+// the slot it started at (main): a replay covers only what landed up to it.
 const floorFollowed = new Set();
+let floorLiveAfterSlot = null;
 
 /**
  * Floor's events (a proposal, an execution, a replaced recovery key) are
@@ -1251,10 +1253,12 @@ const floorFollowed = new Set();
  * own, and only that program's Floor events are read from it.
  *
  * Its cursor is kept in the state file. A restart reads on from it, back to
- * at most the Vault startup's day, as a replay (nothing is sent: the account
- * scans veto what is still pending), so an execution while this guardian was
- * down still spends its approval. Each restart used to start at the newest
- * signature, and those executions were never seen (docs/09, finding 71).
+ * at most the Vault startup's day, as a replay of what landed up to the slot
+ * this process started at (nothing is sent: the account scans veto what is
+ * still pending), and what is newer live, so an execution while this
+ * guardian was down still spends its approval. Each restart used to start at
+ * the newest signature, and those executions were never seen (docs/09,
+ * finding 71).
  * Without a cursor (a first start), it anchors at the newest signature; the
  * account scans cover what came before.
  */
@@ -1263,6 +1267,7 @@ async function followFloor() {
     page: (address, q) => rpc.call("getSignaturesForAddress", [address, q]),
     cursors: floorCursors,
     followed: floorFollowed,
+    liveAfterSlot: floorLiveAfterSlot,
     oldestWanted: () => wallNow() - DAY_S,
     knows: knowsSignature,
     // Live, bounded like the protocol's ingest (finding 76): what is left is
@@ -1337,6 +1342,9 @@ async function main() {
   for (const w of configWarnings) log({ level: "warn", msg: w });
   if (stateProblem) log({ level: "error", msg: stateProblem });
   await must(checkCluster);
+  // Fatal, like the cluster check: with no start slot, a restart would replay
+  // all that lands until its first good poll.
+  if (floorWatch.length) floorLiveAfterSlot = await must(() => startSlot(rpc));
   await checkBalance().catch((e) => log({ level: "warn", msg: `could not read the guardian key's balance: ${e.message}` }));
   if (state.incidentSince != null) log({ msg: "incident hold resumed from saved state", incidentSince: state.incidentSince, stateFile });
   const unpinned = unpinnedChangeApprovals(policy);
