@@ -815,6 +815,44 @@ fn harbor_withdraw_needs_the_users_signature() {
     assert_eq!(w.env.balance(&acc), 1_000 * USDC, "signed, it pays");
 }
 
+/// A deposit, like a release, comes only from the protocol's own caller
+/// (custody.rs:88). Without that check, another protocol's integration, or
+/// anyone calling the Vault directly, could put tokens into this protocol's
+/// vault and open a backing record for them that the protocol never saw.
+/// One case per half of the check: another protocol's caller PDA, signed by
+/// its own Harbor, and this protocol's caller PDA unsigned, called directly.
+/// Then the same deposit through this protocol's Harbor goes through.
+#[test]
+fn only_the_protocol_itself_can_deposit() {
+    let mut w = World::new();
+    let u = w.user();
+    let from = w.account("usdc", &u.pubkey());
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &from, 1_000 * USDC, &w.usdc.token_program);
+    let deposit = w.m.deposit_ix(&w.env, &w.usdc, &u.pubkey(), &from, 1_000 * USDC);
+
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let mut theirs = deposit.clone();
+    theirs.program_id = other.harbor;
+    theirs.accounts[1].pubkey = other.caller;
+    assert_eq!(w.env.fails(&[theirs], &[&u]), verr::WRONG_CALLER);
+
+    // Harbor's accounts are the Vault program, the caller PDA and the user;
+    // the Vault's deposit accounts follow, after its caller.
+    let mut accounts = vec![AccountMeta::new_readonly(w.m.caller, false)];
+    accounts.extend(deposit.accounts[3..].iter().cloned());
+    let direct = w.m.vault_ix(7, &(1_000 * USDC).to_le_bytes(), accounts);
+    assert_eq!(w.env.fails(&[direct], &[&u]), verr::WRONG_CALLER);
+
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
+    w.env.ok(&[deposit], &[&u]);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 1_000 * USDC);
+}
+
+/// A release, too (custody.rs:277), one case per half of the check: this
+/// protocol's caller PDA unsigned, called directly, and another protocol's
+/// caller PDA, signed by its own Harbor. Without the second half any signer
+/// in slot 0, a key or another program's PDA, could release from this
+/// protocol's vaults.
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
@@ -826,6 +864,16 @@ fn only_the_protocol_itself_can_release() {
     accounts.extend(w.m.release_accounts(&w.env, &w.usdc, &acc, &u.pubkey(), &w.usdc_prices(false)));
     let ix = w.m.vault_ix(8, &(1_000 * USDC).to_le_bytes(), accounts);
     assert_eq!(w.env.fails(&[ix], &[]), verr::WRONG_CALLER);
+    // Another protocol's caller PDA, signed by its own Harbor: the user's
+    // own withdrawal, but not through this protocol.
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let withdraw = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    let mut theirs = withdraw.clone();
+    theirs.program_id = other.harbor;
+    theirs.accounts[1].pubkey = other.caller;
+    assert_eq!(w.env.fails(&[theirs], &[&u]), verr::WRONG_CALLER);
+    w.env.ok(&[withdraw], &[&u]);
+    assert_eq!(w.env.balance(&acc), 1_000 * USDC);
 }
 
 #[test]
