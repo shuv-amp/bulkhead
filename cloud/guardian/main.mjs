@@ -84,7 +84,7 @@ import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, watchedEvents, floorAlerts, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
-import { alerter, stallWatch, scanAll } from "./alert.mjs";
+import { alerter, stallWatch, scanAll, actionLine } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
 import { attestLocal } from "../lib/limits.mjs";
@@ -600,14 +600,13 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       openIncident(state, wallNow());
       saveIncident();
     }
-    log({
-      action: action.type,
+    log(actionLine(action, {
       reason: action.reason,
       ticketId: action.ticketId,
       signature: sig,
       reaction_ms: confirmed - started,
       since_trigger_s: eventTime ? Math.round(confirmed / 1000 - eventTime) : undefined,
-    });
+    }));
     return true;
   } catch (e) {
     if (action.type === "cancel" && ticketAlreadyGone(e)) {
@@ -616,7 +615,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
       return true;
     }
-    log({ level: "error", action: action.type, error: e.message, ticketId: action.ticketId });
+    log(actionLine(action, { level: "error", error: e.message, ticketId: action.ticketId }));
     if (action.type === "cancel") {
       const next = afterCancelFailure(cancelRetry.get(action.ticketId), e, Date.now());
       cancelRetry.set(action.ticketId, next);
