@@ -3993,7 +3993,7 @@ fn r2_heartbeat(w: &World, guardian: &Address) -> Instruction {
     ])
 }
 
-/// G6: a guardian's veto stops a lifeboat exit for good. From the end of its
+/// T18 (04): a guardian's veto stops a lifeboat exit for good. From the end of its
 /// delay to the last second before it expires, the vetoed exit does not
 /// execute. A new proposal clears the veto, and it waits the full delay again.
 #[test]
