@@ -81,7 +81,7 @@ import { basename, dirname } from "node:path";
 import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, floorAlerts, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { assess, watchedEvents, floorCheck, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followAccount, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll, actionLine } from "./alert.mjs";
@@ -1078,12 +1078,8 @@ async function checkFloor() {
     const acc = await rpc.account(fc.config);
     const fl = acc ? decodeFloor(acc.bytes) : null;
     if (fl) checkGuardianSet(program, fl);
-    const alerts = fl ? floorAlerts(fl) : [{ code: "missing", msg: "no Floor config for this program" }];
-    const codes = alerts.map((a) => a.code).join(",");
-    if (floorReported.get(program) === codes) continue;
-    floorReported.set(program, codes);
-    if (alerts.length) log({ level: "warn", msg: "floor not ready", program, alerts });
-    else log({ msg: "floor ready", program });
+    const line = floorCheck(floorReported, program, fl);
+    if (line) log(line);
   }
 }
 
