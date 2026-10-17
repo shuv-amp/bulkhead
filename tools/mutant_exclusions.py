@@ -24,9 +24,13 @@ Standard library only (no tomllib), so Python 3.9 runs it.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 CONFIG = ".cargo/mutants.toml"
@@ -118,29 +122,76 @@ def self_test() -> int:
     entries = exclusions(head + "  'p',  # 3\n  'q',\n]\n")
     if entries != [("p", 3), ("q", None)]:
         failed.append(f"entries read as {entries}, expected [('p', 3), ('q', None)]")
+    # CI's mutants job acts on main's exit status, so run main too, on a planted
+    # config: each run's exit status and every line it prints on each stream.
+    with tempfile.TemporaryDirectory() as d:
+        def put(name, text):
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(text)
+            return os.path.join(d, name)
+        config = put("mutants.toml", one)
+        full = put("all.txt", "\n".join(names))
+        part = put("kept.txt", "\n".join(a1))
+        tinted = put("coloured.txt", "\n".join(coloured))
+        usage = ["ALL KEPT", "--self-test"]
+        runs = [
+            # (arguments, exit status, what stdout's lines say, what stderr's lines say, in order)
+            ([full, part], 0, ["1 of 3 mutants excluded"], []),
+            # The lists the other way round: KEPT is not read as ALL.
+            ([part, full], 1, [], [count, "full list lacks"]),
+            ([tinted, tinted], 1, [], ["colour codes"]),
+            ([full], 2, [], usage),
+            ([full, part, part], 2, [], usage),
+        ]
+        for args, code, want_out, want_err in runs:
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                got = main(args, config)
+            printed = [out.getvalue().splitlines(), err.getvalue().splitlines()]
+            if got != code or not all(len(p) == len(w) and all(x in y for x, y in zip(w, p))
+                                      for p, w in zip(printed, [want_out, want_err])):
+                failed.append(f"main({args}): exit {got}, printed {printed};"
+                              f" expected {code}, {want_out} and {want_err}")
+            report = printed[0] if code == 0 else printed[1]
+            if code < 2 and any(not line.startswith(config + ": ") for line in report):
+                failed.append(f"main({args}): printed {report}, not each line naming {config}")
+        # The command line with two lists and the repo's config, as in
+        # scripts/mutants.sh: a list no pattern can match is a mismatch. Which
+        # problems it reports depends on the config, so only their form is checked.
+        # It runs in the temporary directory, so the config is found from ROOT.
+        nothing = put("nothing.txt", "none.rs:0:0: no mutant\n")
+        run = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), nothing, nothing],
+                             capture_output=True, text=True, timeout=60, cwd=d)
+        lines = run.stderr.splitlines()
+        if run.returncode != 1 or run.stdout or not lines or not all(x.startswith(CONFIG + ": ") for x in lines):
+            failed.append(f"the command line: exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr!r};"
+                          f" expected 1 and problems naming {CONFIG}")
     for f in failed:
         print("self-test FAILED:", f)
     if not failed:
-        print(f"self-test OK: {len(cases) + 1} cases")
+        print(f"self-test OK: {len(cases) + len(runs) + 2} cases")
     return 1 if failed else 0
 
 
-def main() -> int:
-    if sys.argv[1:] == ["--self-test"]:
+def main(argv: list | None = None, config: str | None = None) -> int:
+    """argv without the program name; config defaults to the repo's (the self-test plants one)."""
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--self-test"]:
         return self_test()
-    if len(sys.argv) != 3:
+    if len(argv) != 2:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
-    with open(sys.argv[1], encoding="utf-8") as f:
+    with open(argv[0], encoding="utf-8") as f:
         names = f.read().splitlines()
-    with open(sys.argv[2], encoding="utf-8") as f:
+    with open(argv[1], encoding="utf-8") as f:
         kept = set(f.read().splitlines())
-    with open(os.path.join(ROOT, CONFIG), encoding="utf-8") as f:
+    label = config or CONFIG
+    with open(config or os.path.join(ROOT, CONFIG), encoding="utf-8") as f:
         bad = problems(f.read(), names, kept)
     for b in bad:
-        print(f"{CONFIG}: {b}", file=sys.stderr)
+        print(f"{label}: {b}", file=sys.stderr)
     if not bad:
-        print(f"{CONFIG}: {len(names) - len(kept)} of {len(names)} mutants excluded, each pattern matching its count")
+        print(f"{label}: {len(names) - len(kept)} of {len(names)} mutants excluded, each pattern matching its count")
     return 1 if bad else 0
 
 
