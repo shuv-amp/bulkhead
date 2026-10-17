@@ -15,8 +15,10 @@ use common::vault::*;
 use common::*;
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
+use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
+use solana_transaction_error::TransactionError;
 
 const USDC: u64 = 1_000_000; // 6 decimals
 const SOL: u64 = 1_000_000_000; // 9 decimals
@@ -684,6 +686,39 @@ fn harbor_will_not_sign_for_a_different_vault_program() {
             );
         }
     }
+}
+
+/// Harbor's withdraw needs the user's signature, not just the user's token
+/// account as recipient. Without it anyone could release a user's balance
+/// on their own timing: the Vault backs the user's own balance, signed or
+/// not.
+#[test]
+fn harbor_withdraw_needs_the_users_signature() {
+    let mut w = World::new();
+    let u = w.user();
+    let acc = w.deposit("usdc", &u, 1_000 * USDC);
+    w.seal();
+    let mut ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    ix.accounts.iter_mut().filter(|a| a.pubkey == u.pubkey()).for_each(|a| a.is_signer = false);
+    let vault_called = format!("Program {} invoke", w.m.vault_program);
+    match w.env.send(&[ix], &[]) {
+        Ok(m) => panic!("expected MissingRequiredSignature, succeeded\n{}", m.logs.join("\n")),
+        Err(e) => {
+            let logs = e.meta.logs.join("\n");
+            assert_eq!(
+                e.err,
+                TransactionError::InstructionError(0, InstructionError::MissingRequiredSignature),
+                "{logs}"
+            );
+            // Harbor refused it: the Vault was never called.
+            assert!(!logs.contains(&vault_called), "{logs}");
+        }
+    }
+    assert_eq!(w.env.balance(&acc), 0);
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    let m = w.env.ok(&[ix], &[&u]);
+    assert!(m.logs.join("\n").contains(&vault_called), "signed, Harbor calls the Vault");
+    assert_eq!(w.env.balance(&acc), 1_000 * USDC, "signed, it pays");
 }
 
 #[test]
@@ -2224,6 +2259,35 @@ fn every_account_substitution_is_refused() {
     // own-deposit withdrawal takes any key there (finding 74).
     ok.push(any(H + 12, "owner's signature: consulted only for a loan"));
     s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &ok);
+    // The same withdrawal with the user's signature only at the free slot:
+    // signing is per key, so Harbor still sees account 2 signed, and the
+    // sweep must pick the key from there.
+    w.env.mint_to(
+        &w.usdc.mint,
+        &w.usdc.mint_authority,
+        &whale_acc,
+        1_000 * USDC,
+        &w.usdc.token_program,
+    );
+    let ix =
+        w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &whale_acc, 1_000 * USDC);
+    w.env.ok(&[ix], &[&whale]);
+    let mut ix = w.m.withdraw_ix(
+        &w.env,
+        &w.usdc,
+        &whale.pubkey(),
+        &whale_acc,
+        1_000 * USDC,
+        &w.usdc_prices(true),
+    );
+    ix.accounts[2].is_signer = false;
+    assert!(ix.accounts[H + 12].pubkey == whale.pubkey() && ix.accounts[H + 12].is_signer);
+    s.run(&mut w.env, "withdraw (signed at the free slot only)", ix, &[&whale], &ok);
+    // Harbor is right, so no swap succeeds here: check the try was made.
+    assert!(
+        s.unsigned.contains(&("withdraw (signed at the free slot only)".into(), whale.pubkey())),
+        "the sweep must try a key that signs only at a free slot unsigned"
+    );
 
     let payee = w.user();
     let payee_acc = w.account("usdc", &payee.pubkey());
@@ -3781,8 +3845,15 @@ fn a_backed_loan_needs_the_borrowers_signature() {
     let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
     assert_eq!(o.backed, 0, "unsigned: not a loan");
     assert_eq!(o.instant + o.queued, 50_000 * USDC, "all of it unbacked");
+    // Nor is the holder's key listed without a signature: consent is the
+    // signature, not the account.
+    let mut ix = w.m.admin_payout_ix(&w.env, &w.usdc, &holder_usdc, &holder.pubkey(), 50_000 * USDC, &both);
+    ix.accounts.push(AccountMeta::new_readonly(holder.pubkey(), false));
+    let o2 = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+    assert_eq!(o2.backed, 0, "listed, unsigned: not a loan");
+    assert_eq!(o2.instant + o2.queued, 50_000 * USDC, "all of it unbacked");
     let paid = w.env.balance(&holder_usdc);
-    assert_eq!(paid, o.instant);
+    assert_eq!(paid, o.instant + o2.instant);
     let g0 = w.m.g[0].pubkey();
     let freeze = w.m.freeze_ix(&g0, None, 86_400);
     w.env.ok(&[freeze], &[&w.m.g[0]]);

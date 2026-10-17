@@ -4,13 +4,16 @@
 //! takes a transaction that succeeds and swaps one account at a time for a
 //! fresh address, every other account in the transaction, a second market's
 //! accounts, the other vault, programs and sysvars, and, for a signer, every
-//! other known key and the same key unsigned. Every swap must fail, except at
-//! positions the program deliberately leaves free (each listed with its
-//! reason).
+//! other known key; then, per key that signs at any slot (a free one
+//! included) and stands at a checked slot, the key unsigned at every
+//! checked slot (a free slot where it signed gets the payer; not for the
+//! fee payer). Every swap must fail, except at positions the program
+//! deliberately leaves free (each listed with its reason).
 #![allow(dead_code)]
 
 use super::vault::*;
 use super::*;
+use litesvm::LiteSVM;
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
@@ -50,6 +53,9 @@ pub struct Sweep {
     pub unsignable: usize,
     /// Transactions swept (each `run`).
     pub runs: usize,
+    /// (run name, key) for every key sent unsigned at all its checked
+    /// slots (the payer standing in at free slots where it signed).
+    pub unsigned: Vec<(String, Address)>,
 }
 
 impl Sweep {
@@ -95,6 +101,7 @@ impl Sweep {
             attempts: 0,
             unsignable: 0,
             runs: 0,
+            unsigned: vec![],
         }
     }
 
@@ -122,6 +129,7 @@ impl Sweep {
             attempts: 0,
             unsignable: 0,
             runs: 0,
+            unsigned: vec![],
         }
     }
 
@@ -151,6 +159,30 @@ impl Sweep {
         let ok = env.svm.send_transaction(tx).is_ok();
         env.svm.expire_blockhash();
         Some(ok)
+    }
+
+    /// Sends one tampered transaction from `base`; a success is reported.
+    /// False when it could not be signed.
+    fn attempt(
+        &mut self,
+        env: &mut Env,
+        base: &LiteSVM,
+        tampered: Instruction,
+        key: Option<&Keypair>,
+        report: String,
+    ) -> bool {
+        env.svm = base.clone();
+        if let Some(k) = key {
+            env.fund(k);
+        }
+        self.attempts += 1;
+        let sent = self.send(env, tampered, key);
+        match sent {
+            None => self.unsignable += 1,
+            Some(true) => self.unexpected.push(report),
+            Some(false) => {}
+        }
+        sent.is_some()
     }
 
     /// `ok`: what the program deliberately accepts, as (position, the
@@ -190,14 +222,6 @@ impl Sweep {
                 .flat_map(|a| a.who.clone().unwrap_or_default())
                 .collect();
             let orig = ix.accounts[i].clone();
-            // Signing is per key, not per slot: only try the key unsigned
-            // where nothing else in the transaction makes it sign.
-            let signs_elsewhere = orig.pubkey == env.payer.pubkey()
-                || ix
-                    .accounts
-                    .iter()
-                    .enumerate()
-                    .any(|(j, a)| j != i && a.pubkey == orig.pubkey && a.is_signer);
             let mut tries: Vec<(String, AccountMeta, Option<Keypair>)> = vec![];
             if orig.is_signer {
                 let k = Keypair::new();
@@ -220,16 +244,6 @@ impl Sweep {
                             None,
                         ));
                     }
-                }
-                if !signs_elsewhere {
-                    tries.push((
-                        "the same key, unsigned".into(),
-                        AccountMeta {
-                            is_signer: false,
-                            ..orig.clone()
-                        },
-                        None,
-                    ));
                 }
             } else {
                 tries.push((
@@ -264,21 +278,64 @@ impl Sweep {
                 if same_role.contains(&meta.pubkey) && meta.is_signer == orig.is_signer {
                     continue;
                 }
-                env.svm = base.clone();
-                if let Some(k) = &key {
-                    env.fund(k);
-                }
                 let mut tampered = ix.clone();
                 tampered.accounts[i] = meta;
-                self.attempts += 1;
-                match self.send(env, tampered, key.as_ref()) {
-                    None => self.unsignable += 1,
-                    Some(true) => self.unexpected.push(format!(
-                        "{name}: account {i} ({}) replaced by {what}",
-                        short(&orig.pubkey)
-                    )),
-                    Some(false) => {}
+                let report = format!(
+                    "{name}: account {i} ({}) replaced by {what}",
+                    short(&orig.pubkey)
+                );
+                self.attempt(env, &base, tampered, key.as_ref(), report);
+            }
+        }
+        // Signing is per key, not per slot: unsigning one slot changes
+        // nothing while another slot signs for the same key. So, once per
+        // key that signs at some slot and stands at a checked one, reported
+        // at its first checked slot: the key unsigned at every checked slot,
+        // with the payer standing in at free slots where it signed (they
+        // take any account; a control first checks the payer is accepted
+        // there with the key signed at its checked slots, so the refusal
+        // is the missing signature's); not for the fee payer, which signs
+        // the transaction anyway.
+        let payer = env.payer.pubkey();
+        let mut done = HashSet::new();
+        for (i, orig) in ix.accounts.iter().enumerate() {
+            if free.contains(&i) || orig.pubkey == payer || !done.insert(orig.pubkey) {
+                continue;
+            }
+            let slots: Vec<usize> = (0..ix.accounts.len())
+                .filter(|&j| ix.accounts[j].pubkey == orig.pubkey)
+                .collect();
+            if !slots.iter().any(|&j| ix.accounts[j].is_signer) {
+                continue;
+            }
+            let mut unsigned = ix.clone();
+            let mut control = ix.clone();
+            let mut stand_in = vec![];
+            for &j in &slots {
+                let a = &mut unsigned.accounts[j];
+                if free.contains(&j) && a.is_signer {
+                    a.pubkey = payer;
+                    control.accounts[j].pubkey = payer;
+                    stand_in.push(j);
+                } else {
+                    a.is_signer = false;
+                    control.accounts[j].is_signer = !free.contains(&j);
                 }
+            }
+            if !stand_in.is_empty() {
+                env.svm = base.clone();
+                assert_eq!(
+                    self.send(env, control, None),
+                    Some(true),
+                    "{name}: the payer must be accepted at {stand_in:?}"
+                );
+            }
+            let mut report = format!("{name}: account {i} ({}) unsigned", short(&orig.pubkey));
+            if !stand_in.is_empty() {
+                report += &format!(", the payer at {stand_in:?}");
+            }
+            if self.attempt(env, &base, unsigned, None, report) {
+                self.unsigned.push((name.into(), orig.pubkey));
             }
         }
         // Continue from the state after the real transaction.
