@@ -157,7 +157,7 @@ test("an RPC error keeps its JSON-RPC code, so a refused preflight can be told a
 
 // A dead primary used to cost about a minute per call (6 retries with
 // backoff), and the guardian read only from it: blind while backups were up.
-import { FailoverRpc, endpointTrouble } from "../lib/solana.mjs";
+import { FailoverRpc, HURRY_WAIT_MS, endpointTrouble } from "../lib/solana.mjs";
 
 function stubFetch(routes) {
   const calls = [];
@@ -165,10 +165,12 @@ function stubFetch(routes) {
   globalThis.fetch = async (url, init) => {
     const { method } = JSON.parse(init.body);
     calls.push([new URL(url).host, method]);
-    const r = routes[new URL(url).host];
+    const route = routes[new URL(url).host];
+    const r = typeof route === "function" ? route(method) : route;
     if (r === "down") throw new TypeError("fetch failed");
     if (typeof r === "number") return new Response("busy", { status: r });
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, ...r(method) }), { status: 200 });
+    if (Array.isArray(r)) return new Response("busy", { status: r[0], headers: r[1] });
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, ...r }), { status: 200 });
   };
   return { calls, restore: () => { globalThis.fetch = real; } };
 }
@@ -212,6 +214,123 @@ test("failover: an answer is final; an unhealthy node or a 5xx is not", async ()
     assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot"), 2);
   } finally {
     f.restore();
+  }
+});
+
+// A busy endpoint's Retry-After (up to 30 s) held each call that long
+// before the backup was asked. Now a long one sends the call on at once,
+// and only a call no endpoint answered waits, once, for the shortest.
+const busyFor = (seconds) => [429, { "retry-after": String(seconds) }];
+
+test("failover: a long Retry-After sends the call on at once; one of 2 s is retried", async () => {
+  let f = stubFetch({ "a.invalid": busyFor(60), "b.invalid": busyFor(60), "c.invalid": () => ({ result: 4 }) });
+  try {
+    const t0 = Date.now();
+    assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid", "http://c.invalid"]).call("getSlot"), 4);
+    assert.ok(Date.now() - t0 < 1_000, `took ${Date.now() - t0} ms`);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "b.invalid", "c.invalid"]);
+  } finally {
+    f.restore();
+  }
+  f = stubFetch({ "a.invalid": busyFor(2), "b.invalid": () => ({ result: 3 }) });
+  try {
+    assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot"), 3);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "a.invalid", "b.invalid"], "HURRY_WAIT_MS itself is waited");
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: with no endpoint answering, the shortest Retry-After is waited out once", async () => {
+  let f = stubFetch({ "a.invalid": busyFor(3), "b.invalid": busyFor(30) });
+  try {
+    const t0 = Date.now();
+    const err = await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot").then(() => null, (e) => e);
+    assert.equal(err?.rpcError?.code, 429);
+    const took = Date.now() - t0;
+    assert.ok(took > HURRY_WAIT_MS && took < 10_000, `took ${took} ms`);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "b.invalid", "a.invalid"]);
+  } finally {
+    f.restore();
+  }
+  // The shortest wait can come later in the order, and from an endpoint's
+  // last attempt (after its quick retry): the call waits that one, not 30 s.
+  f = stubFetch({ "a.invalid": busyFor(30), "b.invalid": busyFor(1) });
+  try {
+    const t0 = Date.now();
+    const err = await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot").then(() => null, (e) => e);
+    assert.equal(err?.rpcError?.code, 429);
+    const took = Date.now() - t0;
+    assert.ok(took < 10_000, `took ${took} ms`);
+    // b, its quick retry; then, after b's wait, b again with its own retry.
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "b.invalid", "b.invalid", "b.invalid", "b.invalid"]);
+  } finally {
+    f.restore();
+  }
+  // A busy primary and a dead backup: the primary is asked again after its wait.
+  let asked = 0;
+  f = stubFetch({ "a.invalid": () => (asked++ ? { result: 5 } : busyFor(3)), "b.invalid": "down" });
+  try {
+    assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot"), 5);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "b.invalid", "b.invalid", "a.invalid"]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: the one wait ends when the first busy endpoint is free, and follows only an endpoint left early", async () => {
+  const random = Math.random;
+  Math.random = () => 0.5; // no jitter: waits are what was asked
+  // a asks 3 s and is left at once; b waits its 2 s, then asks 2 s more.
+  // a is free first (3 s from the start, b at 4 s), so a is asked again,
+  // after about 1 s more, not b after a full 2 s or 3 s.
+  let f = stubFetch({ "a.invalid": busyFor(3), "b.invalid": busyFor(2) });
+  try {
+    const t0 = Date.now();
+    const err = await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot").then(() => null, (e) => e);
+    assert.equal(err?.rpcError?.code, 429);
+    const took = Date.now() - t0;
+    assert.ok(took > 2_900 && took < 4_500, `took ${took} ms`);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "b.invalid", "b.invalid", "a.invalid"]);
+  } finally {
+    f.restore();
+  }
+  // Busy without Retry-After: each took its quick retry, none was left
+  // early, so the call fails as before, with no extra round.
+  f = stubFetch({ "a.invalid": 503, "b.invalid": 503 });
+  try {
+    const t0 = Date.now();
+    const err = await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).call("getSlot").then(() => null, (e) => e);
+    assert.equal(err?.rpcError?.code, 503);
+    assert.ok(Date.now() - t0 < 2_900, `took ${Date.now() - t0} ms`);
+    assert.deepEqual(f.calls.map(([h]) => h), ["a.invalid", "a.invalid", "b.invalid", "b.invalid"]);
+  } finally {
+    f.restore();
+    Math.random = random;
+  }
+});
+
+// The guardian's main loop awaits crossCheck, which asks each endpoint
+// directly: a busy backup's Retry-After held the whole pass that long.
+test("failover: crossCheck skips a busy endpoint instead of waiting out its Retry-After", async () => {
+  const f = stubFetch({ "a.invalid": (method) => ({ result: method === "getSlot" ? 100 : [] }), "b.invalid": busyFor(30) });
+  try {
+    const t0 = Date.now();
+    const r = await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).crossCheck("addr");
+    assert.ok(Date.now() - t0 < 1_000, `took ${Date.now() - t0} ms`);
+    assert.deepEqual(r, { switched: false, reason: null, slots: [100, undefined] });
+  } finally {
+    f.restore();
+  }
+  // The active endpoint busy only on the signature list it is judged by.
+  const g = stubFetch({ "a.invalid": (method) => (method === "getSlot" ? { result: 100 } : busyFor(30)), "b.invalid": (method) => ({ result: method === "getSlot" ? 100 : [] }) });
+  try {
+    const t0 = Date.now();
+    const r = await new FailoverRpc(["http://a.invalid", "http://b.invalid"]).crossCheck("addr");
+    assert.ok(Date.now() - t0 < 1_000, `took ${Date.now() - t0} ms`);
+    assert.deepEqual(r, { switched: false, reason: null, slots: [100, 100] });
+  } finally {
+    g.restore();
   }
 });
 

@@ -230,10 +230,16 @@ export function serializeTransaction(message, signatures) {
  * the same instant and be refused again (docs/09, finding 83).
  */
 export function retryWaitMs(retryAfter, attempt, random = Math.random) {
-  const s = Number(retryAfter);
-  const base = Number.isFinite(s) && s >= 0 && retryAfter != null && retryAfter !== "" ? Math.min(30_000, s * 1_000) : 1_000 * 2 ** Math.min(attempt, 3);
-  return Math.round(base * (0.8 + 0.4 * random()));
+  return Math.round(retryBaseMs(retryAfter, attempt) * (0.8 + 0.4 * random()));
 }
+/** `retryWaitMs` before the jitter. */
+export function retryBaseMs(retryAfter, attempt) {
+  const s = Number(retryAfter);
+  return Number.isFinite(s) && s >= 0 && retryAfter != null && retryAfter !== "" ? Math.min(30_000, s * 1_000) : 1_000 * 2 ** Math.min(attempt, 3);
+}
+
+/** The longest busy wait (before jitter) `Rpc.call` takes when it can hurry. */
+export const HURRY_WAIT_MS = 2_000;
 
 // --- JSON-RPC ------------------------------------------------------------------
 export class Rpc {
@@ -241,13 +247,18 @@ export class Rpc {
    * `minGapMs` spaces requests out (public endpoints limit each IP to about
    * 100 requests per 10 s); default 0, or BULKHEAD_RPC_GAP_MS. A rate-limited
    * (429), failing (5xx) or dropped request is retried with backoff; a timeout
-   * is not, so a stuck method fails instead of looping.
+   * is not, so a stuck method fails instead of looping. A busy answer that
+   * is thrown carries its wait in the error's `waitMs`. With `hurry` (another
+   * endpoint can be asked), one whose wait before jitter is over
+   * `HURRY_WAIT_MS` is thrown at once, marked `hurried`: a long Retry-After
+   * (with `retries` over 2, also the backoff).
    */
-  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000, retries = 6 } = {}) {
+  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000, retries = 6, hurry = false } = {}) {
     this.url = url;
     this.minGapMs = minGapMs;
     this.timeoutMs = timeoutMs;
     this.retries = retries;
+    this.hurry = hurry;
     this.nextAt = 0;
   }
   async call(method, params = []) {
@@ -277,13 +288,20 @@ export class Rpc {
       // 429 and 5xx (often an HTML page, not JSON) are transient: back off and retry.
       const busy = r.status === 429 || r.status >= 500;
       const j = busy ? { error: { code: r.status } } : await r.json();
-      if (busy && attempt < this.retries) {
-        await new Promise((res) => setTimeout(res, retryWaitMs(r.headers?.get?.("retry-after"), attempt)));
-        continue;
+      let waitMs;
+      if (busy) {
+        const retryAfter = r.headers?.get?.("retry-after");
+        waitMs = retryWaitMs(retryAfter, attempt);
+        if (attempt < this.retries && (!this.hurry || retryBaseMs(retryAfter, attempt) <= HURRY_WAIT_MS)) {
+          await new Promise((res) => setTimeout(res, waitMs));
+          continue;
+        }
       }
       if (j.error) {
         const err = new Error(`${method}: ${JSON.stringify(j.error)}`);
         err.rpcError = j.error; // { code, message, data }: -32002 is a refused preflight
+        if (waitMs != null) err.waitMs = waitMs; // busy: how long it asked to be left alone
+        if (waitMs != null && attempt < this.retries) err.hurried = true; // left before its retry
         throw err;
       }
       return j.result;
@@ -342,15 +360,21 @@ export const SIGNATURE_LAG_SWITCH_MS = 30_000;
 /**
  * Several endpoints behind one `Rpc` interface. Each call goes first to the
  * active endpoint; when it cannot answer (`endpointTrouble`), the next one
- * is tried at once, after one quick retry instead of the single endpoint's
- * minute of backoff. An answer is never retried elsewhere: a refused
- * simulation is the same on every node. `onSwitch(from, to, error)` reports a
- * change of endpoint.
+ * is tried after at most one quick retry instead of the single endpoint's
+ * minute of backoff. A busy endpoint asking for a longer wait (Retry-After)
+ * is left at once; if no endpoint answers and one was left that way, the
+ * call waits once, until the first busy endpoint's wait ends (30 s at
+ * most, 36 s with jitter), and asks it again, so with every endpoint busy
+ * calls still slow down as the servers asked. An answer is never retried elsewhere: a
+ * refused simulation is the same on every node. `onSwitch(from, to, error)`
+ * reports a change of endpoint.
  */
 export class FailoverRpc extends Rpc {
   constructor(urls, { onSwitch = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
     super(urls[0], { timeoutMs, retries, ...opts });
-    this.endpoints = urls.map((url) => new Rpc(url, { timeoutMs, retries, ...opts }));
+    // Each endpoint hurries: a busy one asking for a long wait is left at
+    // once, here and in crossCheck, which the guardian's loop waits for.
+    this.endpoints = urls.map((url) => new Rpc(url, { timeoutMs, retries, ...opts, hurry: true }));
     this.active = 0;
     this.switches = 0; // moves of `active`, so a call can tell its evidence is older
     this.onSwitch = onSwitch;
@@ -375,8 +399,9 @@ export class FailoverRpc extends Rpc {
    *     to the best;
    *   - a backup's newest signature that the active endpoint does not list
    *     among its newest `depth` for more than `sigLagMs`: switch to that backup.
-   * Returns `{ switched, reason, slots }`. An endpoint that does not answer
-   * is skipped here (the failover handles that).
+   * Returns `{ switched, reason, slots }`. An endpoint that does not answer,
+   * or is busy and asks for more than `HURRY_WAIT_MS`, is skipped here (the
+   * failover handles that): the guardian's loop waits for this check.
    */
   async crossCheck(address, { slotLag = SLOT_LAG_SWITCH, sigLagMs = SIGNATURE_LAG_SWITCH_MS, depth = 100, nowMs = Date.now() } = {}) {
     this.missing ??= new Map(); // signature -> { at: first seen missing, from: endpoint index }
@@ -437,10 +462,14 @@ export class FailoverRpc extends Rpc {
    */
   async call(method, params = []) {
     const start = this.active;
+    const order = this.endpoints.map((_, i) => (start + i) % this.endpoints.length);
     const failedAt = new Map(); // endpoint -> { sentAt: this.switches when sent, error }
     let last;
-    for (let i = 0; i < this.endpoints.length; i++) {
-      const at = (start + i) % this.endpoints.length;
+    let soonest = null; // the busy endpoint whose wait ends first: { at, readyAt }
+    let hurried = false; // some endpoint was left before its wait
+    let rested = false;
+    for (let i = 0; i < order.length; i++) {
+      const at = order[i];
       const sentAt = this.switches;
       try {
         const result = await this.endpoints[at].call(method, params);
@@ -451,6 +480,14 @@ export class FailoverRpc extends Rpc {
         if (!endpointTrouble(e)) throw e;
         failedAt.set(at, { sentAt, error: e });
         last = e;
+        hurried ||= e.hurried === true;
+        const readyAt = e.waitMs != null ? Date.now() + e.waitMs : null;
+        if (readyAt != null && (soonest == null || readyAt < soonest.readyAt)) soonest = { at, readyAt };
+        if (i === order.length - 1 && hurried && !rested) {
+          rested = true; // once: then the last error stands
+          await new Promise((res) => setTimeout(res, Math.max(0, soonest.readyAt - Date.now())));
+          order.push(soonest.at);
+        }
       }
     }
     throw last;
