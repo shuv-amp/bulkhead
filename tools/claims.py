@@ -31,6 +31,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # also under -I, which leaves it out
+from mutant_exclusions import exclusions  # noqa: E402
+
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 CORE = "crates/bulkhead-core"
 
@@ -141,6 +144,14 @@ def rust_tests(*paths: str) -> int:
     return sum(tests_in(read(p)) for p in paths)
 
 
+def equivalents(text: str) -> int:
+    """The mutants .cargo/mutants.toml excludes: the sum of its patterns' counts."""
+    entries = exclusions(text)
+    if not entries or any(n is None for _, n in entries):
+        raise SystemExit("claims: .cargo/mutants.toml needs a '# N' count on each exclusion (tools/mutant_exclusions.py)")
+    return sum(n for _, n in entries)
+
+
 def findings(text: str) -> int:
     """Rows of the `09 §4` table, which must be numbered 1..n without a gap."""
     if "\n## 4. " not in text or "\n## 5. " not in text:
@@ -197,6 +208,8 @@ def truth() -> dict:
         "client": js_tests(*files("cloud/test", ".test.mjs")),
         "fuzz": len(re.findall(r"^\[\[bin\]\]", read("fuzz/Cargo.toml"), re.M)),
         "findings": findings(read("docs/09-VERIFICATION.md")),
+        # scripts/mutants.sh checks each pattern's count against cargo-mutants.
+        "equivalents": equivalents(read(".cargo/mutants.toml")),
     })
     t["programs"] = t["floor_programs"] + t["vault_programs"]
     names = sorted(n for p in files(f"{CORE}/src", ".rs") for n in kani_names(read(p)))
@@ -262,12 +275,17 @@ RULES = [
     # 12 only. The match overlaps the kept "95 findings at submission" before
     # it; only that statement's own number is exempt, so 96–N is checked.
     (r"submission;\s+96[–-](\d+) recorded", ["findings"]),
+    (N + r" equivalent(?:s| mutants)", ["equivalents"]),
+    (r"Equivalent mutants \((\d+)\)", ["equivalents"]),
+    (r"excludes exactly these (\d+)", ["equivalents"]),
 ]
 RULES = [(re.compile(pattern.replace(" ", r"\s+").replace(r"(\d+)", D), re.I), keys) for pattern, keys in RULES]
 
 # (file, exact text, reason). Statements not of the current count, kept as written.
 KEPT = [
     ("docs/00-DECISION.md", "14 Kani harnesses", "decision log entry of 26 Sep"),
+    ("docs/00-DECISION.md", "18 equivalents", "decision log entry of 26 Sep"),
+    ("docs/09-VERIFICATION.md", "exactly the 22 equivalents below", "run 9's survivors, 6 Oct"),
     ("docs/12-SUBMISSION.md", "95 findings at submission", "the count when the project was submitted"),
 ]
 
@@ -365,6 +383,10 @@ def self_test() -> int:
         ("1 at submission; 196–1,102 recorded 13–14 Oct", [], 0),
         ("findings 96–1,102 recorded on devnet", [], 0),
         ("1 at submission;\n  96–1,102 recorded", [], 1),
+        ("10 equivalents, each explained", [], 0),
+        ("11 equivalent\nmutants", [], 1),
+        ("**Equivalent mutants (11), each", [], 1),
+        ("the toml excludes exactly these 9", [], 1),
         ("95 findings at submission; 96–1,102 recorded", [("doc.md", "95 findings at submission", "x")], 1),
         ("then: 14 Kani harnesses", old, 0),
         ("then: 14 Kani harnesses; now: 14 Kani harnesses", old, 1),

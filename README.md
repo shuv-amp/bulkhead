@@ -185,13 +185,13 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Bounded proofs (Kani) and exhaustive checks | **19/19 harnesses verified** on 16 Oct (16 for every value of their types), 240 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
 | Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
-| Mutation testing (`cargo-mutants`, 669 injected bugs; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
+| Mutation testing (`cargo-mutants`: 797 mutants of the core in the last full run, 15 Oct; in CI on every change to the core) | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
 | Coverage-guided fuzzing (libFuzzer, 9 targets: the byte parsers and the full-width limiter and ledger) | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser fuzzed in that run at full line coverage. That run had 8 targets: the guardian-set parser's, added 14 Oct, has no recorded 10-minute run or coverage measurement ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
 | Property tests (G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection) | 26/26, with coverage counters so a vacuous pass fails |
 | Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
 | End to end | [Above](#what-it-does-to-an-attack) |
 | On devnet | All three programs run this tree's build (PR #85, 15 Oct), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
-| What this process found in our own code and docs | **104 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–104 were found after the submission: 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | **105 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–105 were found after the submission: 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 105 (CI tooling) is fixed; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## Live on devnet
 
@@ -253,6 +253,7 @@ cloud/                  zero-dependency JavaScript: client, guardian bot, status
                         deployment and live-cluster checks
 tools/floor_check.py    read-only report on any upgradeable program
 tools/claims.py         the counts README and docs/ state, checked against the tree (scripts/check.sh)
+tools/mutant_exclusions.py  the mutants .cargo/mutants.toml excludes, checked against cargo-mutants (scripts/mutants.sh)
 reference/              independent Python reference, differential runner, golden vectors, fixtures, Drift model
 evidence/               governance census (script + committed snapshot), model output
 docs/                   the full design (below)

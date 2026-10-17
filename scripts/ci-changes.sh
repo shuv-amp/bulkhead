@@ -4,7 +4,8 @@
 #   git diff --name-only main... | scripts/ci-changes.sh
 # A job is skipped only when nothing it builds, runs or reads changed. The
 # workflow, the toolchains and this script itself select everything. The
-# weekly run does not use this; it runs every job.
+# weekly and manual runs do not use this; they run every job but `mutants`
+# (ci.yml).
 set -euo pipefail
 programs=false fuzz=false kani=false mutants=false deny=false workflows=false devnet=false scenarios=false
 all() { programs=true fuzz=true kani=true mutants=true deny=true workflows=true devnet=true scenarios=true; }
@@ -19,7 +20,7 @@ while IFS= read -r f; do
       workflows=true ;;
   esac
   case "$f" in
-    crates/bulkhead-core/src/*|scripts/mutants.sh|.cargo/mutants.toml)
+    crates/bulkhead-core/src/*|scripts/mutants.sh|.cargo/mutants.toml|tools/mutant_exclusions.py)
       mutants=true ;;
   esac
   case "$f" in
