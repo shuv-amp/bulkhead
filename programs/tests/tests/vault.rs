@@ -815,6 +815,44 @@ fn harbor_withdraw_needs_the_users_signature() {
     assert_eq!(w.env.balance(&acc), 1_000 * USDC, "signed, it pays");
 }
 
+/// A deposit, like a release, comes only from the protocol's own caller
+/// (custody.rs:88). Without that check, another protocol's integration, or
+/// anyone calling the Vault directly, could put tokens into this protocol's
+/// vault and open a backing record for them that the protocol never saw.
+/// One case per half of the check: another protocol's caller PDA, signed by
+/// its own Harbor, and this protocol's caller PDA unsigned, called directly.
+/// Then the same deposit through this protocol's Harbor goes through.
+#[test]
+fn only_the_protocol_itself_can_deposit() {
+    let mut w = World::new();
+    let u = w.user();
+    let from = w.account("usdc", &u.pubkey());
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &from, 1_000 * USDC, &w.usdc.token_program);
+    let deposit = w.m.deposit_ix(&w.env, &w.usdc, &u.pubkey(), &from, 1_000 * USDC);
+
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let mut theirs = deposit.clone();
+    theirs.program_id = other.harbor;
+    theirs.accounts[1].pubkey = other.caller;
+    assert_eq!(w.env.fails(&[theirs], &[&u]), verr::WRONG_CALLER);
+
+    // Harbor's accounts are the Vault program, the caller PDA and the user;
+    // the Vault's deposit accounts follow, after its caller.
+    let mut accounts = vec![AccountMeta::new_readonly(w.m.caller, false)];
+    accounts.extend(deposit.accounts[3..].iter().cloned());
+    let direct = w.m.vault_ix(7, &(1_000 * USDC).to_le_bytes(), accounts);
+    assert_eq!(w.env.fails(&[direct], &[&u]), verr::WRONG_CALLER);
+
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
+    w.env.ok(&[deposit], &[&u]);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 1_000 * USDC);
+}
+
+/// A release, too (custody.rs:277), one case per half of the check: this
+/// protocol's caller PDA unsigned, called directly, and another protocol's
+/// caller PDA, signed by its own Harbor. Without the second half any signer
+/// in slot 0, a key or another program's PDA, could release from this
+/// protocol's vaults.
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
@@ -826,6 +864,16 @@ fn only_the_protocol_itself_can_release() {
     accounts.extend(w.m.release_accounts(&w.env, &w.usdc, &acc, &u.pubkey(), &w.usdc_prices(false)));
     let ix = w.m.vault_ix(8, &(1_000 * USDC).to_le_bytes(), accounts);
     assert_eq!(w.env.fails(&[ix], &[]), verr::WRONG_CALLER);
+    // Another protocol's caller PDA, signed by its own Harbor: the user's
+    // own withdrawal, but not through this protocol.
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let withdraw = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    let mut theirs = withdraw.clone();
+    theirs.program_id = other.harbor;
+    theirs.accounts[1].pubkey = other.caller;
+    assert_eq!(w.env.fails(&[theirs], &[&u]), verr::WRONG_CALLER);
+    w.env.ok(&[withdraw], &[&u]);
+    assert_eq!(w.env.balance(&acc), 1_000 * USDC);
 }
 
 #[test]
@@ -2420,7 +2468,8 @@ fn a_stolen_recovery_key_is_replaced_by_the_admin_with_a_live_quorum() {
 
 #[test]
 fn every_account_substitution_is_refused() {
-    use common::sweep::{any, role, Sweep};
+    use common::sweep::{any, backstop, role, Allow, Sweep};
+    use solana_instruction_error::InstructionError as IE;
     let mut w = World::new();
     // A second protocol on the same Vault program, with its own vault.
     let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
@@ -2507,6 +2556,24 @@ fn every_account_substitution_is_refused() {
         2,
         "Harbor's own user slot (demo integration); the Vault checks its own source authority",
     );
+    // Harbor's own checks (ProgramError, not Vault codes) run before the CPI,
+    // so at these slots Harbor, not the Vault, refuses a swap: the Vault
+    // program it calls, its caller PDA and, but for a deposit (whose user
+    // slot is free), its signer: a withdrawal's user, who must sign and own
+    // the recipient, or a payout's admin, who must sign and be the one the
+    // protocol records. So the Vault's own checks of that key are not seen.
+    let harbor = |signer: bool| -> Vec<Allow> {
+        let mut v = vec![
+            backstop(0, &[IE::IncorrectProgramId], "Harbor: the Vault program it calls"),
+            backstop(1, &[IE::InvalidSeeds], "Harbor: its caller PDA"),
+        ];
+        if signer {
+            v.push(backstop(2, &[IE::MissingRequiredSignature], "Harbor: its user (signs, owns the recipient) or admin (signs, is the protocol's)"));
+        }
+        v
+    };
+    // Harbor reads the admin from the protocol account before the Vault does.
+    let payout_protocol = backstop(H, &[IE::MissingRequiredSignature], "Harbor: the protocol records its admin");
     let unqueued = [
         any(H + 8, "ticket PDA: only used when part of a release is queued"),
         any(H + 9, "system program: only used to create a ticket"),
@@ -2528,7 +2595,20 @@ fn every_account_substitution_is_refused() {
         "deposit",
         ix,
         &[&whale],
-        &[harbor_user, payer_free(H + 7)],
+        &[
+            vec![
+                harbor_user,
+                payer_free(H + 7),
+                backstop(
+                    H + 4,
+                    &[IE::Custom(1), IE::Custom(3), IE::InvalidAccountData, IE::PrivilegeEscalation],
+                    "token program: the source must be a writable token account of the mint, with the funds",
+                ),
+                backstop(H + 5, &[IE::Custom(4)], "token program: the authority must own the source; the Vault checks it signs"),
+            ],
+            harbor(false),
+        ]
+        .concat(),
     );
 
     let ix = w.m.withdraw_ix(
@@ -2544,7 +2624,12 @@ fn every_account_substitution_is_refused() {
     // The owner's signature after the price pair: read only for a loan, so an
     // own-deposit withdrawal takes any key there (finding 74).
     ok.push(any(H + 12, "owner's signature: consulted only for a loan"));
-    s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &ok);
+    ok.extend(harbor(true));
+    // Harbor refuses a recipient its user does not own before the Vault sees
+    // it, so this sweep cannot see the Vault's own recipient checks.
+    let mut withdraw_ok = ok.clone();
+    withdraw_ok.push(backstop(H + 4, &[IE::MissingRequiredSignature], "Harbor: the user must own the recipient"));
+    s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &withdraw_ok);
     // The same withdrawal with the user's signature only at the free slot:
     // signing is per key, so Harbor still sees account 2 signed, and the
     // sweep must pick the key from there.
@@ -2568,7 +2653,7 @@ fn every_account_substitution_is_refused() {
     );
     ix.accounts[2].is_signer = false;
     assert!(ix.accounts[H + 12].pubkey == whale.pubkey() && ix.accounts[H + 12].is_signer);
-    s.run(&mut w.env, "withdraw (signed at the free slot only)", ix, &[&whale], &ok);
+    s.run(&mut w.env, "withdraw (signed at the free slot only)", ix, &[&whale], &withdraw_ok);
     // Harbor is right, so no swap succeeds here: check the try was made.
     assert!(
         s.unsigned.contains(&("withdraw (signed at the free slot only)".into(), whale.pubkey())),
@@ -2585,7 +2670,9 @@ fn every_account_substitution_is_refused() {
         10_000 * USDC,
         &w.usdc_prices(true),
     );
-    s.run(&mut w.env, "admin payout (instant)", ix, &[], &ok);
+    let mut payout_ok = ok.clone();
+    payout_ok.push(payout_protocol.clone());
+    s.run(&mut w.env, "admin payout (instant)", ix, &[], &payout_ok);
 
     let ix = w.m.admin_payout_ix(
         &w.env,
@@ -2601,7 +2688,11 @@ fn every_account_substitution_is_refused() {
         "admin payout (queued)",
         ix,
         &[],
-        &[any(H + 11, "price account: the payee owes nothing")],
+        &[
+            vec![any(H + 11, "price account: the payee owes nothing"), payout_protocol],
+            harbor(true),
+        ]
+        .concat(),
     );
 
     // --- tickets: extend, settle -------------------------------------------
@@ -3054,7 +3145,11 @@ fn every_account_substitution_is_refused() {
     );
     let ix = import_ix(&p, &owner.pubkey(), 5 * USDC);
     let p_vaults = vec![p.usdc.vault, p.sol.vault, third_vault];
-    sp.run(&mut p.env, "import backing", ix, &[], &[payer_free(0), role(3, p_vaults, "the admin imports into any vault of its protocol; the seal checks each vault's coverage")]);
+    sp.run(&mut p.env, "import backing", ix, &[], &[
+        payer_free(0),
+        role(3, p_vaults, "the admin imports into any vault of its protocol; the seal checks each vault's coverage"),
+        backstop(6, &[IE::MissingAccount], "system program: invoked by its fixed id to create the backing; anything else leaves the callee missing"),
+    ]);
     let ix = p.m.propose_seal_ix();
     sp.run(&mut p.env, "propose seal", ix, &[], &[]);
     let ix = p.m.vault_ix(
@@ -3100,9 +3195,12 @@ fn every_account_substitution_is_refused() {
     p.env.svm.add_program(harbor2, &so("bulkhead_harbor")).unwrap();
     let ix = p.m.register_ix(&p.env, harbor2, 3 * DAY);
     sp.run(&mut p.env, "register (caller PDA)", ix, &[], &[
-        any(2, "rent payer: any funded signer"),
-        any(5, "programdata: read only when the registrar is the upgrade authority, not the caller PDA"),
-    ]);
+        vec![
+            any(2, "rent payer: any funded signer"),
+            any(5, "programdata: read only when the registrar is the upgrade authority, not the caller PDA"),
+        ],
+        harbor(false),
+    ].concat());
     let team = Keypair::new();
     p.env.fund(&team);
     let (program, programdata) = p.env.deploy(&honest_v1(), &team, 4096);
@@ -3129,9 +3227,10 @@ fn every_account_substitution_is_refused() {
 
     let total = s.attempts + sp.attempts;
     println!(
-        "{total} substitutions over {} transactions; {} needed a key nobody here holds",
+        "{total} substitutions over {} transactions; {} needed a key nobody here holds; {} refused at a backstop slot, not by the Vault",
         s.runs + sp.runs,
-        s.unsignable + sp.unsignable
+        s.unsignable + sp.unsignable,
+        s.backstopped + sp.backstopped
     );
     let mut all = s.unexpected;
     all.extend(sp.unexpected);
