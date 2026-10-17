@@ -43,7 +43,7 @@ fn s10_full_lifecycle() {
     );
     assert!(env.call(&f.program).is_ok(), "live program runs");
     let v = read_config(&env, f);
-    assert_eq!((v.status, v.elf_is_v3, v.guardian_count), (0, 1, 3));
+    assert_eq!((v.status, v.elf_is_v3, v.guardian_count), (0, 1, 4));
 
     // 1. An attacker holding the owner key proposes a drainer. It waits 72h in public.
     let drainer_buf = env.write_buffer(&drainer(), &p.owner);
@@ -240,14 +240,79 @@ fn a_quorum_ejects_a_rogue_guardian_who_vetoes_everything() {
     // It can't eject itself or be saved by its own vote.
     let own = f.eject(0, &gs[0..2]);
     assert_eq!(env.fails(&[own], &[&p.g[0], &p.g[1]]), err::CANNOT_EJECT);
-    // The other two eject it instantly.
+    // Two of the others eject it instantly.
     env.ok(&[f.eject(0, &gs[1..3])], &[&p.g[1], &p.g[2]]);
-    assert_eq!(read_config(&env, f).guardian_count, 2);
+    assert_eq!(read_config(&env, f).guardian_count, 3);
     let ix = f.veto(&gs[0]);
     assert_eq!(env.fails(&[ix], &[&p.g[0]]), err::NOT_LIVE_GUARDIAN);
+    // A set an ejection shrank to threshold + 1 still ejects: guardian 3, now
+    // in slot 2, goes too.
+    env.ok(&[f.eject(2, &gs[1..3])], &[&p.g[1], &p.g[2]]);
+    assert_eq!(read_config(&env, f).guardian_count, 2);
     // With 2 guardians and threshold 2, nobody else can be ejected.
     let ix = f.eject(0, &gs[1..3]);
     assert_eq!(env.fails(&[ix], &[&p.g[1], &p.g[2]]), err::CANNOT_EJECT);
+}
+
+/// AUD-2 (finding 107) on a 2-of-4 set: guardian 0's key is lost and guardian
+/// 1 turns rogue and stops the program. The two honest live guardians are a
+/// quorum of the others: they eject the rogue and restore at once, the lost
+/// key cannot veto, and the owner's refill executes after the delay. On a
+/// 2-of-3 set the same two faults lock it for good (one honest key is no
+/// quorum, and the rogue vetoes every proposal).
+#[test]
+fn a_lost_key_and_a_rogue_do_not_lock_a_two_of_four_set() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let zero = solana_address::Address::default();
+    env.advance(6 * DAY);
+    env.ok(&[f.heartbeat(&gs[1]), f.heartbeat(&gs[2]), f.heartbeat(&gs[3])], &[&p.g[1], &p.g[2], &p.g[3]]);
+    env.advance(2 * DAY); // guardian 0 is past its interval: its key is lost
+    env.ok(&[f.abort(&gs[1], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[1]]);
+    env.next_slot();
+    assert!(env.call(&f.program).is_err(), "the rogue stopped it");
+    // The lost key does not help a quorum; the honest pair is one.
+    let ix = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &[gs[0], gs[2]]);
+    assert_eq!(env.fails(&[ix], &[&p.g[0], &p.g[2]]), err::NO_QUORUM);
+    env.ok(&[f.eject(1, &gs[2..4])], &[&p.g[2], &p.g[3]]);
+    env.next_slot();
+    env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[2..4])], &[&p.g[2], &p.g[3]]);
+    env.next_slot();
+    assert!(env.call(&f.program).is_ok(), "restored");
+    // The owner refills the set; neither the lost key nor the rogue can veto.
+    let set = Floor::guardian_set(&[gs[2], gs[3], Keypair::new().pubkey(), Keypair::new().pubkey()], 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &set, None)], &[&p.owner]);
+    assert_eq!(env.fails(&[f.veto(&gs[0])], &[&p.g[0]]), err::NOT_LIVE_GUARDIAN);
+    assert_eq!(env.fails(&[f.veto(&gs[1])], &[&p.g[1]]), err::NOT_LIVE_GUARDIAN);
+    env.advance(3 * DAY);
+    env.ok(&[f.execute_config()], &[]);
+    let c = read_config(&env, f);
+    assert_eq!((c.guardian_count, c.threshold), (4, 2));
+}
+
+/// AUD-2 on a 2-of-4 set: a second rogue reveals itself by vetoing the
+/// owner's refill after the first was ejected. The set is then 2-of-3, still
+/// larger than its threshold, so the honest pair ejects it too; the owner's
+/// next refill executes.
+#[test]
+fn two_rogues_in_turn_are_both_ejected_from_a_two_of_four_set() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let zero = solana_address::Address::default();
+    env.ok(&[f.eject(0, &gs[1..3])], &[&p.g[1], &p.g[2]]); // the first rogue
+    let set = Floor::guardian_set(&[gs[1], gs[2], gs[3], Keypair::new().pubkey()], 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &set, None)], &[&p.owner]);
+    env.ok(&[f.veto(&gs[1])], &[&p.g[1]]); // the second, guardian 1, now in slot 0
+    env.ok(&[f.eject(0, &gs[2..4])], &[&p.g[2], &p.g[3]]);
+    let c = read_config(&env, f);
+    assert_eq!((c.guardian_count, c.threshold), (2, 2));
+    let set = Floor::guardian_set(&[gs[2], gs[3], Keypair::new().pubkey(), Keypair::new().pubkey()], 2, 7 * DAY);
+    env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &set, None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    env.ok(&[f.execute_config()], &[]);
+    assert_eq!(read_config(&env, f).guardian_count, 4);
 }
 
 #[test]
@@ -259,7 +324,7 @@ fn registration_requires_the_current_upgrade_authority() {
     let f = Floor::new(env.floor, program);
     let attacker = Keypair::new();
     env.fund(&attacker);
-    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let ix = f.register(
         &env.payer.pubkey(),
         &attacker.pubkey(),
@@ -284,7 +349,7 @@ fn registration_rejects_weak_settings() {
     let (program, _) = env.deploy(&honest_v1(), &team, 1024);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new().pubkey();
-    let (a, b, c) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
+    let (a, b, c, d) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
     let pay = env.payer.pubkey();
     let cases = [
         (
@@ -292,7 +357,7 @@ fn registration_rejects_weak_settings() {
                 &pay,
                 &team.pubkey(),
                 &owner,
-                &[a, b, c],
+                &[a, b, c, d],
                 2,
                 7 * DAY,
                 3 * DAY - 1,
@@ -350,7 +415,7 @@ fn registration_survives_a_prefunded_config_address() {
     let ix =
         solana_system_interface::instruction::transfer(&env.payer.pubkey(), &f.config, 1_000_000);
     env.ok(&[ix], &[]);
-    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let owner = Keypair::new().pubkey();
     let ix = f.register(
         &env.payer.pubkey(),
@@ -498,7 +563,7 @@ fn a_new_guardian_set_waits_the_delay_and_is_vetoable() {
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let f = &p.f;
-    let attacker_keys = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let attacker_keys = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let set = Floor::guardian_set(&attacker_keys, 2, 7 * DAY);
     let zero = solana_address::Address::default();
     env.ok(
@@ -800,7 +865,7 @@ fn an_abort_binary_that_would_not_fit_is_refused_and_the_minimal_one_is_accepted
     let owner = Keypair::new();
     let guardian = Keypair::new();
     env.fund(&guardian);
-    let gs = [guardian.pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let gs = [guardian.pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let ix = f.register(
         &env.payer.pubkey(),
         &team.pubkey(),
@@ -1081,7 +1146,12 @@ fn every_floor_account_substitution_is_refused() {
         role(2, guardians.clone(), "any quorum"),
         role(3, guardians.clone(), "any quorum"),
     ]);
-    s.run(&mut env, "eject", f.eject(2, &gs[0..2]), &[], &[]);
+    // Guardian 3 may stand in for either signer (any two of the others are
+    // a quorum); the target, or the other signer twice, never may.
+    s.run(&mut env, "eject", f.eject(2, &gs[0..2]), &[], &[
+        role(1, vec![gs[3]], "another guardian of the set, not the target"),
+        role(2, vec![gs[3]], "another guardian of the set, not the target"),
+    ]);
 
     // Registering another program; releasing A's authority (closes A's config).
     let team3 = Keypair::new();
@@ -1374,7 +1444,7 @@ fn a_guardian_is_never_the_recovery_key() {
     // recovery key (the owner with a quorum, at once). That does not void the
     // owner's proposal, so it is checked again at execution.
     let r = Keypair::new().pubkey();
-    let with_r = Floor::guardian_set(&[gs[0], gs[1], r], 2, 7 * DAY);
+    let with_r = Floor::guardian_set(&[gs[0], gs[1], gs[3], r], 2, 7 * DAY);
     env.ok(&[f.propose(&p.owner.pubkey(), SET_GUARDIANS, &zero, &with_r, None)], &[&p.owner]);
     env.ok(&[f.replace_recovery(&p.owner.pubkey(), &r, &[gs[0], gs[1]])], &[&p.owner, &p.g[0], &p.g[1]]);
     assert_eq!(read_config(&env, f).pending_kind, SET_GUARDIANS);
@@ -1390,12 +1460,12 @@ fn a_guardian_is_never_the_recovery_key() {
     let (program, _) = env.deploy(&honest_v1(), &team, 1024);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new().pubkey();
-    let (a, b, c) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
-    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
+    let (a, b, c, d) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
+    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c, d], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(b.as_ref());
     assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_GUARDIANS);
     let fresh = Keypair::new().pubkey();
-    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
+    let mut ix = f.register(&env.payer.pubkey(), &team.pubkey(), &owner, &[a, b, c, d], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(fresh.as_ref());
     env.ok(&[ix], &[&team]);
     assert_eq!(read_config(&env, &f).recovery, fresh.to_bytes());
@@ -1410,12 +1480,12 @@ fn registration_refuses_a_cut_off_recovery_key() {
     let (program, _) = env.deploy(&honest_v1(), &team, 1024);
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new().pubkey();
-    let (a, b, c) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
+    let (a, b, c, d) = (Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey());
     let pay = env.payer.pubkey();
-    let mut ix = f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
+    let mut ix = f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, 7 * DAY, 3 * DAY);
     ix.data.extend_from_slice(&Keypair::new().pubkey().as_ref()[..31]);
     assert_eq!(env.fails(&[ix], &[&team]), err::INVALID_INSTRUCTION);
-    let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b, c], 2, 7 * DAY, 3 * DAY);
+    let ix = f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, 7 * DAY, 3 * DAY);
     env.ok(&[ix], &[&team]);
 }
 

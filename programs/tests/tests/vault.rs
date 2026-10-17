@@ -645,7 +645,7 @@ fn attestation_reports_the_live_worst_case() {
     assert_eq!(a.available_now, 200_000 * USDC, "2% burst");
     assert_eq!(a.worst_1h, 400_000 * USDC, "golden G-6: 1 hour");
     assert_eq!(a.worst_24h, 1_000_000 * USDC, "golden G-6: 24 hours = 10%");
-    assert_eq!(a.live_guardians, 3);
+    assert_eq!(a.live_guardians, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -1542,8 +1542,51 @@ fn a_quorum_ejects_a_guardian_who_freezes_forever() {
     w.env.ok(&[ix], &[&w.m.g[1], &w.m.g[2]]);
     let fz = w.m.freeze_ix(&g0, None, 86_400);
     assert_eq!(w.env.fails(&[fz], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "the ejected guardian has no powers left");
-    let again = w.m.vault_ix(15, &[0], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(g1, true), AccountMeta::new_readonly(g2, true)]);
+    // A set an ejection shrank to threshold + 1 still ejects: g3, now in slot 2.
+    let next = w.m.vault_ix(15, &[2], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(g1, true), AccountMeta::new_readonly(g2, true)]);
+    w.env.ok(&[next], &[&w.m.g[1], &w.m.g[2]]);
+    let again = w.m.vault_ix(15, &[1], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(g1, true), AccountMeta::new_readonly(g2, true)]);
     assert_eq!(w.env.fails(&[again], &[&w.m.g[1], &w.m.g[2]]), verr::CANNOT_EJECT, "never below the threshold");
+}
+
+/// AUD-2 (finding 107) in the Vault, on a 2-of-4 set: g0's key is lost, g1
+/// turns rogue and freezes. The honest live pair ejects it and unfreezes at
+/// once; the ejected rogue cannot freeze again, the lost key cannot veto, and
+/// the admin's refill executes after the delay. On a 2-of-3 set the rogue
+/// re-freezes daily and vetoes every new set, for good.
+#[test]
+fn a_lost_key_and_a_rogue_do_not_lock_a_two_of_four_vault() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let g: Vec<Address> = w.m.g.iter().map(|k| k.pubkey()).collect();
+    let hb = |w: &World, g: &Address| w.m.vault_ix(14, &[], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(*g, true)]);
+    let beats = [hb(&w, &g[1]), hb(&w, &g[2]), hb(&w, &g[3])];
+    w.env.ok(&beats, &[&w.m.g[1], &w.m.g[2], &w.m.g[3]]);
+    w.env.advance(5 * DAY); // g0 last beat at genesis, before the 72h seal: lost
+    w.refresh_prices();
+    w.env.ok(&[w.m.freeze_ix(&g[1], None, 86_400)], &[&w.m.g[1]]);
+    let ix = w.m.unfreeze_ix(None, &[g[0], g[2]]);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.g[0], &w.m.g[2]]), verr::NO_QUORUM, "the lost key is no help");
+    let eject = w.m.vault_ix(15, &[1], vec![AccountMeta::new(w.m.protocol, false), AccountMeta::new_readonly(g[2], true), AccountMeta::new_readonly(g[3], true)]);
+    w.env.ok(&[eject], &[&w.m.g[2], &w.m.g[3]]);
+    w.env.ok(&[w.m.unfreeze_ix(None, &[g[2], g[3]])], &[&w.m.g[2], &w.m.g[3]]);
+    assert!(w.m.attest(&mut w.env, &w.usdc).available_now > 0, "unfrozen");
+    let fz = w.m.freeze_ix(&g[1], None, 86_400);
+    assert_eq!(w.env.fails(&[fz], &[&w.m.g[1]]), verr::NOT_GUARDIAN, "the ejected rogue");
+    // The admin refills the set; the lost key cannot veto it.
+    let zero = Address::default();
+    let id = read_protocol(&w.env, &w.m.protocol).next_change_id;
+    let set = guardian_set(&[g[2], g[3], Keypair::new().pubkey(), Keypair::new().pubkey()], 2);
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 2, &zero, &set, None)], &[&w.m.admin]);
+    let veto = w.m.vault_ix(19, &[], vec![AccountMeta::new_readonly(w.m.protocol, false), AccountMeta::new(w.m.change_address(id), false), AccountMeta::new_readonly(g[0], true)]);
+    assert_eq!(w.env.fails(&[veto], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "the lost key");
+    w.env.advance(3 * DAY);
+    let protocol = w.m.protocol;
+    w.env.ok(&[execute_change_ix(&w, id, &protocol)], &[]);
+    let p = read_protocol(&w.env, &w.m.protocol);
+    assert_eq!((p.guardian_count, p.threshold), (4, 2));
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,8 +1783,8 @@ fn nothing_loosens_while_the_seal_is_under_review() {
     let vault = w.usdc.vault;
     let zero = Address::default();
 
-    let puppets = [Keypair::new(), Keypair::new(), Keypair::new()];
-    let mut guardians = vec![3u8];
+    let puppets = [Keypair::new(), Keypair::new(), Keypair::new(), Keypair::new()];
+    let mut guardians = vec![4u8];
     for k in &puppets {
         guardians.extend_from_slice(k.pubkey().as_ref());
     }
@@ -1975,7 +2018,7 @@ fn an_older_guardian_set_cannot_bring_back_an_ejected_guardian() {
     w.deposit("usdc", &whale, 10_000_000 * USDC);
     w.seal();
     let zero = Address::default();
-    let mut set = vec![3u8];
+    let mut set = vec![w.m.g.len() as u8];
     for k in &w.m.g {
         set.extend_from_slice(k.pubkey().as_ref());
     }
@@ -2313,8 +2356,9 @@ fn every_account_substitution_is_refused() {
         w.m.g[1].pubkey(),
         w.m.g[2].pubkey(),
     );
-    let guardians = vec![g0, g1, g2];
-    let freezers = vec![admin, g0, g1, g2];
+    let g3 = w.m.g[3].pubkey();
+    let guardians = vec![g0, g1, g2, g3];
+    let freezers = vec![admin, g0, g1, g2, g3];
     let protocol_vaults = vec![w.usdc.vault, w.sol.vault];
     // Harbor's slots before the Vault's own accounts: program, caller, signer.
     const H: usize = 3;
@@ -2821,7 +2865,18 @@ fn every_account_substitution_is_refused() {
             AccountMeta::new_readonly(g1, true),
         ],
     );
-    s.run(&mut w.env, "eject", ix, &[], &[]);
+    // g3 may stand in for either signer (any two of the others are a
+    // quorum); the target, or the other signer twice, never may.
+    s.run(
+        &mut w.env,
+        "eject",
+        ix,
+        &[],
+        &[
+            role(1, vec![g3], "another guardian of the set, not the target"),
+            role(2, vec![g3], "another guardian of the set, not the target"),
+        ],
+    );
 
     // --- before the seal: create vault, assets, imports, the seal ------------
     let mut p = World::new();
@@ -2913,7 +2968,7 @@ fn every_account_substitution_is_refused() {
     let (program, programdata) = p.env.deploy(&honest_v1(), &team, 4096);
     let mut args = Vec::new();
     args.extend_from_slice(p.m.admin.pubkey().as_ref());
-    args.push(3);
+    args.push(p.m.g.len() as u8);
     for k in &p.m.g {
         args.extend_from_slice(k.pubkey().as_ref());
     }
@@ -3025,8 +3080,8 @@ fn an_admin_rotation_is_refused_at_execution_if_its_key_became_a_guardian() {
     let ix = w.m.propose_change_ix(&w.env, 3, &x.pubkey(), &[], None);
     let admin_change = 0;
     w.env.ok(&[ix], &[&w.m.admin]);
-    let mut set = vec![3u8];
-    for k in [w.m.g[0].pubkey(), w.m.g[1].pubkey(), x.pubkey()] {
+    let mut set = vec![4u8];
+    for k in [w.m.g[0].pubkey(), w.m.g[1].pubkey(), w.m.g[2].pubkey(), x.pubkey()] {
         set.extend_from_slice(k.as_ref());
     }
     set.push(2);
@@ -3345,7 +3400,7 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     let k = Keypair::new().pubkey();
     let ix = w.m.propose_change_ix(&w.env, 6, &k, &[], None);
     w.env.ok(&[ix], &[&w.m.admin]);
-    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, k]), None);
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, g2, k]), None);
     w.env.ok(&[ix], &[&w.m.admin]);
     w.env.advance(3 * DAY);
     w.env.ok(&[execute_change_ix(&w, 1, &protocol)], &[]);
@@ -3354,13 +3409,13 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     // A guardian set (change 2) whose new key becomes the recovery key while
     // it waits is refused when executed, and can't be proposed again.
     let r = Keypair::new().pubkey();
-    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, r]), None);
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, g2, r]), None);
     w.env.ok(&[ix], &[&w.m.admin]);
     let ix = w.m.replace_recovery_ix(&admin, &r, &[g0, g1]);
     w.env.ok(&[ix], &quorum);
     w.env.advance(3 * DAY);
     assert_eq!(w.env.fails(&[execute_change_ix(&w, 2, &protocol)], &[]), verr::INVALID_GUARDIANS);
-    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, r]), None);
+    let ix = w.m.propose_change_ix(&w.env, 2, &zero, &set(&[g0, g1, g2, r]), None);
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_GUARDIANS);
 
     // Abdicated: fixed for good, even for the admin with a quorum; only
@@ -4239,7 +4294,7 @@ fn a_pre_seal_thief_cannot_seal_and_park_the_vault() {
     let (ix, _) = propose_as(&w, &w.m.admin.pubkey(), 6, &recovery.pubkey());
     w.env.ok(&[ix], &[&w.m.admin]); // genesis: at once
     let admin = w.m.admin.pubkey();
-    let puppets = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let puppets = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
     let thief = Keypair::new().pubkey();
     w.env.ok(&[
         w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&puppets, 2), None),
