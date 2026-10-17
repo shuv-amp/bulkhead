@@ -78,7 +78,7 @@ fn cfg() -> LimitConfig {
 fn program_matches_the_core_model_on_random_sequences() {
     let steps = env_u64("BULKHEAD_PROGRAM_STEPS", 250);
     let seeds = env_u64("BULKHEAD_PROGRAM_SEEDS", 4);
-    let mut totals = [0u64; 8];
+    let mut totals = [0u64; 11];
     for seed in 0..seeds {
         let t = run(0xB0B + seed, steps);
         for (a, b) in totals.iter_mut().zip(t) {
@@ -86,15 +86,18 @@ fn program_matches_the_core_model_on_random_sequences() {
         }
     }
     println!(
-        "program-vs-model: {} steps; deposits {} | releases {} (backed {} instant {} queued {} refused {}) | settles {} | cancels {} ",
-        steps * seeds, totals[0], totals[1], totals[2], totals[3], totals[4], totals[5], totals[6], totals[7]
+        "program-vs-model: {} steps; deposits {} | releases {} (backed {} instant {} queued {} refused {}: queue full {}, want of tokens {}, lane closed {}) | settles {} | cancels {} ",
+        steps * seeds, totals[0], totals[1], totals[2], totals[3], totals[4], totals[5], totals[8], totals[9], totals[10], totals[6], totals[7]
     );
-    // Coverage: every path was exercised, each many times.
-    assert!(totals.iter().all(|&x| x >= 10), "every operation and outcome occurred often: {totals:?}");
+    // Coverage: every path was exercised, each many times. A release refused
+    // for want of tokens or a closed lane did not occur in the default run
+    // (docs/09 has the 24 x 500 counts); the wide differential requires both.
+    assert!(totals[..9].iter().all(|&x| x >= 10), "every operation and outcome occurred often: {totals:?}");
 }
 
-/// Returns counters: deposits, releases, backed, instant, queued, refused, settles, cancels.
-fn run(seed: u64, steps: u64) -> [u64; 8] {
+/// Returns counters: deposits, releases, backed, instant, queued, refused, settles, cancels,
+/// refused for a full queue, refused for want of tokens, refused for a closed lane.
+fn run(seed: u64, steps: u64) -> [u64; 11] {
     let mut rng = Rng(seed);
     let mut env = Env::new();
     let m = Market::new(&mut env);
@@ -175,7 +178,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
     env.advance(3 * DAY);
     env.ok(&[m.execute_seal_ix(&[&usdc, &sol])], &[]);
 
-    let mut c = [0u64; 8];
+    let mut c = [0u64; 11];
     let mut ticket_accounts: BTreeMap<u64, (Address, Address)> = BTreeMap::new(); // id -> (ticket, recipient)
     let mut last_heartbeat = env.time - 3 * DAY; // registered at genesis, 72h ago
     for step in 0..steps {
@@ -267,7 +270,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                 let params = params_from_config(&cfg(), capacity_base(reference, md.balance.min(low.low())));
                 let mut lim = md.limiter;
                 let decision = if unbacked > 0 {
-                    request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until * 1_000).map(Some)
+                    request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until * 1_000).map(Some).map_err(verr::limiter)
                 } else {
                     Ok(None)
                 };
@@ -280,7 +283,7 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                     Ok(_) => backed,
                     Err(_) => 0,
                 };
-                let decision = if decision.is_ok() && pays > md.balance { Err(()) } else { decision.map_err(|_| ()) };
+                let decision = if decision.is_ok() && pays > md.balance { Err(verr::INSUFFICIENT_BALANCE) } else { decision };
                 match (&result, decision) {
                     (Ok(meta), Ok(d)) => {
                         let o = outcome(meta);
@@ -313,7 +316,18 @@ fn run(seed: u64, steps: u64) -> [u64; 8] {
                         c[2] += (backed > 0) as u64;
                         c[3] += (instant > 0) as u64;
                     }
-                    (Err(_), Err(_)) => c[5] += 1, // refused on both sides (queue full, lane closed, or not enough tokens)
+                    // Refused on both sides, for the same reason (queue full,
+                    // lane closed, or not enough tokens).
+                    (Err(f), Err(code)) => {
+                        assert_eq!(custom_code(f), Some(code), "seed {seed} step {step}: refusal code {:?}", f.err);
+                        c[5] += 1;
+                        c[match code {
+                            verr::QUEUE_FULL => 8,
+                            verr::INSUFFICIENT_BALANCE => 9,
+                            verr::LANE_CLOSED => 10,
+                            _ => panic!("seed {seed} step {step}: release refused with {code}, which has no counter"),
+                        }] += 1;
+                    }
                     (r, d) => panic!("seed {seed} step {step}: program {:?} vs model {:?}", r.as_ref().map(outcome).map_err(|e| e.err.clone()), d),
                 }
             }
