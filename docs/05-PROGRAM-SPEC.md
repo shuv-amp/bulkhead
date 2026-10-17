@@ -107,7 +107,7 @@ Change kinds: `SetLimits(vault)`, `UpsertAsset(mint)`, `SetGuardians`, `SetAdmin
 
 Return data (64 bytes): `available_now`, `worst_1h`, `worst_24h`, `balance`, `frozen_until`, `queued`, `loosen_delay_s`, `pending u32`, `live guardians u8`, `guardian count u8`, `sealed u8`.
 
-- `worst_T` is the G1 bound over `T` if nobody freezes.
+- `worst_T` is the G1 bound over `T` if nobody freezes, for payouts not yet requested. Tickets already queued are not in it: they can come due inside `T` and land together (finding 102), and `queued` is their total.
 - `available_now` is exact: that amount would be instant; one unit more would not.
 
 Any program can CPI into it. A router or curator can read a venue's live worst case **on-chain** and refuse to route funds when it's too large.

@@ -5,7 +5,7 @@ Bulkhead was submitted to the Colosseum Crypto World's Fair (Solana track) on 12
 ## 1. In brief
 
 - **One line:** the circuit breaker your Solana protocol's own admin can't turn off.
-- **Short:** Drift had withdrawal limits; the attacker raised them. Bulkhead holds a protocol's token accounts. Taking back your own deposit is never throttled; any other payout leaves at most 2% of the vault an hour and 5% a day (at most 10% in any day), the rest waits in a public queue guardians can freeze, and loosening waits 72h by constant. Floor puts a 72h delay and a guardian stop under the program's upgrade key.
+- **Short:** Drift had withdrawal limits; the attacker raised them. Bulkhead holds a protocol's token accounts. Taking back your own deposit is never throttled; any other payout counts against 2% of the vault an hour and 5% a day when it is requested (of a day's requests, at most 10% is paid that day), the rest waits at least 6 hours in a public queue guardians can freeze and cancel, and loosening waits 72h by constant. Floor puts a 72h delay and a guardian stop under the program's upgrade key.
 - **Status:** devnet only, not audited, not for real funds (`SECURITY.md`).
 
 ## 2. Where to check each claim

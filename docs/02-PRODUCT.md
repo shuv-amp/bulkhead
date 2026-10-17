@@ -46,7 +46,7 @@ These are the product. Each has a proof or a test (`03`, `09`).
 
 | ID | Plain words | Precise statement |
 |---|---|---|
-| **G1** | Unbacked money leaves at most 2% per hour and 5% per day of the vault | For any `t0, T ≥ 0`: the unbacked amount requested in `[t0, t0+T]` and paid by `t0+T` is ≤ `C_s·(W_s+T)/W_s` and ≤ `C_l·(W_l+T)/W_l`. It holds with the protocol's admin and upgrade keys compromised. `C` is a fraction of `min(reference, live balance, low-water balance)`, clamped to the absolute caps when set (`03 §3`); over a window, the largest `C` in it applies. |
+| **G1** | Of the unbacked payouts requested in a window, at most 2% of the vault per hour and 5% per day (plus one bucket) are paid within it | For any `t0, T ≥ 0`: the unbacked amount requested in `[t0, t0+T]` and paid by `t0+T` is ≤ `C_s·(W_s+T)/W_s` and ≤ `C_l·(W_l+T)/W_l`. It holds with the protocol's admin and upgrade keys compromised. `C` is a fraction of `min(reference, live balance, low-water balance)`, clamped to the absolute caps when set (`03 §3`); over a window, the largest `C` in it applies. |
 | **G2** | Your own deposit is never throttled, frozen or priced | An owner with no liabilities is paid at least `min(amount, own net deposit)` of that mint through the backed lane: no prices are needed, and no freeze or limit applies. (Whether the tokens are in the vault is the pool's liquidity: lending moves deposits out, and a bounded unbacked loss reduces the pool; `03 §4.6`.) |
 | **G3** | The backed lane never pays more than the owner's ledger supports | After any backed payment, either nobody in that ledger owes anything, or health ≥ 0 at conservative prices, or the payment was the owner's own deposit of a mint that is not allowlisted (worth 0 as collateral anyway) |
 | **G4** | Tighten now, loosen later | A change that tightens every field applies instantly. Any other change waits ≥ 72 hours (a constant), is public, any guardian can veto it, and it expires 7 days after becoming executable. With its guardian quorum, a protocol may **abdicate** loosening a change kind forever; tightening it stays instant. |
@@ -65,7 +65,7 @@ That budget is 2.07% of the vault if the freeze lands in 2 minutes, 4% in 1 hour
 ## 4. UX principles
 
 1. **Invisible when things are fine.** Deposits, withdrawals of own funds and ordinary borrows never touch the limiter. Calibration (`07 §4`) checks this on the protocol's own history.
-2. **One line of worst case.** Every status page leads with: "Worst case right now: **$X** instantly, at most **$Y** in 1 hour, **$Z** in 24 hours."
+2. **One line of worst case.** Every status page leads with: "Worst case right now: **$X** instantly, at most **$Y** in 1 hour, **$Z** in 24 hours." These count new requests only: payouts already queued, which can come due together (finding 102), are shown beside it as pending tickets.
 3. **Queued is visible, not lost.** A ticket shows its amount, reason (unbacked, over the limit), ETA and status. The protocol shows "arriving at ETA" in its own UI.
 4. **Every loosening has a countdown.** Pending changes show time left and who can veto.
 5. **Numbers are real or labelled.** Replays show signatures. Models say "model" and list their assumptions next to the number.
@@ -77,6 +77,7 @@ For each vault, computed from on-chain state (`03 §7`):
 - `available_now`, from both buckets, capped at the vault's token balance.
 - `worst_1h` = `min_k C_k·(W_k + 1 hour)/W_k`.
 - `worst_24h` = `min_k C_k·(W_k + 24 hours)/W_k`.
+- `queued`, the pending tickets: not in `worst_*`, and they can come due together (`09`, finding 102).
 
 Summed across vaults at display prices. Display prices are **never** used on-chain.
 When frozen: "Frozen: $0 can leave unbacked until {time}."

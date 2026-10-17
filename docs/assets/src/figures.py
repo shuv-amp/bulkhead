@@ -86,7 +86,7 @@ def header(t):
     <text class="monom" x="{fx+8}" y="{deck-24}" font-size="10.5" fill="{t['sig']}" style="fill:{t['sig']}">BREACH — ADMIN KEY STOLEN</text>
     <line x1="{bh[2]}" y1="{keel+10}" x2="{bh[2]}" y2="{keel+26}" stroke="{t['ink']}" stroke-width="1"/>
     <text class="monom" x="{bh[2]+8}" y="{keel+25}" font-size="10.5">BULKHEAD — HOLDS</text>
-    <text class="mono" x="1000" y="{keel+25}" font-size="10.5" text-anchor="end">OUTFLOW ≤ 2% / H · 5% / DAY</text>
+    <text class="mono" x="1000" y="{keel+25}" font-size="10.5" text-anchor="end">LIMITS REFILL 2% / H · 5% / DAY</text>
     """
 
 # ---------------------------------------------------------------- fig 1

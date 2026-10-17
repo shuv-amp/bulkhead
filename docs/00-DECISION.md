@@ -12,7 +12,7 @@ It is one small immutable program family with two products:
 | Product | What the protocol hands over | What it gets | Integration |
 |---|---|---|---|
 | **Floor** (Tier 0) | Its program's **upgrade authority** | Upgrades wait at least 72 hours, in public, and any guardian can veto. Any guardian can stop the program in one transaction. | One transaction, zero code changes |
-| **Vault** (Tier 1) | Its **vault token accounts** (and optionally mint authority) | Unbacked money leaves at most 2% per hour and 5% per day (each a refill rate on a bucket of the same size); an owner taking back their own deposit is never throttled, frozen or priced. | About 40 lines of CPI calls |
+| **Vault** (Tier 1) | Its **vault token accounts** (and optionally mint authority) | Unbacked payouts count against 2% per hour and 5% per day when they are requested (each a refill rate on a bucket of the same size), and above that wait at least 6h in a public queue; an owner taking back their own deposit is never throttled, frozen or priced. | About 40 lines of CPI calls |
 
 Floor is how a protocol says yes in one afternoon. Vault is what bounds a Drift. The pitch never claims Floor bounds a Drift.
 
