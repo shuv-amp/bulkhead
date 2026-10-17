@@ -108,6 +108,7 @@ The other Floor tests cover:
 - dead guardians and heartbeats;
 - ejecting a rogue guardian;
 - registration front-running and pre-funding;
+- another program's programdata, program or Floor authority named in an instruction, refused with Floor's own code;
 - non-canonical, unfrozen and oversized abort buffers;
 - the delay rules, expiry and release of the authority;
 - measured compute on a 200 KB program (`06 §7`).

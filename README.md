@@ -6,7 +6,7 @@
   <a href="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#live-on-devnet"><img alt="Live on devnet" src="https://img.shields.io/badge/devnet-live-2F5BFF?labelColor=07080b"></a>
   <a href="docs/09-VERIFICATION.md"><img alt="19 Kani proofs" src="https://img.shields.io/badge/Kani_proofs-19%2F19-2F5BFF?labelColor=07080b"></a>
-  <a href="docs/09-VERIFICATION.md"><img alt="172 program tests" src="https://img.shields.io/badge/program_tests-172%2F172-2F5BFF?labelColor=07080b"></a>
+  <a href="docs/09-VERIFICATION.md"><img alt="173 program tests" src="https://img.shields.io/badge/program_tests-173%2F173-2F5BFF?labelColor=07080b"></a>
   <a href="SECURITY.md"><img alt="Not audited" src="https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-c2410c?labelColor=07080b"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-8a8d96?labelColor=07080b"></a>
 </p>
@@ -181,7 +181,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **172/172**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (7,075 swaps refused, 16 Oct) |
+| Programs on the real runtime (LiteSVM, mainnet feature set, mainnet token program) | **173/173**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (7,075 swaps refused, 16 Oct) |
 | Bounded proofs (Kani) and exhaustive checks | **19/19 harnesses verified** on 16 Oct (16 for every value of their types), 240 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
 | Differential: an independent Python reference vs the Rust core | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | Program vs model | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
@@ -191,7 +191,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | Golden vectors (every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts) | 119/119 identical, Rust = Python |
 | End to end | [Above](#what-it-does-to-an-attack) |
 | On devnet | All three programs run the build of PR #85 (15 Oct; this tree's Floor and Vault add finding 107, not deployed yet), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
-| What this process found in our own code and docs | **110 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–110 were recorded after the submission (107 is the engagement's AUD-2, decided 16 Oct): 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 105 (CI tooling), 106 and 108 (Vault tests), 107 (the guardian margin, not yet on devnet), 109 (fuzz targets) and 110 (Floor tests) are fixed; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| What this process found in our own code and docs | **111 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–111 were recorded after the submission (107 is the engagement's AUD-2, decided 16 Oct): 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 105 (CI tooling), 106 and 108 (Vault tests), 107 (the guardian margin, not yet on devnet), 109 (fuzz targets), 110 and 111 (Floor tests) are fixed; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## Live on devnet
 
