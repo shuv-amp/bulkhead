@@ -78,7 +78,7 @@ fn cfg() -> LimitConfig {
 fn program_matches_the_core_model_on_random_sequences() {
     let steps = env_u64("BULKHEAD_PROGRAM_STEPS", 250);
     let seeds = env_u64("BULKHEAD_PROGRAM_SEEDS", 4);
-    let mut totals = [0u64; 11];
+    let mut totals = [0u64; 13];
     for seed in 0..seeds {
         let t = run(0xB0B + seed, steps);
         for (a, b) in totals.iter_mut().zip(t) {
@@ -86,18 +86,21 @@ fn program_matches_the_core_model_on_random_sequences() {
         }
     }
     println!(
-        "program-vs-model: {} steps; deposits {} | releases {} (backed {} instant {} queued {} refused {}: queue full {}, want of tokens {}, lane closed {}) | settles {} | cancels {} ",
-        steps * seeds, totals[0], totals[1], totals[2], totals[3], totals[4], totals[5], totals[8], totals[9], totals[10], totals[6], totals[7]
+        "program-vs-model: {} steps; deposits {} | releases {} (backed {} instant {} queued {} refused {}: queue full {}, want of tokens {}, lane closed {}) | settles {} (refused: frozen {}, want of tokens {}) | cancels {} ",
+        steps * seeds, totals[0], totals[1], totals[2], totals[3], totals[4], totals[5], totals[8], totals[9], totals[10], totals[6], totals[11], totals[12], totals[7]
     );
     // Coverage: every path was exercised, each many times. A release refused
     // for want of tokens or a closed lane did not occur in the default run
     // (docs/09 has the 24 x 500 counts); the wide differential requires both.
+    // Refused settles are counted, not required: the default run has some
+    // while frozen and none for want of tokens.
     assert!(totals[..9].iter().all(|&x| x >= 10), "every operation and outcome occurred often: {totals:?}");
 }
 
 /// Returns counters: deposits, releases, backed, instant, queued, refused, settles, cancels,
-/// refused for a full queue, refused for want of tokens, refused for a closed lane.
-fn run(seed: u64, steps: u64) -> [u64; 11] {
+/// refused for a full queue, refused for want of tokens, refused for a closed lane,
+/// settles refused while frozen, settles refused for want of tokens.
+fn run(seed: u64, steps: u64) -> [u64; 13] {
     let mut rng = Rng(seed);
     let mut env = Env::new();
     let m = Market::new(&mut env);
@@ -178,7 +181,7 @@ fn run(seed: u64, steps: u64) -> [u64; 11] {
     env.advance(3 * DAY);
     env.ok(&[m.execute_seal_ix(&[&usdc, &sol])], &[]);
 
-    let mut c = [0u64; 11];
+    let mut c = [0u64; 13];
     let mut ticket_accounts: BTreeMap<u64, (Address, Address)> = BTreeMap::new(); // id -> (ticket, recipient)
     let mut last_heartbeat = env.time - 3 * DAY; // registered at genesis, 72h ago
     for step in 0..steps {
@@ -338,7 +341,11 @@ fn run(seed: u64, steps: u64) -> [u64; 11] {
                     let ix = m.settle_ix(&usdc, &ticket, &recipient, &env.payer.pubkey());
                     let r = env.send(&[ix], &[]);
                     if now < md.frozen_until || amount > md.balance {
-                        assert!(r.is_err(), "frozen, or not enough tokens: no settlement");
+                        // Frozen is checked first; the program's own error when short.
+                        let (want, slot) = if now < md.frozen_until { (verr::FROZEN, 11) } else { (verr::INSUFFICIENT_BALANCE, 12) };
+                        let f = r.as_ref().err().unwrap_or_else(|| panic!("seed {seed} step {step}: settle went through"));
+                        assert_eq!(custom_code(f), Some(want), "seed {seed} step {step}: settle refused with {:?}", f.err);
+                        c[slot] += 1;
                     } else {
                         r.unwrap_or_else(|e| panic!("seed {seed} step {step}: settle {:?}", e.err));
                         md.low = md.low.touch(md.balance, now, md.ref_init);
