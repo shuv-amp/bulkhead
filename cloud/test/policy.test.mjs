@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, floorCheck, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, floorCheck, checkFloors, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -225,6 +225,58 @@ test("floor readiness is logged once per change, names what is missing, and each
   const back = floorCheck(reported, P, ready);
   assert.deepEqual(back, { msg: "floor ready", program: P });
   assert.equal(alertFor(back, seen, 240_000), null);
+});
+
+test("a Floor program whose config can't be read skips none of the programs after it, and fails the check", async () => {
+  const [P, P2, P3] = [PROTOCOL_ID, owner, mint];
+  const ready = { status: "live", abortStaged: true, snapshotPinned: true, guardians: [], threshold: 0 };
+  const unarmed = { ...ready, abortStaged: false };
+  const reported = new Map(), sets = [], lines = [];
+  let broken = true, broken2 = false;
+  const programs = [
+    [P, async () => { if (broken) throw new Error("account too short"); return ready; }],
+    [P2, async () => { if (broken2) throw new Error("timed out"); return unarmed; }],
+    [P3, async () => null],
+  ];
+  const check = () => checkFloors(programs, reported, (program, fl) => sets.push([program, fl]), (line) => lines.push(line));
+  // The step fails, so a read that keeps failing raises the stall alert.
+  await assert.rejects(check(), { message: `${P}: account too short` });
+  // The programs after it were checked: they used to wait until P read again.
+  assert.deepEqual(sets, [[P2, unarmed]]);
+  assert.deepEqual(lines.map((l) => [l.program, l.msg.slice(0, 26)]), [[P2, "floor not ready (unarmed):"], [P3, "floor not ready (missing):"]]);
+  // P is checked once it reads again; the others are said once.
+  broken = false;
+  await check();
+  assert.deepEqual(sets.slice(1), [[P, ready], [P2, unarmed]]);
+  assert.deepEqual(lines.slice(2), [{ msg: "floor ready", program: P }]);
+  // A failed read keeps P2's last answer, so reading unarmed again after
+  // it says nothing: a flaky RPC must not page the same alert each time.
+  broken2 = true;
+  await assert.rejects(check(), { message: `${P2}: timed out` });
+  assert.deepEqual(sets.slice(3), [[P, ready]], "P2's set is not checked while it can't be read");
+  broken2 = false;
+  await check();
+  assert.equal(lines.length, 3);
+  assert.deepEqual(sets.slice(4), [[P, ready], [P2, unarmed]]);
+  // A read that throws before it returns a promise is a failed read too.
+  const seen = [];
+  const sync = [[P, () => { throw new Error("decode"); }], [P2, async () => unarmed]];
+  await assert.rejects(checkFloors(sync, new Map(), (program) => seen.push(program), () => {}), { message: `${P}: decode` });
+  assert.deepEqual(seen, [P2]);
+});
+
+test("the Floor configs are read together, so an RPC outage costs one timeout, not one per program", async () => {
+  const programs = [PROTOCOL_ID, owner, mint];
+  let started = 0;
+  const read = async () => {
+    started += 1;
+    await null;
+    // Read one at a time, the first would see itself alone here.
+    if (started < programs.length) throw new Error("read one at a time");
+    throw new Error("timed out");
+  };
+  await assert.rejects(checkFloors(programs.map((p) => [p, read]), new Map(), () => {}, () => {}),
+    { message: programs.map((p) => `${p}: timed out`).join("; ") });
 });
 
 test("a guardian set without two keys beyond its threshold is warned about once per shape, alerting on mainnet only (finding 107)", async () => {
