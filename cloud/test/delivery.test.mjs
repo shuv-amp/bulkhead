@@ -277,7 +277,7 @@ test("failover: a call that saw only the old endpoint fail leaves a newer move a
   // Both start on e0. A fails over to e2. B, failing on e0 after that, gets
   // an answer from e1: it has no evidence against e2.
   let a;
-  const { rpc, switches } = overlapRpc([
+  const { rpc, switches, causes } = overlapRpc([
     { A: [false], B: [false, () => settled(a)] },
     { A: [false], B: [true] },
     { A: [true], B: [true] },
@@ -286,13 +286,14 @@ test("failover: a call that saw only the old endpoint fail leaves a newer move a
   assert.deepEqual(await Promise.all([a, rpc.call("m", ["B"])]), ["e2", "e1"]);
   assert.equal(rpc.active, 2);
   assert.deepEqual(switches, [[e(0), e(2)]]);
+  assert.deepEqual(causes, ["e0: fetch failed"], "A's switch names e0's error, not e1's, its last");
 });
 
 test("failover: a call that saw the new endpoint fail too moves off it", async () => {
   // A moves e0 -> e1. B, started on e0, then sends to e1, which fails it,
   // and e2 answers: e1 failed after the last move, so B moves to e2.
   let a;
-  const { rpc, switches } = overlapRpc([
+  const { rpc, switches, causes } = overlapRpc([
     { A: [false], B: [false, () => settled(a)] },
     { A: [true], B: [false] },
     { A: [true], B: [true] },
@@ -301,6 +302,7 @@ test("failover: a call that saw the new endpoint fail too moves off it", async (
   assert.deepEqual(await Promise.all([a, rpc.call("m", ["B"])]), ["e1", "e2"]);
   assert.equal(rpc.active, 2);
   assert.deepEqual(switches, [[e(0), e(1)], [e(1), e(2)]]);
+  assert.deepEqual(causes, ["e0: fetch failed", "e1: fetch failed"], "each switch names the error of the endpoint it leaves");
 });
 
 test("failover: a fresh failure on an endpoint that is not active is no evidence against the active one", async () => {

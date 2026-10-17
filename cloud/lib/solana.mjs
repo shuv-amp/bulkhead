@@ -433,22 +433,23 @@ export class FailoverRpc extends Rpc {
    * endpoint that answered only if the active endpoint failed a request this
    * call sent after the last move: older evidence would undo a newer call's
    * move (a slow answer from the old endpoint, or a request sent before
-   * another call's switch).
+   * another call's switch). The switch reports that endpoint's error.
    */
   async call(method, params = []) {
     const start = this.active;
-    const failedAt = new Map(); // endpoint -> this.switches when the failed request was sent
+    const failedAt = new Map(); // endpoint -> { sentAt: this.switches when sent, error }
     let last;
     for (let i = 0; i < this.endpoints.length; i++) {
       const at = (start + i) % this.endpoints.length;
       const sentAt = this.switches;
       try {
         const result = await this.endpoints[at].call(method, params);
-        if (failedAt.get(this.active) === this.switches) this.switchTo(at, last);
+        const evidence = failedAt.get(this.active);
+        if (evidence?.sentAt === this.switches) this.switchTo(at, evidence.error);
         return result;
       } catch (e) {
         if (!endpointTrouble(e)) throw e;
-        failedAt.set(at, sentAt);
+        failedAt.set(at, { sentAt, error: e });
         last = e;
       }
     }
