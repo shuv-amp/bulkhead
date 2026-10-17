@@ -17,6 +17,11 @@
 //! whether the program's own check exists. Nor can it tell which of the
 //! program's checks refused: one deleted where a later check returns a
 //! code of the same program passes, so such checks need their own tests.
+//! A set of accounts that other checks tie to each other (a vault, its
+//! token account, its lifeboat) is also swapped whole for its twin in
+//! another protocol (`twin`), which must be refused with the code of the
+//! check that ties the set to this protocol: one at a time, the other
+//! checks refuse first, with the same code.
 #![allow(dead_code)]
 
 use super::vault::*;
@@ -96,6 +101,16 @@ pub fn backstop(at: usize, refusals: &[InstructionError], why: &'static str) -> 
     }
 }
 
+/// A set of accounts swapped whole for their twins in another protocol.
+#[derive(Clone)]
+struct Twin {
+    what: String,
+    /// (account, its twin); the first is the set's anchor (the vault).
+    pairs: Vec<(Address, Address)>,
+    /// The code of the check that ties the set to its protocol.
+    code: u32,
+}
+
 pub struct Sweep {
     /// The swept program's error codes (`codes`).
     own: Range<u32>,
@@ -112,6 +127,10 @@ pub struct Sweep {
     /// (run name, key) for every key sent unsigned at all its checked
     /// slots (the payer standing in at free slots where it signed).
     pub unsigned: Vec<(String, Address)>,
+    /// Sets of accounts swapped whole (`twin`).
+    twins: Vec<Twin>,
+    /// (run name, set) for every transaction sent with a twin set swapped in.
+    pub twinned: Vec<(String, String)>,
 }
 
 impl Sweep {
@@ -160,6 +179,8 @@ impl Sweep {
             backstopped: 0,
             runs: 0,
             unsigned: vec![],
+            twins: vec![],
+            twinned: vec![],
         }
     }
 
@@ -196,6 +217,8 @@ impl Sweep {
             backstopped: 0,
             runs: 0,
             unsigned: vec![],
+            twins: vec![],
+            twinned: vec![],
         }
     }
 
@@ -209,6 +232,30 @@ impl Sweep {
     /// Another account a careless check would accept here.
     pub fn decoy(&mut self, name: &str, a: Address) {
         self.decoys.push((name.into(), a));
+    }
+
+    /// A set of accounts to swap whole for their twins, refused with
+    /// `code`, in every run that names its first account (in its accounts
+    /// or its data).
+    pub fn twin(&mut self, name: &str, pairs: Vec<(Address, Address)>, code: u32) {
+        self.twins.push(Twin {
+            what: name.into(),
+            pairs,
+            code,
+        });
+    }
+
+    /// The twin sets no run has swapped in (stale: the runs they were for
+    /// moved or no longer name the anchor).
+    pub fn unused_twins(&self) -> Vec<String> {
+        let used: HashSet<&String> = self.twinned.iter().map(|(_, set)| set).collect();
+        let mut stale: Vec<String> = vec![];
+        for t in &self.twins {
+            if !used.contains(&t.what) && !stale.contains(&t.what) {
+                stale.push(t.what.clone());
+            }
+        }
+        stale
     }
 
     /// Sends `ix` signed by whichever known keys it needs (plus `extra`);
@@ -450,6 +497,62 @@ impl Sweep {
                 Outcome::Unsignable
             ) {
                 self.unsigned.push((name.into(), orig.pubkey));
+            }
+        }
+        // Each twin set whose anchor the transaction names, swapped whole:
+        // every account of the set it names becomes its twin, and so does
+        // each address of the set in the instruction data (a change names
+        // its target vault); not at a free slot, which takes any account.
+        // A set whose other accounts the transaction lacks can come to the
+        // same transaction as a smaller set: it is sent once.
+        let mut sent: Vec<Instruction> = vec![];
+        for Twin { what, pairs, code } in self.twins.clone() {
+            let twin = |a: &Address| pairs.iter().find(|(from, _)| from == a).map(|(_, to)| *to);
+            let anchor = pairs[0].0;
+            let in_data = ix.data.windows(32).any(|w| w == anchor.as_ref());
+            if !in_data && !ix.accounts.iter().any(|a| a.pubkey == anchor) {
+                continue;
+            }
+            let mut tampered = ix.clone();
+            for (i, a) in tampered.accounts.iter_mut().enumerate() {
+                if let Some(to) = twin(&a.pubkey).filter(|_| !free.contains(&i)) {
+                    a.pubkey = to;
+                }
+            }
+            for (from, to) in &pairs {
+                let mut i = 0;
+                while i + 32 <= tampered.data.len() {
+                    if tampered.data[i..i + 32] == *from.as_ref() {
+                        tampered.data[i..i + 32].copy_from_slice(to.as_ref());
+                        i += 32;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            if sent.contains(&tampered) {
+                continue;
+            }
+            sent.push(tampered.clone());
+            env.svm = base.clone();
+            let r = self.send(env, tampered, None);
+            if r.is_some() {
+                self.twinned.push((name.into(), what.clone()));
+            }
+            match r {
+                Some(Err(f)) if custom_code(&f) == Some(code) => {}
+                Some(Err(f)) => {
+                    let by = f.meta.logs.iter().find(|l| l.contains(" failed: "));
+                    self.unexpected.push(format!(
+                        "{name}: {what} replaced by its twin: refused by {:?}, not code {code} ({})",
+                        f.err,
+                        by.map_or("no failure logged", |l| l.as_str())
+                    ));
+                }
+                r => self.unexpected.push(format!(
+                    "{name}: {what} replaced by its twin: {:?}, not refused",
+                    r.map(|r| r.map_err(|f| f.err))
+                )),
             }
         }
         // A backstop error no swap produced is stale: the program now

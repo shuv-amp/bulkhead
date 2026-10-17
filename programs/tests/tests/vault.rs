@@ -2471,6 +2471,47 @@ fn a_stolen_recovery_key_is_replaced_by_the_admin_with_a_live_quorum() {
     assert_eq!(protocol_admin(&w), admin);
 }
 
+/// A vault in `other` for the world's USDC mint (and SOL's, with `sol`),
+/// and the sweep's twin sets: a vault with its token and lifeboat
+/// accounts, for the other protocol's vault of the same mint. Each account
+/// alone is refused by the checks that tie it to the vault, so only the
+/// whole set reaches the check that ties the vault to its protocol
+/// (`load_vault`).
+fn twin_vaults(
+    w: &mut World,
+    other: &Market,
+    s: &mut common::sweep::Sweep,
+    sol: bool,
+) -> Vec<(VaultRef, Vec<(Address, Address)>)> {
+    let lifeboat = |m: &Market, v: &VaultRef| {
+        pda(&[b"lifeboat-tokens", m.protocol.as_ref(), v.mint.as_ref()], &m.vault_program)
+    };
+    let mut twins = vec![];
+    let mut vaults = vec![("the USDC vault", &w.usdc)];
+    if sol {
+        vaults.push(("the SOL vault", &w.sol));
+    }
+    for (name, v) in vaults {
+        let t = other.create_vault_for(
+            &mut w.env,
+            v.mint,
+            v.mint_authority.insecure_clone(),
+            v.decimals,
+            Limits::default_limits(),
+            v.feed,
+            v.token_program,
+        );
+        let pairs = vec![
+            (v.vault, t.vault),
+            (v.vault_tokens, t.vault_tokens),
+            (lifeboat(&w.m, v), lifeboat(other, &t)),
+        ];
+        s.twin(name, pairs.clone(), verr::WRONG_VAULT);
+        twins.push((t, pairs));
+    }
+    twins
+}
+
 #[test]
 fn every_account_substitution_is_refused() {
     use common::sweep::{any, backstop, role, Allow, Sweep};
@@ -2480,6 +2521,8 @@ fn every_account_substitution_is_refused() {
     let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
     let other_vault = other.create_vault(&mut w.env, 6, Limits::default_limits(), USDC_FEED, None);
     let mut s = Sweep::for_market(&w.env, &w.m, &w.sol, &other, &other_vault);
+    // Only the seal, swept in the second world, uses the SOL vault.
+    let twins = twin_vaults(&mut w, &other, &mut s, false);
 
     let whale = w.user();
     let whale_acc = w.deposit("usdc", &whale, 10_000_000 * USDC);
@@ -2507,9 +2550,26 @@ fn every_account_substitution_is_refused() {
         10_000_000 * USDC,
     );
     w.env.ok(&[ix], &[&other_whale]);
+    let twin_usdc = &twins[0].0;
+    let twin_acc = w.account("usdc", &other_whale.pubkey());
+    w.env.mint_to(
+        &w.usdc.mint,
+        &w.usdc.mint_authority,
+        &twin_acc,
+        10_000_000 * USDC,
+        &w.usdc.token_program,
+    );
+    let ix = other.deposit_ix(
+        &w.env,
+        twin_usdc,
+        &other_whale.pubkey(),
+        &twin_acc,
+        10_000_000 * USDC,
+    );
+    w.env.ok(&[ix], &[&other_whale]);
     w.env.ok(&[other.propose_seal_ix()], &[&other.admin]);
     w.seal();
-    let ix = other.execute_seal_ix(&[&other_vault]);
+    let ix = other.execute_seal_ix(&[&other_vault, &twins[0].0]);
     w.env.ok(&[ix], &[]);
     // Look-alikes a missing check would accept: a stranger's token accounts of
     // both mints, a queued ticket on the other vault, and one in the other market.
@@ -2544,6 +2604,25 @@ fn every_account_substitution_is_refused() {
     let (_, other_ticket) = other.next_ticket(&w.env);
     w.env.ok(&[ix], &[&other.admin]);
     s.decoy("a ticket in the other market", other_ticket);
+    // A ticket on the other protocol's USDC vault: with the vault, the twin
+    // of a ticket on this protocol's (each ticket names its vault).
+    let twin_payee = w.account("usdc", &stranger);
+    let ix = other.admin_payout_ix(
+        &w.env,
+        twin_usdc,
+        &twin_payee,
+        &stranger,
+        500_000 * USDC,
+        &[(twin_usdc.asset, twin_usdc.price)],
+    );
+    let (_, twin_ticket) = other.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&other.admin]);
+    assert!(w.env.svm.get_account(&twin_ticket).is_some(), "the twin payout queues");
+    let with_ticket = |t: Address| {
+        let mut pairs = twins[0].1.clone();
+        pairs.push((t, twin_ticket));
+        pairs
+    };
     let (admin, g0, g1, g2) = (
         w.m.admin.pubkey(),
         w.m.g[0].pubkey(),
@@ -2688,6 +2767,7 @@ fn every_account_substitution_is_refused() {
         &w.usdc_prices(true),
     );
     let (_, t1) = w.m.next_ticket(&w.env);
+    s.twin("the USDC vault and ticket t1", with_ticket(t1), verr::WRONG_VAULT);
     s.run(
         &mut w.env,
         "admin payout (queued)",
@@ -2736,6 +2816,7 @@ fn every_account_substitution_is_refused() {
         &w.usdc_prices(true),
     );
     let (_, t2) = w.m.next_ticket(&w.env);
+    s.twin("the USDC vault and ticket t2", with_ticket(t2), verr::WRONG_VAULT);
     w.env.ok(&[ix], &[&w.m.admin]);
     // Past the ticket's ETA, heartbeating on the way (a guardian silent
     // longer than its 7-day interval stops counting).
@@ -3119,6 +3200,7 @@ fn every_account_substitution_is_refused() {
     let other_p = Market::with_ids(&mut p.env, p.m.vault_program, Address::new_unique());
     let other_pv = other_p.create_vault(&mut p.env, 6, Limits::default_limits(), USDC_FEED, None);
     let mut sp = Sweep::for_market(&p.env, &p.m, &p.sol, &other_p, &other_pv);
+    twin_vaults(&mut p, &other_p, &mut sp, true);
     let ix = create_vault_ix(&mut p, &Limits::default_limits());
     let (third_vault, third_tokens, third_mint) = (
         ix.accounts[3].pubkey,
@@ -3237,6 +3319,20 @@ fn every_account_substitution_is_refused() {
         s.unsignable + sp.unsignable,
         s.backstopped + sp.backstopped
     );
+    println!(
+        "{} transactions with a vault's accounts swapped whole for another protocol's",
+        s.twinned.len() + sp.twinned.len()
+    );
+    // Every twin set is swapped in somewhere, and the tickets' sets reach
+    // the runs whose vault check a ticket's check would otherwise hide.
+    assert_eq!(s.unused_twins(), Vec::<String>::new());
+    assert_eq!(sp.unused_twins(), Vec::<String>::new());
+    for (run, set) in [
+        ("settle ticket", "the USDC vault and ticket t2"),
+        ("cancel ticket", "the USDC vault and ticket t1"),
+    ] {
+        assert!(s.twinned.contains(&(run.into(), set.into())), "{run}: {set} not swapped");
+    }
     let mut all = s.unexpected;
     all.extend(sp.unexpected);
     assert!(
