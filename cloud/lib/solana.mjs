@@ -368,9 +368,16 @@ export const SIGNATURE_LAG_SWITCH_MS = 30_000;
  * calls still slow down as the servers asked. An answer is never retried elsewhere: a
  * refused simulation is the same on every node. `onSwitch(from, to, error)`
  * reports a change of endpoint.
+ *
+ * With `genesis`, an endpoint is used only once its genesis hash has matched
+ * it, asked before its first use and again before each cross-check until it
+ * answers. One on another cluster is never used. The guardian checked only
+ * the active endpoint, and a failover or a cross-check could move it onto a
+ * backup on another cluster, blind (docs/09, finding 114).
+ * `onCluster(url, genesis, at)` reports each endpoint's hash when first learned.
  */
 export class FailoverRpc extends Rpc {
-  constructor(urls, { onSwitch = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
+  constructor(urls, { onSwitch = () => {}, genesis = null, onCluster = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
     super(urls[0], { timeoutMs, retries, ...opts });
     // Each endpoint hurries: a busy one asking for a long wait is left at
     // once, here and in crossCheck, which the guardian's loop waits for.
@@ -378,6 +385,36 @@ export class FailoverRpc extends Rpc {
     this.active = 0;
     this.switches = 0; // moves of `active`, so a call can tell its evidence is older
     this.onSwitch = onSwitch;
+    this.genesis = genesis;
+    this.onCluster = onCluster;
+    this.cluster = urls.map(() => (genesis == null ? "ok" : "unknown")); // "ok", "unknown" or "wrong"
+    this.asking = urls.map(() => null); // a genesis ask in flight
+  }
+  /**
+   * Whether endpoint `at` may be used: an unchecked one is asked for its
+   * genesis hash first, once for all the calls waiting on it. If it cannot
+   * answer, throws an error that sends the call on to the next endpoint.
+   */
+  async admit(at) {
+    if (this.cluster[at] !== "unknown") return this.cluster[at] === "ok";
+    this.asking[at] ??= this.askGenesis(at).finally(() => { this.asking[at] = null; });
+    await this.asking[at];
+    return this.cluster[at] === "ok";
+  }
+  /**
+   * Any failure to give a hash, a refusal included, is no answer: the error
+   * keeps a busy endpoint's wait but not its JSON-RPC code, so call() goes on.
+   */
+  async askGenesis(at) {
+    let got;
+    try {
+      got = await this.endpoints[at].call("getGenesisHash", []);
+    } catch (e) {
+      throw Object.assign(new Error(e.message), { waitMs: e.waitMs, hurried: e.hurried });
+    }
+    if (typeof got !== "string") throw new Error("getGenesisHash: no hash");
+    this.cluster[at] = got === this.genesis ? "ok" : "wrong";
+    this.onCluster(this.endpoints[at].url, got, at);
   }
   /** Make endpoint `at` the one asked first, and say so (`onSwitch`). */
   switchTo(at, cause) {
@@ -406,7 +443,7 @@ export class FailoverRpc extends Rpc {
   async crossCheck(address, { slotLag = SLOT_LAG_SWITCH, sigLagMs = SIGNATURE_LAG_SWITCH_MS, depth = 100, nowMs = Date.now() } = {}) {
     this.missing ??= new Map(); // signature -> { at: first seen missing, from: endpoint index }
     const quiet = (p) => p.then((v) => v, () => undefined);
-    const slots = await Promise.all(this.endpoints.map((e) => quiet(e.call("getSlot", [{ commitment: "confirmed" }]))));
+    const slots = await Promise.all(this.endpoints.map((e, i) => quiet(this.admit(i).then((ok) => (ok ? e.call("getSlot", [{ commitment: "confirmed" }]) : undefined)))));
     const active = this.active;
     let best = active;
     for (let i = 0; i < slots.length; i++) if (slots[i] != null && (slots[best] == null || slots[i] > slots[best])) best = i;
@@ -420,7 +457,7 @@ export class FailoverRpc extends Rpc {
     const q = (limit) => [address, { limit, commitment: "confirmed" }];
     const [mine, ...theirs] = await Promise.all([
       quiet(this.endpoints[active].call("getSignaturesForAddress", q(depth))),
-      ...this.endpoints.map((e, i) => (i === active ? Promise.resolve(undefined) : quiet(e.call("getSignaturesForAddress", q(1))))),
+      ...this.endpoints.map((e, i) => (i === active || this.cluster[i] !== "ok" ? Promise.resolve(undefined) : quiet(e.call("getSignaturesForAddress", q(1))))),
     ]);
     if (!mine) return { switched: false, reason: null, slots };
     const listed = new Set(mine.map((x) => x.signature));
@@ -472,10 +509,13 @@ export class FailoverRpc extends Rpc {
       const at = order[i];
       const sentAt = this.switches;
       try {
-        const result = await this.endpoints[at].call(method, params);
-        const evidence = failedAt.get(this.active);
-        if (evidence?.sentAt === this.switches) this.switchTo(at, evidence.error);
-        return result;
+        if (await this.admit(at)) {
+          const result = await this.endpoints[at].call(method, params);
+          const evidence = failedAt.get(this.active);
+          if (evidence?.sentAt === this.switches) this.switchTo(at, evidence.error);
+          else if (this.cluster[this.active] === "wrong") this.switchTo(at, new Error("RPC endpoint serves another cluster"));
+          return result;
+        }
       } catch (e) {
         if (!endpointTrouble(e)) throw e;
         failedAt.set(at, { sentAt, error: e });
@@ -483,14 +523,14 @@ export class FailoverRpc extends Rpc {
         hurried ||= e.hurried === true;
         const readyAt = e.waitMs != null ? Date.now() + e.waitMs : null;
         if (readyAt != null && (soonest == null || readyAt < soonest.readyAt)) soonest = { at, readyAt };
-        if (i === order.length - 1 && hurried && !rested) {
-          rested = true; // once: then the last error stands
-          await new Promise((res) => setTimeout(res, Math.max(0, soonest.readyAt - Date.now())));
-          order.push(soonest.at);
-        }
+      }
+      if (i === order.length - 1 && hurried && !rested) {
+        rested = true; // once: then the last error stands
+        await new Promise((res) => setTimeout(res, Math.max(0, soonest.readyAt - Date.now())));
+        order.push(soonest.at);
       }
     }
-    throw last;
+    throw last ?? new Error(`${method}: no RPC endpoint on the expected cluster`);
   }
 }
 
