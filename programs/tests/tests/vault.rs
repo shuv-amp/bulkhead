@@ -1375,6 +1375,59 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: re-owned vault account");
 }
 
+/// A deposit whose source is the vault token account is refused by the
+/// Vault itself. Without the check the token program still refuses it (the
+/// depositor is not that account's owner), with its own error.
+#[test]
+fn a_deposit_cannot_come_from_the_vault_token_account() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    let own = w.usdc.vault_tokens;
+    let ix = w.m.deposit_ix(&w.env, &w.usdc, &whale.pubkey(), &own, 1_000 * USDC);
+    assert_eq!(w.env.fails(&[ix], &[&whale]), verr::DUPLICATE_ACCOUNT);
+}
+
+/// A ticket's recipient can hand its token account to another owner after
+/// the ticket was made (SetAuthority, AccountOwner). Settle reads the owner
+/// as it is then: the vault PDA or the protocol PDA is refused, as in
+/// release, since nothing moves tokens out of such an account. Each owner
+/// has its own case, so each half of the check is pinned on its own. Both
+/// tickets are due when settled, so without the check each settle pays.
+#[test]
+fn a_ticket_cannot_settle_to_an_account_handed_to_the_vault_or_protocol() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (vault, protocol) = (w.usdc.vault, w.m.protocol);
+    let mut tickets = vec![];
+    for new_owner in [vault, protocol] {
+        let payee = w.user();
+        let to = w.account("usdc", &payee.pubkey());
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 300_000 * USDC, &w.usdc_prices(true));
+        let (_, ticket) = w.m.next_ticket(&w.env);
+        let o = outcome(&w.env.ok(&[ix], &[&w.m.admin]));
+        assert_eq!(o.queued, 300_000 * USDC);
+        // SetAuthority (6), AccountOwner (2), to Some(new_owner).
+        let mut d = vec![6u8, 2, 1];
+        d.extend_from_slice(new_owner.as_ref());
+        let hand_over = Instruction {
+            program_id: w.usdc.token_program,
+            accounts: vec![AccountMeta::new(to, false), AccountMeta::new_readonly(payee.pubkey(), true)],
+            data: d,
+        };
+        w.env.ok(&[hand_over], &[&payee]);
+        tickets.push((ticket, to, o.eta_s));
+    }
+    let due = tickets.iter().map(|t| t.2).max().unwrap();
+    w.env.advance(due - w.env.time);
+    for ((ticket, to, _), owner) in tickets.iter().zip(["the vault PDA", "the protocol PDA"]) {
+        let settle = w.m.settle_ix(&w.usdc, ticket, to, &w.env.payer.pubkey());
+        assert_eq!(w.env.fails(&[settle], &[]), verr::DUPLICATE_ACCOUNT, "{owner}");
+    }
+}
+
 /// A payout goes only to an account a token program owns. Here the bytes of
 /// a real USDC account (right mint, the whale as owner) sit in an account the
 /// system program owns. Without the owner check the release still fails, in
