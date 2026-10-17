@@ -465,7 +465,7 @@ fn a_ticket_settles_after_its_eta_to_its_stored_recipient_only() {
     // Someone else's account can't receive it.
     let other = w.account("usdc", &Keypair::new().pubkey());
     let wrong = w.m.settle_ix(&w.usdc, &ticket, &other, &w.env.payer.pubkey());
-    assert!(w.env.send(&[wrong], &[]).is_err());
+    assert_eq!(w.env.fails(&[wrong], &[]), verr::RECIPIENT_OWNER_MISMATCH);
     // Nor can it be settled through another vault of the same protocol.
     let via_sol = w.m.settle_ix(&w.sol, &ticket, &to, &w.env.payer.pubkey());
     assert_eq!(w.env.fails(&[via_sol], &[]), verr::WRONG_VAULT);
@@ -1326,7 +1326,8 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     w.env.ok(&[propose], &[&w.m.admin]);
     let dest_owner = w.m.destination.pubkey();
     let dest = w.account("usdc", &dest_owner);
-    let thief = w.account("usdc", &Keypair::new().pubkey());
+    let thief_key = Keypair::new();
+    let thief = w.account("usdc", &thief_key.pubkey());
     let exit = |to: Address| {
         w.m.vault_ix(
             27,
@@ -1346,7 +1347,11 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     assert_eq!(w.env.fails(&[early], &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
     w.env.advance(3 * DAY);
     let wrong = exit(thief);
-    assert!(w.env.send(&[wrong], &[&w.m.destination]).is_err(), "only the committed destination");
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.destination]), verr::RECIPIENT_OWNER_MISMATCH, "only the committed destination");
+    // Nor when the thief signs for its own account: only the owner check is left.
+    let mut theirs = exit(thief);
+    theirs.accounts[6] = AccountMeta::new_readonly(thief_key.pubkey(), true);
+    assert_eq!(w.env.fails(&[theirs], &[&thief_key]), verr::RECIPIENT_OWNER_MISMATCH);
     // The destination signs (finding 85): nobody else can make the exit land.
     let mut unsigned = exit(dest);
     unsigned.accounts[6].is_signer = false;
@@ -2287,7 +2292,7 @@ fn queued_releases_built_from_the_same_state_do_not_collide() {
     assert_eq!(a.pending, 2);
     // A payer reusing its own nonce is refused, and nothing else is.
     let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
-    assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
+    assert_eq!(w.env.fails(&[again], &[&w.m.admin]), verr::ALREADY_INITIALIZED);
 }
 
 fn veto_change_ix(w: &World, id: u64, guardian: &Address) -> Instruction {
@@ -4747,7 +4752,7 @@ fn a_pre_seal_thief_cannot_seal_and_park_the_vault() {
     w.env.ok(&[ix], &[&recovery]);
     w.env.advance(3 * DAY + 1);
     w.refresh_prices();
-    assert!(w.env.send(&[w.m.execute_seal_ix(&[&w.usdc, &w.sol])], &[]).is_err(), "the thief's seal is gone");
+    assert_eq!(w.env.fails(&[w.m.execute_seal_ix(&[&w.usdc, &w.sol])], &[]), verr::SEAL_NOT_EXECUTABLE, "the thief's seal is gone");
 
     // (2) Without one: the seal executes, but the vault cannot be parked in
     // the same transaction, and the depositor leaves during the window.

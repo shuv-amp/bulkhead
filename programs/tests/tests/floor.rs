@@ -836,7 +836,7 @@ fn orphaned_buffers_return_their_rent_to_the_owner() {
     // Nor the program itself: only a buffer can pass, so `Close` of the
     // programdata stays unreachable.
     for not_a_buffer in [f.programdata, f.program] {
-        assert!(env.send(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]).is_err());
+        assert_eq!(env.fails(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]), err::WRONG_BUFFER);
     }
     // A buffer someone still holds is not Floor's to close.
     let theirs = env.write_buffer(&honest_fix(), &p.owner);
