@@ -3618,8 +3618,8 @@ fn a_lifeboat_exit_goes_only_to_a_destination_committed_72h_before_it() {
 
 /// G5: only live guardians act. A guardian silent for longer than its
 /// heartbeat interval (7 days here) can no longer heartbeat, veto, reset the
-/// backlog, extend or cancel a ticket, or freeze. One that heartbeat on time still does each; a
-/// heartbeat at exactly the interval still counts.
+/// backlog, extend or cancel a ticket, or freeze. One that heartbeat on time
+/// still does each; a heartbeat at exactly the interval still counts.
 #[test]
 fn a_guardian_silent_past_its_interval_can_no_longer_act() {
     let mut w = World::new();
