@@ -17,7 +17,7 @@ Status (10 Oct 2026):
 | S7 slow loosening | `tests/vault.rs::s7_…`, `an_unvetoed_loosening…` | **Runs** |
 | S8 one-transaction attack | `tests/vault.rs::s8_…` | **Runs** |
 | S9 honest borrower | `tests/vault.rs::s9_…` | **Runs** |
-| S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle` (+ 42 more Floor tests); on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
+| S10 Floor lifecycle | `tests/floor.rs::s10_full_lifecycle`; on a real mainnet program's bytes: `scripts/floor-demo.sh` (`06 §7`); on devnet: `scripts/floor-devnet.sh` | **Runs**, also on devnet |
 | S11 liquidation cascade | core only: `crates/bulkhead-core/tests/cascade.rs`; synthetic market | **Runs** (core); a program-level run and a replay of real Pyth history are not done |
 
 ## S1: a compromised admin (Drift class)
