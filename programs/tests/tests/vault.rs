@@ -3450,6 +3450,290 @@ fn a_lifeboat_exit_proposed_by_a_replaced_admin_does_not_execute() {
     assert_eq!(w.env.balance(&lifeboat), 0);
 }
 
+fn r2_execute_exit(w: &World, owner: &Address, to: &Address) -> Instruction {
+    w.m.vault_ix(27, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(r2_lifeboat(w), false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new(*to, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(*owner, true),
+    ])
+}
+
+fn r2_veto_exit(w: &World, guardian: &Address) -> Instruction {
+    w.m.vault_ix(28, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new_readonly(*guardian, true),
+    ])
+}
+
+fn r2_heartbeat(w: &World, guardian: &Address) -> Instruction {
+    w.m.vault_ix(14, &[], vec![
+        AccountMeta::new(w.m.protocol, false),
+        AccountMeta::new_readonly(*guardian, true),
+    ])
+}
+
+/// G6: a guardian's veto stops a lifeboat exit for good. From the end of its
+/// delay to the last second before it expires, the vetoed exit does not
+/// execute. A new proposal clears the veto, and it waits the full delay again.
+#[test]
+fn a_vetoed_lifeboat_exit_never_executes() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let g0 = w.m.g[0].pubkey();
+    w.env.ok(&[r2_heartbeat(&w, &g0), r2_veto_exit(&w, &g0)], &[&w.m.g[0]]);
+    w.env.advance(3 * DAY); // the exit's delay ends
+    let owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &owner);
+    let exit = r2_execute_exit(&w, &owner, &dest);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
+    w.env.advance(7 * DAY - 1); // the exit expires 7 days after its delay
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
+    assert_eq!(w.env.balance(&r2_lifeboat(&w)), 1_000_000 * USDC, "still in the lifeboat");
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY - 1);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
+    w.env.advance(1);
+    w.env.ok(&[exit], &[&w.m.destination]);
+    assert_eq!(w.env.balance(&dest), 1_000_000 * USDC);
+}
+
+/// G6: an exit goes only to a destination committed 72h before the exit was
+/// proposed. An exit queued behind a destination change does not follow the
+/// change, though the new destination signs. A new exit waits until the new
+/// destination is 72h old, to the second, then its own delay.
+#[test]
+fn a_lifeboat_exit_goes_only_to_a_destination_committed_72h_before_it() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal (finding 88)
+    w.refresh_prices();
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let next = w.user();
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 4, &next.pubkey(), &[], None)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 0, &next.pubkey())], &[]);
+    // The exit is due; the destination it would pay was set after it was proposed.
+    let to = w.account("usdc", &next.pubkey());
+    let exit = r2_execute_exit(&w, &next.pubkey(), &to);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&next]), verr::DESTINATION_NOT_SETTLED);
+    // Nor to the destination it was proposed for, now replaced: the age check
+    // runs before the recipient check, so any recipient is refused here.
+    let old = w.m.destination.pubkey();
+    let old_acc = w.account("usdc", &old);
+    let to_old = r2_execute_exit(&w, &old, &old_acc);
+    assert_eq!(w.env.fails(std::slice::from_ref(&to_old), &[&w.m.destination]), verr::DESTINATION_NOT_SETTLED);
+    assert_eq!(w.env.fails(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]), verr::DESTINATION_NOT_SETTLED);
+    w.env.advance(3 * DAY - 1);
+    assert_eq!(w.env.fails(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]), verr::DESTINATION_NOT_SETTLED);
+    w.env.advance(1);
+    // The new destination is 72h old now; the old exit still does not pay it:
+    // the age counts at the proposal, not at the execution.
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&next]), verr::DESTINATION_NOT_SETTLED);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY - 1);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&next]), verr::CHANGE_NOT_EXECUTABLE);
+    w.env.advance(1);
+    assert_eq!(w.env.fails(&[to_old], &[&w.m.destination]), verr::RECIPIENT_OWNER_MISMATCH);
+    w.env.ok(&[exit], &[&next]);
+    assert_eq!(w.env.balance(&to), 1_000_000 * USDC);
+}
+
+/// G5: only live guardians act. A guardian silent for longer than its
+/// heartbeat interval (7 days here) can no longer heartbeat, veto, reset the
+/// backlog, extend or cancel a ticket, or freeze. One that heartbeat on time
+/// still does each; a heartbeat at exactly the interval still counts.
+#[test]
+fn a_guardian_silent_past_its_interval_can_no_longer_act() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    w.env.ok(&[r2_heartbeat(&w, &g0)], &[&w.m.g[0]]);
+    w.env.ok(&[r2_heartbeat(&w, &g1)], &[&w.m.g[1]]);
+    w.env.advance(7 * DAY);
+    w.env.ok(&[r2_heartbeat(&w, &g1)], &[&w.m.g[1]]);
+    w.env.advance(1); // g0 is one second past its interval, g1 is not
+    w.refresh_prices();
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 300;
+    let vault = w.usdc.vault;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault))], &[&w.m.admin]);
+    let veto_change = |g: &Address| {
+        w.m.vault_ix(19, &[], vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.m.change_address(0), false),
+            AccountMeta::new_readonly(*g, true),
+        ])
+    };
+    let (vc0, vc1) = (veto_change(&g0), veto_change(&g1));
+    let reset = |g: &Address| {
+        w.m.vault_ix(16, &[], vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new_readonly(*g, true),
+        ])
+    };
+    assert_eq!(w.env.fails(&[reset(&g0)], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "reset backlog");
+    w.env.ok(&[reset(&g1)], &[&w.m.g[1]]);
+    let payee = w.user();
+    let payee_acc = w.account("usdc", &payee.pubkey());
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &payee_acc, &payee.pubkey(), 1_000_000 * USDC, &w.usdc_prices(true));
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let id = ticket_id(&w.env, &ticket);
+    let extend = |g: &Address| {
+        let mut d = 3_600i64.to_le_bytes().to_vec();
+        d.extend_from_slice(&id.to_le_bytes());
+        w.m.vault_ix(11, &d, vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(ticket, false),
+            AccountMeta::new_readonly(*g, true),
+        ])
+    };
+    let (ex0, ex1) = (extend(&g0), extend(&g1));
+    let payer = w.env.payer.pubkey();
+    for (what, ix) in [
+        ("heartbeat", r2_heartbeat(&w, &g0)),
+        ("veto exit", r2_veto_exit(&w, &g0)),
+        ("veto change", vc0),
+        ("extend ticket", ex0),
+        ("cancel ticket", w.m.cancel_ix(&w.usdc, &ticket, id, &g0, &payer)),
+        ("freeze", w.m.freeze_ix(&g0, None, 86_400)),
+    ] {
+        assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "{what}");
+    }
+    for ix in [
+        r2_heartbeat(&w, &g1),
+        r2_veto_exit(&w, &g1),
+        vc1,
+        ex1,
+        w.m.cancel_ix(&w.usdc, &ticket, id, &g1, &payer),
+        w.m.freeze_ix(&g1, None, 86_400),
+    ] {
+        w.env.ok(&[ix], &[&w.m.g[1]]);
+    }
+}
+
+/// G5, before the seal: a guardian silent past its interval cannot veto the
+/// seal either. One that heartbeat on time can.
+#[test]
+fn a_guardian_silent_past_its_interval_cannot_veto_the_seal() {
+    let mut w = World::new();
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    w.env.ok(&[r2_heartbeat(&w, &g0)], &[&w.m.g[0]]);
+    w.env.ok(&[r2_heartbeat(&w, &g1)], &[&w.m.g[1]]);
+    w.env.advance(7 * DAY);
+    w.env.ok(&[r2_heartbeat(&w, &g1)], &[&w.m.g[1]]);
+    w.env.advance(1); // g0 is one second past its interval, g1 is not
+    w.env.ok(&[w.m.propose_seal_ix()], &[&w.m.admin]);
+    let veto = |g: &Address| {
+        w.m.vault_ix(6, &[], vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(*g, true),
+        ])
+    };
+    let (v0, v1) = (veto(&g0), veto(&g1));
+    assert_eq!(w.env.fails(&[v0], &[&w.m.g[0]]), verr::NOT_GUARDIAN);
+    w.env.ok(&[v1], &[&w.m.g[1]]);
+}
+
+/// G5: a quorum counts live guardians only. With g0 silent past its interval,
+/// g0 and g1 (two signatures, threshold 2) are no quorum for any action that
+/// needs one: unfreeze, a lifeboat return, abdicate, tightening an abdicated
+/// kind, replace_recovery, eject. g1 and g2, both live, are. For tightening an
+/// abdicated kind, listed but unsigned, they are not (the admin signs).
+#[test]
+fn a_silent_guardian_does_not_count_toward_a_quorum() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let (g0, g1, g2) = (w.m.g[0].pubkey(), w.m.g[1].pubkey(), w.m.g[2].pubkey());
+    for k in [&w.m.g[0], &w.m.g[1], &w.m.g[2]] {
+        w.env.ok(&[r2_heartbeat(&w, &k.pubkey())], &[k]);
+    }
+    w.env.advance(7 * DAY);
+    w.env.ok(&[r2_heartbeat(&w, &g1)], &[&w.m.g[1]]);
+    w.env.ok(&[r2_heartbeat(&w, &g2)], &[&w.m.g[2]]);
+    w.env.advance(1); // g0 is one second past its interval
+    w.refresh_prices();
+    let admin = w.m.admin.pubkey();
+    let dead = [g0, g1];
+    let live = [g1, g2];
+    let signed = |mut ix: Instruction, by: &[Address]| {
+        ix.accounts.extend(by.iter().map(|g| AccountMeta::new_readonly(*g, true)));
+        ix
+    };
+
+    // Lifeboat return.
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let ret = |w: &World| {
+        w.m.vault_ix(25, &(1_000_000 * USDC).to_le_bytes(), vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(w.usdc.vault, false),
+            AccountMeta::new(w.usdc.vault_tokens, false),
+            AccountMeta::new(r2_lifeboat(w), false),
+            AccountMeta::new_readonly(w.usdc.mint, false),
+            AccountMeta::new_readonly(w.usdc.token_program, false),
+        ])
+    };
+    assert_eq!(w.env.fails(&[signed(ret(&w), &dead)], &[&w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "lifeboat return");
+    w.env.ok(&[signed(ret(&w), &live)], &[&w.m.g[1], &w.m.g[2]]);
+
+    // Abdicate SetLimits, then tighten it.
+    let abdicate = |w: &World| {
+        w.m.vault_ix(17, &[0], vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(w.m.admin.pubkey(), true),
+        ])
+    };
+    assert_eq!(w.env.fails(&[signed(abdicate(&w), &dead)], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "abdicate");
+    w.env.ok(&[signed(abdicate(&w), &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
+    let vault = w.usdc.vault;
+    let mut tighter = Limits::default_limits();
+    tighter.short_bps = 100;
+    let tighten = |w: &World| w.m.propose_change_ix(&w.env, 0, &vault, &tighter.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[signed(tighten(&w), &dead)], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "tighten abdicated");
+    // The admin's signature alone does not make listed guardians count.
+    let mut unsigned = tighten(&w);
+    unsigned.accounts.extend(live.iter().map(|g| AccountMeta::new_readonly(*g, false)));
+    assert_eq!(w.env.fails(&[unsigned], &[&w.m.admin]), verr::NO_QUORUM, "tighten abdicated, guardians unsigned");
+    w.env.ok(&[signed(tighten(&w), &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
+
+    // Replace the recovery key.
+    let recovery = Address::new_unique();
+    let ix = w.m.replace_recovery_ix(&admin, &recovery, &dead);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "replace recovery");
+    w.env.ok(&[w.m.replace_recovery_ix(&admin, &recovery, &live)], &[&w.m.admin, &w.m.g[1], &w.m.g[2]]);
+
+    // Unfreeze.
+    w.env.ok(&[w.m.freeze_ix(&g1, None, 86_400)], &[&w.m.g[1]]);
+    assert_eq!(w.env.fails(&[w.m.unfreeze_ix(None, &dead)], &[&w.m.g[0], &w.m.g[1]]), verr::NO_QUORUM, "unfreeze");
+    w.env.ok(&[w.m.unfreeze_ix(None, &live)], &[&w.m.g[1], &w.m.g[2]]);
+
+    // Eject g2 (g0 and g1 sign) is refused; eject g0 (g1 and g2 sign) is not.
+    let eject = |w: &World, target: u8| w.m.vault_ix(15, &[target], vec![AccountMeta::new(w.m.protocol, false)]);
+    assert_eq!(w.env.fails(&[signed(eject(&w, 2), &dead)], &[&w.m.g[0], &w.m.g[1]]), verr::CANNOT_EJECT, "eject");
+    w.env.ok(&[signed(eject(&w, 0), &live)], &[&w.m.g[1], &w.m.g[2]]);
+}
+
 /// Finding 72: an abdicated recovery key can still be removed (it only takes
 /// power away), or a stolen one would stale every admin rotation for good.
 #[test]
