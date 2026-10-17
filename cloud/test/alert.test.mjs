@@ -129,7 +129,7 @@ test("the line for a sent or failed action says what it acts on", () => {
   // two vetoes of different loosenings, exits or proposals had one kind and
   // the second was muted for 10 minutes. Shapes as policy.mjs builds them.
   const seen = new Map();
-  const sent = (a, at) => alertFor(actionLine(a, { reason: a.reason, ticketId: a.ticketId, signature: `s${at}` }), seen, at);
+  const sent = (a, at) => alertFor(actionLine(a, { ticketId: a.ticketId, signature: `s${at}` }), seen, at);
   const failed = (a, at) => alertFor(actionLine(a, { level: "error", error: "blockhash not found", ticketId: a.ticketId }), seen, at);
   const change = (id) => ({ type: "veto_change", changeId: id, reason: `loosening ${id} (kind 1) is not pre-approved` });
   const exit = (mint) => ({ type: "veto_exit", mint, executableS: 9, reason: "lifeboat exit of 5 is not pre-approved" });
@@ -147,9 +147,10 @@ test("the line for a sent or failed action says what it acts on", () => {
   // The cancels of one sweep stay one alert, across mints too.
   assert.ok(sent(cancel(1, "M1"), 0));
   assert.equal(sent(cancel(2, "M2"), 1_000), null);
-  assert.deepEqual(actionLine(change(4), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 4 });
+  assert.deepEqual(actionLine(change(4), { signature: "S" }), { action: "veto_change", signature: "S", reason: change(4).reason, changeId: 4 });
   // An id of 0 is kept: change ids start at 0 (see the next test).
-  assert.deepEqual(actionLine(change(0n), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 0n });
+  assert.deepEqual(actionLine(change(0n), { signature: "S" }), { action: "veto_change", signature: "S", reason: change(0n).reason, changeId: 0n });
+  assert.equal(actionLine(change(4), { reason: "retried" }).reason, "retried", "a reason passed in stands");
 });
 
 test("an alert names what it is about when its text does not", () => {
@@ -163,12 +164,18 @@ test("an alert names what it is about when its text does not", () => {
   assert.equal(detail({ level: "warn", msg: "floor not ready", program: P, alerts: [{ code: "unarmed" }] }), `floor not ready | program ${P}`);
   assert.equal(detail({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short", mint: M, amount: 5 }), `the admin moved tokens into the lifeboat: depositors may be short | mint ${M}`);
   const change = { type: "veto_change", changeId: 4, reason: "loosening 4 (kind 1) is not pre-approved" };
-  assert.equal(detail(actionLine(change, { reason: change.reason, signature: "S" })), "loosening 4 (kind 1) is not pre-approved | change 4 | tx S");
-  assert.equal(detail(actionLine(change, { level: "error", error: "blockhash not found" })), "blockhash not found | change 4");
+  assert.equal(detail(actionLine(change, { signature: "S" })), "loosening 4 (kind 1) is not pre-approved | change 4 | tx S");
+  // A failed action says why it was sent too: "freeze failed | blockhash
+  // not found" used to arrive without the breach it was for.
+  assert.equal(detail(actionLine(change, { level: "error", error: "blockhash not found" })), "loosening 4 (kind 1) is not pre-approved | blockhash not found | change 4");
+  const freeze = { type: "freeze", secs: 3600, reason: "unbacked outflow to non-allowlisted owners in the last hour: 9 ≥ 5 (0.5 × worst_1h)" };
+  assert.equal(detail(actionLine(freeze, { level: "error", error: "blockhash not found" })), `${freeze.reason} | blockhash not found`);
+  const cancel = { type: "cancel", ticketId: 3, mint: M, reason: "incident: ticket to O" };
+  assert.equal(detail(actionLine(cancel, { level: "error", error: "blockhash not found", ticketId: 3 })), "incident: ticket to O | blockhash not found | ticket 3");
   const floor = { type: "floor_veto", program: P, proposalId: 7, reason: "upgrade to unapproved buffer B is still pending" };
-  assert.equal(detail(actionLine(floor, { reason: floor.reason, signature: "S" })), `upgrade to unapproved buffer B is still pending | proposal 7 | program ${P} | tx S`);
+  assert.equal(detail(actionLine(floor, { signature: "S" })), `upgrade to unapproved buffer B is still pending | proposal 7 | program ${P} | tx S`);
   const exit = { type: "veto_exit", mint: M, reason: "lifeboat exit of 5 is not pre-approved" };
-  assert.equal(detail(actionLine(exit, { reason: exit.reason, signature: "S" })), `lifeboat exit of 5 is not pre-approved | mint ${M} | tx S`);
+  assert.equal(detail(actionLine(exit, { signature: "S" })), `lifeboat exit of 5 is not pre-approved | mint ${M} | tx S`);
   assert.equal(detail({ action: "execute", what: "change 5", signature: "S" }), "change 5 | tx S");
   assert.equal(detail({ level: "error", msg: "this key is no longer a live guardian", target: "vault" }), "this key is no longer a live guardian | on vault");
   // Change and ticket ids start at 0 (next_change_id and next_ticket_id
@@ -177,7 +184,7 @@ test("an alert names what it is about when its text does not", () => {
   // payout ticket 0n. Each is named.
   assert.equal(detail({ level: "error", msg: "could not be read", changeId: 0n }), "could not be read | change 0");
   const firstTicket = { type: "cancel", ticketId: 0n, address: "A", mint: M, vault: "V", reason: "incident: ticket to O" };
-  assert.equal(detail(actionLine(firstTicket, { reason: firstTicket.reason, ticketId: firstTicket.ticketId, signature: "S" })), "incident: ticket to O | ticket 0 | tx S");
+  assert.equal(detail(actionLine(firstTicket, { ticketId: firstTicket.ticketId, signature: "S" })), "incident: ticket to O | ticket 0 | tx S");
   // Named once: not again when the reason, the text or a part before it
   // already says it, as a whole word, in any case; a key only exactly.
   assert.equal(detail({ action: "floor_veto", reason: `floor ${P} proposal 7 is still pending`, program: P, proposalId: 7, signature: "S" }), `floor ${P} proposal 7 is still pending | tx S`);
