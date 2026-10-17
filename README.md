@@ -9,7 +9,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 **[The attack](#what-it-does-to-an-attack)** · **[How it works](#how-it-works)** · **[Verify it](#verify-it-yourself)** · **[Devnet](#live-on-devnet)** · **[FAQ](docs/FAQ.md)** · **[Docs](#documentation)**
 
-[![CI](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg)](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml) [![devnet](https://img.shields.io/badge/devnet-live-57606A?style=flat-square)](#live-on-devnet) [![Kani](https://img.shields.io/badge/Kani_proofs-15%2F15-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![tests](https://img.shields.io/badge/program_tests-123%2F123-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![audit](https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-E5481B?style=flat-square)](SECURITY.md) [![license](https://img.shields.io/badge/license-Apache--2.0-57606A?style=flat-square)](LICENSE)
+[![CI](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg)](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml) [![devnet](https://img.shields.io/badge/devnet-live-57606A?style=flat-square)](#live-on-devnet) [![Kani](https://img.shields.io/badge/Kani_proofs-17%2F17-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![tests](https://img.shields.io/badge/program_tests-133%2F133-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![audit](https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-E5481B?style=flat-square)](SECURITY.md) [![license](https://img.shields.io/badge/license-Apache--2.0-57606A?style=flat-square)](LICENSE)
 
 <br>
 
@@ -144,7 +144,7 @@ scripts/check-programs.sh         # the programs on the real runtime: needs the 
 E2E=1 scripts/check-programs.sh   # ...plus the attacker-vs-guardian run and a deploy rehearsal, on local validators
 scripts/prove.sh                  # Kani bounded proofs (~6 min)
 scripts/mutants.sh                # mutation testing (~45 min)
-scripts/fuzz.sh                   # coverage-guided fuzzing, 8 targets (SECONDS_PER=600 for longer)
+scripts/fuzz.sh                   # coverage-guided fuzzing, 9 targets (SECONDS_PER=600 for longer)
 scripts/deny.sh                   # supply chain: RustSec advisories, licences, crate sources
 python3 tools/floor_check.py <program-id>   # who can upgrade any mainnet program; is it ready for SIMD-0500? (--rpc <url> for another cluster)
 scripts/floor-demo.sh <program-id>          # Floor on that program's real bytes, locally: register, stop, restore byte-identical
@@ -165,12 +165,12 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| **Programs on the real runtime** <br><sub>LiteSVM, mainnet feature set, mainnet token program</sub> | **123/123**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
-| **Bounded proofs** <br><sub>Kani, and exhaustive checks</sub> | **15/15 harnesses verified** on 8 Oct (12 for every value of their types), 354 s. 6 exhaustive tests over ~584M inputs |
-| **Differential** <br><sub>an independent Python reference vs the Rust core</sub> | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 31 commands now, 300k cases on every pull request and 3M weekly in CI |
+| **Programs on the real runtime** <br><sub>LiteSVM, mainnet feature set, mainnet token program</sub> | **133/133**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction but the two read-only views (6,182 swaps refused, 10 Oct) |
+| **Bounded proofs** <br><sub>Kani, and exhaustive checks</sub> | **17/17 harnesses verified** on 14 Oct (14 for every value of their types), 227 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
+| **Differential** <br><sub>an independent Python reference vs the Rust core</sub> | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | **Program vs model** | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | **Mutation testing** <br><sub><code>cargo-mutants</code>, 669 injected bugs, in CI on every change to the core</sub> | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| **Coverage-guided fuzzing** <br><sub>libFuzzer, 8 targets: the byte parsers and the full-width limiter and ledger</sub> | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser at full line coverage ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
+| **Coverage-guided fuzzing** <br><sub>libFuzzer, 9 targets: the byte parsers and the full-width limiter and ledger</sub> | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser fuzzed in that run at full line coverage. That run had 8 targets: the guardian-set parser's, added 14 Oct, has no recorded 10-minute run or coverage measurement ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
 | **Property tests** <br><sub>G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection</sub> | 26/26, with coverage counters so a vacuous pass fails |
 | **Golden vectors** <br><sub>every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts</sub> | 119/119 identical, Rust = Python |
 | **End to end** | [Above](#what-it-does-to-an-attack) |
@@ -226,6 +226,7 @@ programs/tests/         LiteSVM: scenarios, negative tests, compute, the program
 cloud/                  zero-dependency JavaScript: client, guardian bot, status page, end-to-end attack,
                         deployment and live-cluster checks
 tools/floor_check.py    read-only report on any upgradeable program
+tools/claims.py         the counts README and docs/ state, checked against the tree (scripts/check.sh)
 reference/              independent Python reference, differential runner, golden vectors, fixtures, Drift model
 evidence/               governance census (script + committed snapshot), model output
 docs/                   the full design (below)
