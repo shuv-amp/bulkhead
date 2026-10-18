@@ -56,7 +56,17 @@ test("a mainnet config needs backups and alerts; unknown settings are refused (f
   for (const [v, shown] of [["600", '"600"'], [[600], "[600]"], [9, "9"], [86_401, "86401"], [Infinity, "Infinity"]]) {
     assert.throws(() => live(v), { message: `config.liveness.everyS: ${shown} is not a number from 10 to 86400` }, shown);
   }
-  for (const l of [{ everyS: 60 }, { url: "hc.example/x" }, true, null, "https://hc.example/x"]) assert.throws(() => checkConfig({ ...base, liveness: l }), /config\.liveness must be an object with an http\(s\) url/, JSON.stringify(l));
+  for (const l of [{ everyS: 60 }, { url: "hc.example/x" }, true, null, "https://hc.example/x", ["https://hc.example/x"]]) assert.throws(() => checkConfig({ ...base, liveness: l }), /config\.liveness must be an object with an http\(s\) url/, JSON.stringify(l));
+  // Typos inside alert and liveness: each used to fall back to a default, and
+  // a misspelt format posts a JSON body a Slack or Discord webhook won't show.
+  const hooked = (alert, liveness) => checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example", ...alert }, liveness: { url: "https://hc.example/x", ...liveness } });
+  for (const format of ["json", "slack", "discord"]) assert.deepEqual(hooked({ format }, { everyS: 60 }), [], format);
+  for (const format of ["slak", "Slack", "", ["slack"], null, "constructor"]) assert.throws(() => hooked({ format }), { message: `config.alert.format: ${JSON.stringify(format)} is not one of json, slack, discord` }, JSON.stringify(format));
+  assert.throws(() => hooked({ fromat: "slack" }), { message: "config.alert.fromat is not a setting of config.alert (url, format)" });
+  assert.throws(() => hooked({ retryDelaysMs: [1] }), /config\.alert\.retryDelaysMs is not a setting/);
+  assert.throws(() => hooked({}, { every_s: 600 }), { message: "config.liveness.every_s is not a setting of config.liveness (url, everyS)" });
+  assert.throws(() => hooked({}, { format: "slack" }), /config\.liveness\.format is not a setting/, "each object has its own names");
+  assert.throws(() => checkConfig({ ...base, alert: { URL: "https://hook.example" } }), /config\.alert\.URL is not a setting/, "a misspelt url is named, not taken as missing");
 });
 
 test("a webhook that fails is tried again, and an alert never delivered is not muted (finding 83)", async () => {

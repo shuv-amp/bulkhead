@@ -96,7 +96,7 @@ const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 // looping on a refused key never reached the webhook (docs/09, finding 71).
 // Alerts are never on the guardian's critical path.
 let protocolLabel = "";
-const sendAlert = alerter({ ...(cfg.alert ?? {}), protocol: () => protocolLabel }, {
+const sendAlert = alerter({ url: cfg.alert?.url, format: cfg.alert?.format, protocol: () => protocolLabel }, {
   onError: (e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
 });
 const log = (o) => {

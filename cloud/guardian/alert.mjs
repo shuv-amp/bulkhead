@@ -196,6 +196,9 @@ export async function scanAll(scans, onError = () => {}) {
   if (failed.length) throw new Error(failed.join("; "));
 }
 
+/** The bodies webhookBody writes, by `alert.format` (checkConfig refuses others). */
+export const ALERT_FORMATS = ["json", "slack", "discord"];
+
 /** The webhook body for `format`. */
 export function webhookBody(alert, format = "json", protocol = "") {
   const text = `${alert.severity === "critical" ? "🚨" : "⚠️"} ${alert.title}${protocol ? ` (protocol ${protocol})` : ""}\n${alert.detail}`;
