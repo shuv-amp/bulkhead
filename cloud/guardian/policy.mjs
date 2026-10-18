@@ -209,7 +209,7 @@ export function checkPolicy(policy) {
     throw new Error('policy.approvedChangeIds is no longer read: approve a change by what it does, in approvedChanges as "kind:target:payloadHex" (docs/07)');
   }
   for (const name of Object.keys(policy)) {
-    if (!(name in POLICY_RULES)) throw new Error(`policy.${name} is not a policy setting (a typo? the settings are DEFAULT_POLICY's, cloud/guardian/policy.mjs)`);
+    if (!Object.hasOwn(POLICY_RULES, name)) throw new Error(`policy.${name} is not a policy setting (a typo? the settings are DEFAULT_POLICY's, cloud/guardian/policy.mjs)`);
     checkField(name, policy[name], POLICY_RULES[name]);
   }
   if (policy.minPriorityMicroLamports > policy.maxPriorityMicroLamports || policy.freezeMinPriorityMicroLamports > policy.maxPriorityMicroLamports) {

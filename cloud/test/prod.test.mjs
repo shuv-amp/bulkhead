@@ -16,6 +16,8 @@ const policy = (over) => checkPolicy({ ...DEFAULT_POLICY, ...over });
 test("a policy typo, a percent for a fraction or a string for seconds stops the start (finding 83)", () => {
   assert.doesNotThrow(() => policy({}));
   assert.throws(() => policy({ freezeFractionOfWorst1H: 0.5 }), /not a policy setting/);
+  // Parsed from JSON, as the config is: each name is the object's own key.
+  for (const k of ["constructor", "__proto__", "toString"]) assert.throws(() => policy(JSON.parse(`{"${k}": 1}`)), /not a policy setting/, k);
   assert.throws(() => policy({ freezeFractionOfWorst1h: 50 }), /fraction/);
   assert.throws(() => policy({ freezeFractionOfWorst24h: 0 }), /fraction in \(0, 1\]/);
   assert.doesNotThrow(() => policy({ freezeFractionOfWorst72h: 0 }), "0 turns the 72h rule off");
