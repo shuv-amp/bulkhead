@@ -492,6 +492,180 @@ test("failover: a move made outside call() (crossCheck) also dates a call's evid
   assert.equal(switches.length, 2);
 });
 
+// crossCheck against stub endpoints: every slot 100 unless `slot(i)` says
+// otherwise; e1 and e2 list S as their newest signature, e0 lists nothing.
+// `during(i)` runs while endpoint i's signature list is in flight.
+function laggingIndexRpc({ list = [[], [{ signature: "S", slot: 10 }], [{ signature: "S", slot: 10 }]], during = () => {}, slot = () => 100 } = {}) {
+  const switches = [];
+  const rpc = new FailoverRpc(list.map((_, i) => e(i)), { onSwitch: (from, to) => switches.push([from, to]) });
+  rpc.endpoints = list.map((sigs, i) => ({
+    url: e(i),
+    call: async (method) => {
+      if (method === "getSlot") return slot(i);
+      await during(i);
+      return sigs;
+    },
+  }));
+  return { rpc, switches };
+}
+
+test("failover: crossCheck does not judge an endpoint by lists asked of the one it replaced", async () => {
+  // A call() moves e0 -> e2 while e0's list is in flight. The lists judged
+  // e0, so e2 must not be switched away from on them.
+  let move = false;
+  const { rpc, switches } = laggingIndexRpc({ during: (i) => (move && i === 0 ? rpc.switchTo(2, new Error("e0: fetch failed")) : null) });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  move = true;
+  const r = await rpc.crossCheck("addr", { nowMs: 31_000 });
+  assert.equal(r.switched, false, "no verdict on lists from the old primary");
+  assert.equal(rpc.active, 2);
+  assert.deepEqual(switches, [[e(0), e(2)]], "only call()'s move");
+});
+
+test("failover: lists from an endpoint call() moved away from and back to still count", async () => {
+  // A call() moves e0 -> e1 -> e0 while e0's list is in flight: the lists
+  // still judge e0, the active endpoint, which has lacked S since 0.
+  let move = false;
+  const { rpc, switches } = laggingIndexRpc({
+    during: (i) => {
+      if (!move || i !== 0) return;
+      rpc.switchTo(1, new Error("e0: fetch failed"));
+      rpc.switchTo(0, new Error("e1: fetch failed"));
+    },
+  });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  move = true;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, true);
+  assert.deepEqual(switches, [[e(0), e(1)], [e(1), e(0)], [e(0), e(1)]]);
+});
+
+test("failover: lists asked of an endpoint call() left in flight still record what it lacks", async () => {
+  // A call() moves e0 -> e2 once every list of the first check at 0 is
+  // asked: S is first seen missing on e0 then, whichever backup lists it,
+  // the endpoint now active (e2) or the other one (e1). call() moves back
+  // to e0; at 31 s e0 has lacked S for 31 s and is left for that backup.
+  for (const from of [2, 1]) {
+    let move = true;
+    const list = [[], [], []];
+    list[from] = [{ signature: "S", slot: 10 }];
+    const { rpc, switches } = laggingIndexRpc({
+      list,
+      during: async (i) => {
+        await null;
+        if (move && i === 0) rpc.switchTo(2, new Error("e0: fetch failed"));
+      },
+    });
+    assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+    move = false;
+    rpc.switchTo(0, new Error("e2: fetch failed"));
+    assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, true, `e${from}: e0's wait started at 0`);
+    assert.deepEqual(switches, [[e(0), e(2)], [e(2), e(0)], [e(0), e(from)]]);
+  }
+});
+
+
+test("failover: lists asked of an endpoint call() left in flight do not prune the wait of the one now active", async () => {
+  // e2 lacks S (e0 lists it) from 0. Back on e0, a call()
+  // moves e0 -> e2 while e0's list is in flight at 10 s: that list judges
+  // e0 only, so e2's wait still started at 0 and e2 is left at 31 s.
+  let move = false;
+  const { rpc, switches } = laggingIndexRpc({
+    list: [[{ signature: "S", slot: 10 }], [], []],
+    during: async (i) => {
+      await null;
+      if (move && i === 0) rpc.switchTo(2, new Error("e0: fetch failed"));
+    },
+  });
+  rpc.switchTo(2, new Error("e0: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  rpc.switchTo(0, new Error("e2: fetch failed"));
+  move = true;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 10_000 })).switched, false);
+  move = false;
+  assert.equal(rpc.active, 2);
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, true, "e2's wait started at 0");
+  assert.deepEqual(switches, [[e(0), e(2)], [e(2), e(0)], [e(0), e(2)], [e(2), e(0)]]);
+});
+
+test("failover: lists asked of an endpoint count against it, not the one call() moved to meanwhile", async () => {
+  // e0 and e2 lag, e1 lists S. A call() moves e0 -> e2 while e0's list is in
+  // flight at 31 s: that list is e0's, so e2's wait starts at its own first
+  // check, 50 s, and is not over at 61 s.
+  let move = false;
+  const { rpc, switches } = laggingIndexRpc({
+    list: [[], [{ signature: "S", slot: 10 }], []],
+    during: (i) => (move && i === 0 ? rpc.switchTo(2, new Error("e0: fetch failed")) : null),
+  });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  move = true;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, false);
+  move = false;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 50_000 })).switched, false);
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 61_001 })).switched, false, "e2's wait started at 50 s");
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 80_001 })).switched, true);
+  assert.deepEqual(switches, [[e(0), e(2)], [e(2), e(1)]]);
+});
+
+test("failover: an endpoint a call() moved to gets its own time to show a signature", async () => {
+  // S was first seen missing on e0 at 0. A call() then moves to e2, whose
+  // index lags too: e2's 30 s start when crossCheck first sees it there.
+  const { rpc, switches } = laggingIndexRpc({ list: [[], [{ signature: "S", slot: 10 }], []] });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  rpc.switchTo(2, new Error("e0: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, false, "e2 not judged on e0's wait");
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 61_000 })).switched, false, "30 s on e2, not more");
+  const r = await rpc.crossCheck("addr", { nowMs: 61_001 });
+  assert.equal(r.switched, true);
+  assert.deepEqual(switches, [[e(0), e(2)], [e(2), e(1)]]);
+});
+
+test("failover: call() moving between two lagging endpoints does not restart either one's time", async () => {
+  // e0 and e1 lag, e2 lists S. call() moves e0 -> e1 -> e0 between checks:
+  // e0 has lacked S since 0, so at 31 s the check leaves it for e2.
+  const { rpc, switches } = laggingIndexRpc({ list: [[], [], [{ signature: "S", slot: 10 }]] });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  rpc.switchTo(1, new Error("e0: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 20_000 })).switched, false);
+  rpc.switchTo(0, new Error("e1: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, true);
+  assert.deepEqual(switches, [[e(0), e(1)], [e(1), e(0)], [e(0), e(2)]]);
+});
+
+test("failover: after crossCheck's own switch on a signature, every endpoint's wait starts again", async () => {
+  // Evidence names the backup that had S then. e1 lacks S since 10 s; the
+  // check leaves e0 for e2 at 31 s; e2 dies and call() moves to e1. The old
+  // evidence would send e1 back to e2 at once: e1 gets its own 30 s instead.
+  const { rpc, switches } = laggingIndexRpc({ list: [[], [], [{ signature: "S", slot: 10 }]] });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  rpc.switchTo(1, new Error("e0: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 10_000 })).switched, false);
+  rpc.switchTo(0, new Error("e1: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, true);
+  rpc.switchTo(1, new Error("e2: fetch failed"));
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 45_000 })).switched, false, "e1 not judged on its wait before the switch");
+  assert.deepEqual(switches, [[e(0), e(1)], [e(1), e(0)], [e(0), e(2)], [e(2), e(1)]]);
+});
+
+test("failover: after crossCheck's own switch on slots, every endpoint's wait starts again", async () => {
+  // e0 lacks S since 0 and e2 since 5 s (call() moved there and back). At
+  // 10 s e0 is 200 slots behind and the check leaves it for e1, which is
+  // neither of them. call() then moves to e2: its wait for S starts again,
+  // so at 36 s it is not yet over.
+  let now = 0;
+  const { rpc, switches } = laggingIndexRpc({ list: [[], [], [], [{ signature: "S", slot: 10 }]], slot: (i) => (i === 0 && now === 10_000 ? 0 : 200) });
+  assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+  rpc.switchTo(2, new Error("e0: fetch failed"));
+  now = 5_000;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: now })).switched, false);
+  rpc.switchTo(0, new Error("e2: fetch failed"));
+  now = 10_000;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: now })).switched, true);
+  rpc.switchTo(2, new Error("e1: fetch failed"));
+  now = 36_000;
+  assert.equal((await rpc.crossCheck("addr", { nowMs: now })).switched, false, "e2 not judged on its wait before the switch");
+  assert.deepEqual(switches, [[e(0), e(2)], [e(2), e(0)], [e(0), e(1)], [e(1), e(2)]]);
+});
+
 test("a refused preflight is not resent when a backup already landed the transaction", async () => {
   const sent = [];
   let landedSig = null;
