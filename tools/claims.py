@@ -2,7 +2,7 @@
 """claims: the counts the docs state, checked against the tree.
 
     python3 tools/claims.py              # fail if any stated count is stale
-    python3 tools/claims.py --self-test  # the matcher on planted drift
+    python3 tools/claims.py --self-test  # the matcher and main's exit on planted drift
 
 The Markdown files, the CI workflow and the status page state counts that go
 stale as the code moves:
@@ -24,8 +24,10 @@ Standard library only.
 """
 from __future__ import annotations
 
-import os
 import argparse
+import contextlib
+import io
+import os
 import re
 import subprocess
 import sys
@@ -349,7 +351,8 @@ def check(texts: dict, t: dict, kept_list: list) -> tuple:
 
 
 def self_test() -> int:
-    """The matcher and the test counter on planted text: right counts pass, a wrong one fails."""
+    """The matcher and the test counter on planted text: right counts pass, a wrong one fails.
+    Then the exit status: report's on planted problems, main's on planted trees."""
     t = {key: 10 for _, keys in RULES for key in keys}
     t.update(kani=17, kani_full=14, kani_small=3, floor_programs=4, vault_programs=6, findings=1103)
     old = [("doc.md", "14 Kani harnesses", "a past state")]
@@ -462,30 +465,75 @@ def self_test() -> int:
     for pattern, keys in RULES:
         if pattern.groups != len(keys):
             failed.append(f"{pattern.pattern!r} has {pattern.groups} groups for {len(keys)} counts")
+    # check.sh and CI act on main's exit status: report's on planted problems,
+    # then main's on two planted trees. In the first, every kept entry and every
+    # other rule is a problem. The second holds every kept snippet, so its only
+    # problems are dead rules, and main must fail on those alone.
+    summary = "claims: {} problems; a stated count must equal the tree"
+    reports = [
+        ([], 0, [f"claims OK (1 files): {', '.join(f'{k} {v}' for k, v in sorted(t.items()))}"]),
+        (["a"], 1, ["a", summary.format(1)]),
+        (["a", "b"], 1, ["a", "b", summary.format(2)]),
+    ]
+    for errors, code, want in reports:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            got = report(errors, 1, t)
+        if got != code or out.getvalue().splitlines() != want:
+            failed.append(f"report({errors}): exit {got}, printed {out.getvalue().splitlines()}; expected {code}, {want}")
+    planted = {**t, "kani": 999}  # a count the tree can't have, so main must use this one
+    kept = {}
+    for path, snippet, _ in KEPT:
+        kept[path] = kept.get(path, "") + snippet + "\n"
+    runs = [
+        ({"doc.md": "999 Kani harnesses"}, False),
+        ({**kept, "doc.md": "999 Kani harnesses"}, True),
+    ]
+    for doc, all_kept in runs:
+        errors, live = check(doc, planted, KEPT)
+        want = [] if all_kept else [
+            f"{path}: kept entry {snippet!r} matches 0 times; it must name exactly one statement" for path, snippet, _ in KEPT]
+        want += [f"rule {p.pattern!r} matches no current statement" for p, _ in RULES if p.pattern not in live]
+        want.append(summary.format(len(want)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            got = main([], doc, planted)
+        if not live or (all_kept and errors):
+            failed.append(f"planted tree {sorted(doc)}: live rules {len(live)}, problems before dead rules {errors}")
+        elif got != 1 or out.getvalue().splitlines() != want:
+            failed.append(f"main on {sorted(doc)}: exit {got}, printed {out.getvalue().splitlines()}; expected 1, {want}")
     for f in failed:
         print("self-test FAILED:", f)
     if not failed:
-        print(f"self-test OK: {len(cases)} claim cases, {len(sources) + len(harnesses) + len(js)} count cases, {len(RULES)} rules")
+        print(f"self-test OK: {len(cases)} claim cases, {len(sources) + len(harnesses) + len(js)} count cases,"
+              f" {len(RULES)} rules, {len(reports)} reports, {len(runs)} runs of main")
     return 1 if failed else 0
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Check the counts the docs state against the tree.")
-    ap.add_argument("--self-test", action="store_true", help="check the matcher and the counters on planted text")
-    if ap.parse_args().self_test:
-        return self_test()
-    t = truth()
-    texts = {p: read(p) for p in documents()}
-    errors, live = check(texts, t, KEPT)
-    # A rule whose phrasing left the docs checks nothing: reword the rule too.
-    errors += [f"rule {p.pattern!r} matches no current statement" for p, _ in RULES if p.pattern not in live]
+def report(errors: list, files: int, t: dict) -> int:
+    """Print each problem and a summary; the exit status."""
     for e in errors:
         print(e)
     if errors:
         print(f"claims: {len(errors)} problems; a stated count must equal the tree")
         return 1
-    print(f"claims OK ({len(texts)} files): " + ", ".join(f"{k} {v}" for k, v in sorted(t.items())))
+    print(f"claims OK ({files} files): " + ", ".join(f"{k} {v}" for k, v in sorted(t.items())))
     return 0
+
+
+def main(argv: list | None = None, texts: dict | None = None, t: dict | None = None) -> int:
+    """argv without the program name; texts and t default to the tree's documents and
+    counts (the self-test plants them)."""
+    ap = argparse.ArgumentParser(description="Check the counts the docs state against the tree.")
+    ap.add_argument("--self-test", action="store_true", help="check the matcher and the counters on planted text")
+    if ap.parse_args(argv).self_test:
+        return self_test()
+    t = truth() if t is None else t
+    texts = {p: read(p) for p in documents()} if texts is None else texts
+    errors, live = check(texts, t, KEPT)
+    # A rule whose phrasing left the docs checks nothing: reword the rule too.
+    errors += [f"rule {p.pattern!r} matches no current statement" for p, _ in RULES if p.pattern not in live]
+    return report(errors, len(texts), t)
 
 
 if __name__ == "__main__":
