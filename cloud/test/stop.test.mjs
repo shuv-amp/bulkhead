@@ -223,3 +223,26 @@ test("a stop on localnet, or with no cluster, checks none, as before; with none 
     only.server.close();
   }
 });
+
+test("a stop whose primary URL does not parse still stops through a backup", async () => {
+  // fetch refuses the primary, so the stop moves to the backup, and the
+  // switch's log line parsed the primary's URL and threw. The backup's
+  // answer was then taken for its failure, and the stop gave up (finding 121).
+  // The bad URL is listed twice, so the stop goes from rpc straight to
+  // rpcs[1] (it never moves to rpcs[0]), and the line must say rpcs[1], not
+  // the entry after rpc. Not pinned here: that the stop names entries by the
+  // indexes it is given rather than by looking each URL up, which differs
+  // only when the stop moves to or from a later entry of a URL listed twice;
+  // here it leaves the bad URL at its first entry. FailoverRpc passing the
+  // indexes is pinned in delivery.test.mjs ("onSwitch is told each
+  // endpoint's index"); the stop's use of them only jointly with that.
+  const backup = await stubRpc(GENESIS.devnet, stopped);
+  try {
+    const { code, out } = await runStop("http//primary", ["http//primary", backup.url]);
+    assert.equal(code, 0, out);
+    assert.match(out, /stopped: calls now fail with FLOR/);
+    assert.match(out, new RegExp(`RPC \\(endpoint\\) \\(rpc\\) left; now using ${new URL(backup.url).host.replaceAll(".", "\\.")} \\(rpcs\\[1\\]\\)`));
+  } finally {
+    backup.server.close();
+  }
+});

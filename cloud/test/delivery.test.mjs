@@ -157,7 +157,7 @@ test("an RPC error keeps its JSON-RPC code, so a refused preflight can be told a
 
 // A dead primary used to cost about a minute per call (6 retries with
 // backoff), and the guardian read only from it: blind while backups were up.
-import { FailoverRpc, HURRY_WAIT_MS, endpointTrouble } from "../lib/solana.mjs";
+import { FailoverRpc, HURRY_WAIT_MS, endpointTrouble, hostOf } from "../lib/solana.mjs";
 
 function stubFetch(routes) {
   const calls = [];
@@ -190,6 +190,27 @@ test("failover: a dead primary hands over to the backup at once, and the backup 
   } finally {
     f.restore();
   }
+});
+
+test("failover: onSwitch is told each endpoint's index, a URL listed twice too (finding 121)", async () => {
+  // e0 and e1 are the same dead URL. A move from e1 must name e1, which the
+  // URL alone cannot.
+  const f = stubFetch({ "a.invalid": "down", "b.invalid": () => ({ result: 7 }) });
+  const told = [];
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://a.invalid", "http://b.invalid"], { onSwitch: (from, to, e, fromAt, toAt) => told.push([fromAt, toAt]) });
+    rpc.switchTo(1, new Error("moved"));
+    assert.equal(await rpc.call("getSlot"), 7);
+    assert.deepEqual(told, [[0, 1], [1, 2]]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("hostOf names a host, and only a host, for logs (finding 121)", () => {
+  assert.equal(hostOf("https://rpc.example:8899/?api-key=secret"), "rpc.example:8899");
+  assert.equal(hostOf("http//rpc.example"), "(endpoint)");
+  assert.equal(hostOf("localhost:8899"), "(endpoint)");
 });
 
 test("failover: an answer is final; an unhealthy node or a 5xx is not", async () => {
