@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -111,4 +111,92 @@ test("a step that keeps failing raises an urgent alert after the threshold, rate
 
 test("a removed recovery key alerts like a replaced one", () => {
   assert.ok(alertFor({ level: "warn", msg: "the recovery key was removed by the admin with a guardian quorum: there is no recovery key now" }, new Map(), 0));
+});
+
+test("the same warning about two heartbeat targets is two alerts", () => {
+  // beatOne names where the key is dead only in `target`: the Vault's line and
+  // a Floor program's line minutes later used to share one repeat slot, so the
+  // second never reached anyone.
+  const seen = new Map();
+  const dead = (target) => ({ level: "error", msg: "this key is no longer a live guardian; a heartbeat cannot revive it", target });
+  assert.ok(alertFor(dead("vault"), seen, 0));
+  assert.ok(alertFor(dead("floor P1"), seen, 60_000), "another target");
+  assert.equal(alertFor(dead("floor P1"), seen, 120_000), null, "the same target again");
+});
+
+test("the line for a sent or failed action says what it acts on", () => {
+  // execute() used to log only the reason, the ticket and the signature, so
+  // two vetoes of different loosenings, exits or proposals had one kind and
+  // the second was muted for 10 minutes. Shapes as policy.mjs builds them.
+  const seen = new Map();
+  const sent = (a, at) => alertFor(actionLine(a, { reason: a.reason, ticketId: a.ticketId, signature: `s${at}` }), seen, at);
+  const failed = (a, at) => alertFor(actionLine(a, { level: "error", error: "blockhash not found", ticketId: a.ticketId }), seen, at);
+  const change = (id) => ({ type: "veto_change", changeId: id, reason: `loosening ${id} (kind 1) is not pre-approved` });
+  const exit = (mint) => ({ type: "veto_exit", mint, executableS: 9, reason: "lifeboat exit of 5 is not pre-approved" });
+  const proposal = (id) => ({ type: "floor_veto", program: "P1", proposalId: id, reason: `floor P1 proposal ${id} is still pending` });
+  const cancel = (id, mint) => ({ type: "cancel", ticketId: id, address: "A", mint, vault: "V", reason: "incident: ticket to O" });
+  for (const [one, two] of [[change(4), change(5)], [exit("M1"), exit("M2")], [proposal(1), proposal(2)]]) {
+    assert.ok(sent(one, 0));
+    assert.ok(sent(two, 1_000), `${two.type}: a second target alerts`);
+    assert.equal(sent(two, 2_000), null, `${two.type}: the same target again`);
+    assert.ok(failed(one, 0));
+    assert.ok(failed(two, 1_000), `${two.type}: a second failure alerts`);
+  }
+  // Proposal 1 on a second Floor program is another target too.
+  assert.ok(sent({ ...proposal(1), program: "P2" }, 3_000));
+  // The cancels of one sweep stay one alert, across mints too.
+  assert.ok(sent(cancel(1, "M1"), 0));
+  assert.equal(sent(cancel(2, "M2"), 1_000), null);
+  assert.deepEqual(actionLine(change(4), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 4 });
+  // An id of 0 is kept: change ids start at 0 (see the next test).
+  assert.deepEqual(actionLine(change(0n), { signature: "S" }), { action: "veto_change", signature: "S", changeId: 0n });
+});
+
+test("an alert names what it is about when its text does not", () => {
+  // The webhook shows the title and the detail only. "floor not ready" for
+  // one of two Floor programs, a lifeboat move or a veto used to arrive
+  // without the program, mint or change it was about. Line shapes as
+  // main.mjs logs them.
+  const P = "Prog1111111111111111111111111111111111111111";
+  const M = "Mint1111111111111111111111111111111111111111";
+  const detail = (line) => alertFor(line, new Map(), 0).detail;
+  assert.equal(detail({ level: "warn", msg: "floor not ready", program: P, alerts: [{ code: "unarmed" }] }), `floor not ready | program ${P}`);
+  assert.equal(detail({ level: "warn", msg: "the admin moved tokens into the lifeboat: depositors may be short", mint: M, amount: 5 }), `the admin moved tokens into the lifeboat: depositors may be short | mint ${M}`);
+  const change = { type: "veto_change", changeId: 4, reason: "loosening 4 (kind 1) is not pre-approved" };
+  assert.equal(detail(actionLine(change, { reason: change.reason, signature: "S" })), "loosening 4 (kind 1) is not pre-approved | change 4 | tx S");
+  assert.equal(detail(actionLine(change, { level: "error", error: "blockhash not found" })), "blockhash not found | change 4");
+  const floor = { type: "floor_veto", program: P, proposalId: 7, reason: "upgrade to unapproved buffer B is still pending" };
+  assert.equal(detail(actionLine(floor, { reason: floor.reason, signature: "S" })), `upgrade to unapproved buffer B is still pending | proposal 7 | program ${P} | tx S`);
+  const exit = { type: "veto_exit", mint: M, reason: "lifeboat exit of 5 is not pre-approved" };
+  assert.equal(detail(actionLine(exit, { reason: exit.reason, signature: "S" })), `lifeboat exit of 5 is not pre-approved | mint ${M} | tx S`);
+  assert.equal(detail({ action: "execute", what: "change 5", signature: "S" }), "change 5 | tx S");
+  assert.equal(detail({ level: "error", msg: "this key is no longer a live guardian", target: "vault" }), "this key is no longer a live guardian | on vault");
+  // Change and ticket ids start at 0 (next_change_id and next_ticket_id
+  // in programs/vault/src/genesis.rs), and the guardian reads them as
+  // BigInt: a protocol's first loosening is change 0n, its first queued
+  // payout ticket 0n. Each is named.
+  assert.equal(detail({ level: "error", msg: "could not be read", changeId: 0n }), "could not be read | change 0");
+  const firstTicket = { type: "cancel", ticketId: 0n, address: "A", mint: M, vault: "V", reason: "incident: ticket to O" };
+  assert.equal(detail(actionLine(firstTicket, { reason: firstTicket.reason, ticketId: firstTicket.ticketId, signature: "S" })), "incident: ticket to O | ticket 0 | tx S");
+  // Named once: not again when the reason, the text or a part before it
+  // already says it, as a whole word, in any case; a key only exactly.
+  assert.equal(detail({ action: "floor_veto", reason: `floor ${P} proposal 7 is still pending`, program: P, proposalId: 7, signature: "S" }), `floor ${P} proposal 7 is still pending | tx S`);
+  assert.equal(detail({ level: "error", msg: "change 4 may be approved, but its account could not be read", changeId: 4 }), "change 4 may be approved, but its account could not be read");
+  assert.equal(detail({ level: "error", msg: "Change 4 failed", changeId: 4 }), "Change 4 failed");
+  assert.equal(detail({ level: "error", msg: "change 45 may be approved", changeId: 4 }), "change 45 may be approved | change 4");
+  assert.equal(detail({ level: "error", msg: "exchange 4 failed", changeId: 4 }), "exchange 4 failed | change 4");
+  assert.equal(detail({ level: "error", msg: "change 45 replaced change 4", changeId: 4 }), "change 45 replaced change 4");
+  assert.equal(detail({ level: "error", msg: `${P.toLowerCase()} failed`, program: P }), `${P.toLowerCase()} failed | program ${P}`);
+  assert.equal(detail({ level: "error", msg: `program ${P.toLowerCase()} failed`, program: P }), `program ${P.toLowerCase()} failed | program ${P}`);
+  assert.equal(detail({ action: "execute", reason: `floor ${P.toLowerCase()} proposal 7 is due`, what: `floor ${P} proposal 7`, signature: "S" }), `floor ${P.toLowerCase()} proposal 7 is due | floor ${P} proposal 7 | tx S`);
+  assert.equal(detail({ level: "warn", notify: true, msg: `the Floor guardians are 2-of-3 for ${P}: fix it`, program: P }), `the Floor guardians are 2-of-3 for ${P}: fix it`);
+  assert.equal(detail({ level: "error", msg: "this key is no longer a live guardian", program: P, target: `floor ${P}` }), `this key is no longer a live guardian | on floor ${P}`);
+  // The repeat key holds the labels: change 4 and proposal 4 are two alerts.
+  const seen = new Map();
+  assert.ok(alertFor({ level: "error", msg: "could not be read", changeId: 4 }, seen, 0));
+  assert.ok(alertFor({ level: "error", msg: "could not be read", proposalId: 4 }, seen, 1_000));
+  // An empty field names nothing, and is not searched for: indexOf("")
+  // matches at the end of the text forever.
+  assert.equal(detail({ level: "error", msg: "floor not ready", what: "", program: "" }), "floor not ready");
+  assert.equal(detail({ action: "execute", reason: "due", what: "", signature: "S" }), "due | tx S");
 });
