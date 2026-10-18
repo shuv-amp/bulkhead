@@ -249,7 +249,7 @@ In E2 the other 3,740.40 USDC is unbacked and goes to the limiter. The protocol'
   - **What G2 promises precisely:** Bulkhead never throttles, freezes or prices the return of an owner's own deposit.
   - **What it doesn't promise:** that the tokens are in the vault. Lending moves deposits out, and a bounded unbacked loss (at most G1) reduces what the pool holds; the protocol's own rules decide who bears that.
   - The program-vs-model differential found our earlier wording ("always comes back") overclaimed this (`09 §4`).
-- **G3.** After any backed payment the ledger is sound by construction. `debit_backed` re-checks soundness and refuses (`Unsound`) otherwise. The property test checks soundness with an independent third formulation of the rule, plus maximality (`b + 1` is unsound).
+- **G3.** After any backed payment the ledger is sound by construction. `debit_backed` re-checks soundness and refuses (`Unsound`) otherwise. The property test checks soundness with an independent third formulation of the rule, plus maximality (`b + 1` is unsound); the exhaustive test `g3_backed_amount_is_exact_on_small_ledgers` checks the exact amount on every ledger of a small domain (two priced mints, one position each; `09 §5.2`).
 - **Conservation.** Backing pays only its owner and is created only by tokens that actually arrived from that owner. So across all owners, backed payouts can't exceed what owners put in, valued at conservative prices when each payout happens. A fully compromised protocol controlling any number of accounts gets, beyond its own deposits, **only the unbacked budget** (G1).
 
 ### 4.7 Calibration rule for weights
