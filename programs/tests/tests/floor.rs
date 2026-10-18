@@ -10,6 +10,7 @@ mod common;
 use bulkhead_core::floor::{ABORT_ELF, ABORT_MESSAGE, FLOOR_ABORT_CODE};
 use common::*;
 use solana_keypair::Keypair;
+use solana_loader_v3_interface::instruction as lv3;
 use solana_signer::Signer;
 
 const UPGRADE: u8 = 1;
@@ -1622,6 +1623,64 @@ fn a_snapshot_short_of_a_nobits_section_is_never_pinned() {
     env.next_slot();
     env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
     assert_eq!(env.programdata_bytes(&f.programdata), p.original);
+}
+
+/// Finding 116: for sBPF v3 the loader's strict parser reads the program
+/// header table and the one or two segments it expects, and nothing else.
+/// The length rule also counted the section headers, every section and every
+/// program header, so v3 code with one of them past its end deployed but had
+/// no extent: no snapshot of it could be pinned, and a stop left the quorum
+/// nothing to restore. Each layout here now pins, stops and restores, also
+/// after anyone extends the programdata over the unread ranges.
+#[test]
+fn a_v3_program_is_pinned_whatever_its_unread_headers_say() {
+    let v1 = honest_v1(); // one PF_X segment, so the strict parser reads one header
+    let len = v1.len() as u64;
+    let past = (len + 4096).to_le_bytes();
+    // A section table past the end.
+    let mut table = v1.clone();
+    table[0x28..0x30].copy_from_slice(&past);
+    table[0x3a] = 64;
+    table[0x3c] = 1;
+    // A section table at the end with one NOBITS section past it.
+    let mut nobits = v1.clone();
+    let mut header = [0u8; 64];
+    header[4] = 8; // SHT_NOBITS
+    header[24..32].copy_from_slice(&past);
+    header[32..40].copy_from_slice(&64u64.to_le_bytes());
+    nobits.extend_from_slice(&header);
+    nobits[0x28..0x30].copy_from_slice(&len.to_le_bytes());
+    nobits[0x3a] = 64;
+    nobits[0x3c] = 1;
+    // A second program header, which the strict parser skips, past the end.
+    let mut second = v1.clone();
+    let mut header = [0u8; 56];
+    header[0] = 1; // PT_LOAD
+    header[8..16].copy_from_slice(&past);
+    header[32..40].copy_from_slice(&8u64.to_le_bytes());
+    second.splice(120..120, header);
+    second[0x38] = 2;
+    second[72..80].copy_from_slice(&176u64.to_le_bytes()); // the code, after both
+    for (name, elf) in [("section table", table), ("NOBITS section", nobits), ("second program header", second)] {
+        let mut env = Env::new();
+        let p = protect(&mut env, &elf);
+        let (f, gs) = (&p.f, p.guardians());
+        assert_eq!(read_config(&env, f).elf_is_v3, 1, "{name}");
+        // A stranger extends the programdata (no authority needed, finding
+        // 77), so each unread range above now ends inside it. The pin holds.
+        let stranger = Keypair::new();
+        env.fund(&stranger);
+        let extend = lv3::extend_program(&f.program, Some(&stranger.pubkey()), 10_240);
+        env.ok(&[extend], &[&stranger]);
+        env.next_slot();
+        env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+        assert_eq!(read_config(&env, f).snapshot_valid, 1, "{name}");
+        env.next_slot();
+        env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
+        let mut original = p.original.clone();
+        original.resize(p.original.len() + 10_240, 0);
+        assert_eq!(env.programdata_bytes(&f.programdata), original, "{name}");
+    }
 }
 
 /// Finding 88: the staged abort binary could never be replaced, so if a
