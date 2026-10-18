@@ -51,6 +51,12 @@ test("a mainnet config needs backups and alerts; unknown settings are refused (f
   assert.match(w.join(" "), /liveness/);
   assert.deepEqual(checkConfig({ ...base, cluster: "mainnet-beta", rpcs: ["https://b.example"], alert: { url: "https://hook.example" }, liveness: { url: "https://hc.example/x" } }), []);
   assert.match(checkConfig(base).join(" "), /cluster is not set.*|no config.alert/);
+  const live = (everyS) => checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" }, liveness: { url: "https://hc.example/x", everyS } });
+  for (const v of [10, 86_400]) assert.deepEqual(live(v), [], String(v));
+  for (const [v, shown] of [["600", '"600"'], [[600], "[600]"], [9, "9"], [86_401, "86401"], [Infinity, "Infinity"]]) {
+    assert.throws(() => live(v), { message: `config.liveness.everyS: ${shown} is not a number from 10 to 86400` }, shown);
+  }
+  for (const l of [{ everyS: 60 }, { url: "hc.example/x" }, true, null, "https://hc.example/x"]) assert.throws(() => checkConfig({ ...base, liveness: l }), /config\.liveness must be an object with an http\(s\) url/, JSON.stringify(l));
 });
 
 test("a webhook that fails is tried again, and an alert never delivered is not muted (finding 83)", async () => {
