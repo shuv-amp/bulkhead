@@ -9,7 +9,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { newState } from "../guardian/policy.mjs";
 import { stateJson, restoreState, writeStateFile } from "../guardian/statefile.mjs";
-import { followAccount } from "../guardian/follow.mjs";
+import { followAccount, followConfigs } from "../guardian/follow.mjs";
 import { stallWatch, scanAll } from "../guardian/alert.mjs";
 import { Keypair } from "../lib/signer.mjs";
 
@@ -101,6 +101,117 @@ test("a restart reads a Floor config on from its saved cursor, and says when it 
   const forgot = pages(history, { gone: "s2" });
   const gone = await followAccount(forgot.fetchPage, { cursor: { signature: "s2", slot: 2 }, oldestWanted: 0 });
   assert.deepEqual([gone.status, gone.cursor, gone.sigs], ["gone", { signature: "s10", slot: 10 }, []]);
+});
+
+/**
+ * Floor configs C1..C3 (programs P1..P3) for `followConfigs`; each ingest and
+ * save is recorded. `refuse` by program: "page", "ingest", or "after one"
+ * (the oldest is checkpointed, then it throws).
+ */
+function floorFollow(history, { refuse = {}, cursors = new Map(), followed = new Set() } = {}) {
+  const got = { ingested: [], logs: [], saves: 0 };
+  const deps = {
+    page: async (address, q) => {
+      if (refuse[address.replace("C", "P")] === "page") throw new Error("getSignaturesForAddress: fetch failed");
+      return pages(history[address] ?? []).fetchPage(q);
+    },
+    cursors, followed, oldestWanted: () => 0, knows: null,
+    ingest: async (sigs, live, checkpoint, program) => {
+      if (refuse[program] === "ingest") throw new Error("transaction not returned");
+      for (const s of [...sigs].reverse()) {
+        checkpoint(s.signature, s);
+        if (refuse[program] === "after one") throw new Error("transaction not returned");
+      }
+      got.ingested.push([program, live, sigs.map((s) => s.signature)]);
+    },
+    log: (line) => got.logs.push(line),
+    saved: () => { got.saves += 1; },
+  };
+  return { deps, got, configs: ["1", "2", "3"].map((n) => ({ address: `C${n}`, program: `P${n}` })) };
+}
+
+test("one Floor config that cannot be followed no longer stops the ones after it", async () => {
+  const history = { C1: [sig(9, 900)], C2: [sig(5, 500), sig(4, 400)], C3: [sig(7, 700), sig(6, 600)] };
+  const cursors = new Map([["C1", { signature: "s8", slot: 8 }], ["C2", { signature: "s4", slot: 4 }], ["C3", { signature: "s6", slot: 6 }]]);
+  const { deps, got, configs } = floorFollow(history, { refuse: { P1: "page", P2: "ingest" }, cursors, followed: new Set(["C1", "C2", "C3"]) });
+  await assert.rejects(followConfigs(configs, deps), (e) => e.message === "P1: getSignaturesForAddress: fetch failed; P2: transaction not returned");
+  assert.deepEqual([...deps.followed].sort(), ["C1", "C2", "C3"], "a followed config that fails stays followed: a replay would act on nothing");
+  assert.deepEqual(got.ingested, [["P3", true, ["s7"]]], "the third is read live, after both failures");
+  assert.deepEqual(cursors.get("C3"), { signature: "s7", slot: 7 });
+  assert.deepEqual([cursors.get("C1"), cursors.get("C2")], [{ signature: "s8", slot: 8 }, { signature: "s4", slot: 4 }], "a failed config reads on from where it was");
+  assert.equal(got.saves, 3, "each config's progress is saved, failed or not");
+  // A config that fails part-way keeps, and saves, what it finished.
+  const part = floorFollow({ C3: [sig(8, 800), sig(7, 700), sig(6, 600)] }, { refuse: { P3: "after one" }, cursors: new Map([["C3", { signature: "s6", slot: 6 }]]), followed: new Set(["C3"]) });
+  await assert.rejects(followConfigs(part.configs.slice(2), part.deps), /^Error: P3: transaction not returned$/);
+  assert.deepEqual([part.deps.cursors.get("C3"), part.got.saves], [{ signature: "s7", slot: 7 }, 1]);
+  // A restart whose replay fails stays a replay: never acted on next poll.
+  const replay = floorFollow(history, { refuse: { P2: "ingest" }, cursors: new Map([["C2", { signature: "s4", slot: 4 }]]) });
+  await assert.rejects(followConfigs(replay.configs.slice(1, 2), replay.deps), /^Error: P2: transaction not returned$/);
+  assert.equal(replay.deps.followed.has("C2"), false);
+  replay.deps.page = async () => { throw new Error("fetch failed"); };
+  await assert.rejects(followConfigs(replay.configs.slice(1, 2), replay.deps), /P2: fetch failed/);
+  assert.deepEqual([replay.deps.followed.has("C2"), replay.deps.cursors.get("C2")], [false, { signature: "s4", slot: 4 }]);
+  // Every config followed: no throw.
+  const ok = floorFollow(history, { cursors: new Map([["C2", { signature: "s4", slot: 4 }]]), followed: new Set(["C2"]) });
+  await followConfigs(ok.configs.slice(1, 2), ok.deps);
+  assert.deepEqual(ok.got.ingested, [["P2", true, ["s5"]]]);
+});
+
+test("a Floor config resumes as a replay, is live once followed, and with no signature yet is asked again", async () => {
+  const history = { C1: [sig(3, 300), sig(2, 200)], C2: [] };
+  const cursors = new Map([["C1", { signature: "s2", slot: 2 }]]);
+  const followed = new Set();
+  const { deps, got, configs } = floorFollow(history, { cursors, followed });
+  await followConfigs(configs.slice(0, 2), deps);
+  assert.deepEqual(got.ingested, [["P1", false, ["s3"]]], "a restart replays; the empty config ingests nothing");
+  assert.deepEqual([[...followed], cursors.has("C2"), got.saves], [["C1"], false, 2]);
+  history.C1.unshift(sig(4, 400));
+  history.C2.push(sig(1, 100));
+  await followConfigs(configs.slice(0, 2), deps);
+  assert.deepEqual(got.ingested.slice(1), [["P1", true, ["s4"]], ["P2", false, []]], "followed: live; the anchored config replays nothing");
+  assert.deepEqual([[...followed].sort(), cursors.get("C2")], [["C1", "C2"], { signature: "s1", slot: 1 }]);
+  assert.equal(got.logs.length, 0);
+  // A cursor the node forgot: said, by program, and re-anchored.
+  const forgot = floorFollow({ C3: [sig(6, 600)] }, { cursors: new Map([["C3", { signature: "s5", slot: 5 }]]), followed: new Set(["C3"]) });
+  forgot.deps.page = (address, q) => pages([sig(6, 600)], { gone: "s5" }).fetchPage(q);
+  await followConfigs(forgot.configs.slice(2), forgot.deps);
+  assert.deepEqual([forgot.got.logs.map((l) => [l.level, l.program]), forgot.deps.cursors.get("C3")], [[["error", "P3"]], { signature: "s6", slot: 6 }]);
+  // ... and a node that then lists nothing: the cursor is dropped, never kept.
+  forgot.deps.page = (address, q) => pages([], { gone: "s6" }).fetchPage(q);
+  await followConfigs(forgot.configs.slice(2), forgot.deps);
+  assert.equal(forgot.deps.cursors.has("C3"), false);
+  // A restart whose cursor is gone cannot replay the gap: it says so, and is live from the next poll.
+  const restart = floorFollow({}, { cursors: new Map([["C3", { signature: "s5", slot: 5 }]]) });
+  restart.deps.page = (address, q) => pages([sig(6, 600)], { gone: "s5" }).fetchPage(q);
+  await followConfigs(restart.configs.slice(2), restart.deps);
+  assert.deepEqual([restart.got.logs.map((l) => [l.level, l.program]), restart.got.ingested, [...restart.deps.followed]], [[["error", "P3"]], [["P3", false, []]], ["C3"]]);
+});
+
+test("a Floor config's walk asks the node whether it has the last full page's oldest signature (finding 81)", async () => {
+  // Exactly one full page (1000) newer than the cursor s1, so the next page is empty.
+  const full = Array.from({ length: 1_001 }, (_, i) => sig(1_001 - i, 1_001 - i));
+  const { deps, got, configs } = floorFollow({ C1: full }, { cursors: new Map([["C1", { signature: "s1", slot: 1 }]]), followed: new Set(["C1"]) });
+  // A node without it (a failover mid-walk): the walk fails, and nothing moves.
+  deps.knows = async (s) => s !== "s2";
+  await assert.rejects(followConfigs(configs.slice(0, 1), deps), /^Error: P1: the node returned nothing before s2, .*: walking again$/);
+  assert.deepEqual([got.ingested, deps.cursors.get("C1"), [...deps.followed]], [[], { signature: "s1", slot: 1 }, ["C1"]]);
+  // The next poll, on a node with it, walks again from s1 and reads the page.
+  deps.knows = async () => true;
+  await followConfigs(configs.slice(0, 1), deps);
+  assert.deepEqual([got.ingested.length, got.ingested[0][1], got.ingested[0][2].length, deps.cursors.get("C1")], [1, true, 1_000, { signature: "s1001", slot: 1_001 }]);
+});
+
+test("a Floor config resuming walks back only to the startup bound and says so; a followed one reads it all", async () => {
+  // A full page (1000) of history newer than the cursor, older than the bound past the first.
+  const long = Array.from({ length: 1_002 }, (_, i) => sig(1_002 - i, 1_002 - i));
+  const run = async (followed) => {
+    const f = floorFollow({ C1: long }, { cursors: new Map([["C1", { signature: "s1", slot: 1 }]]), followed });
+    f.deps.oldestWanted = () => 500;
+    await followConfigs(f.configs.slice(0, 1), f.deps);
+    return [f.got.logs.map((l) => [l.level, l.program, /older than a day/.test(l.msg)]), f.got.ingested[0][2].length];
+  };
+  assert.deepEqual(await run(new Set()), [[["error", "P1", true]], 1_000], "resuming: one page, then the gap is said");
+  assert.deepEqual(await run(new Set(["C1"])), [[], 1_001], "live: no bound");
 });
 
 test("a step that fails once, idles, and fails again much later is not a stall (finding 71, 7)", () => {

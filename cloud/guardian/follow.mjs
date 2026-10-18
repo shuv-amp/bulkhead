@@ -176,6 +176,47 @@ export async function followAccount(fetchPage, { cursor = null, oldestWanted = n
   return { sigs: out, cursor, status: "ok" };
 }
 
+/**
+ * One poll of each watched Floor config (`configs`: `{ address, program }`):
+ * followAccount from its cursor in `cursors`, then `ingest(sigs, live,
+ * checkpoint, program)`. A config not yet in `followed` resumes as a replay
+ * (not live), walking back to `oldestWanted()` at most (a day back, as the gap
+ * message says). One config whose walk or ingest fails no longer stops the
+ * configs after it: the others are followed, and then this throws, naming
+ * each that failed, so a failure that lasts raises the stall alert. A plain
+ * loop used to stop at the first failure, and the later programs' executions
+ * and recovery keys went unread until it recovered. Each config's progress
+ * is saved, a failed one's checkpoints included. They stay in turn, as
+ * scanAll's scans do: ingesting acts and checkpoints, and walked together, a
+ * config listed twice would be read twice from the same cursor. So an outage
+ * of every endpoint costs one timeout per config.
+ */
+export async function followConfigs(configs, { page, cursors, followed, oldestWanted, knows, ingest, log, saved = () => {} }) {
+  const failed = [];
+  for (const { address, program } of configs) {
+    try {
+      const resuming = !followed.has(address);
+      const r = await followAccount((q) => page(address, q), { cursor: cursors.get(address) ?? null, oldestWanted: resuming ? oldestWanted() : null, knows });
+      if (r.status === "gone") {
+        log({ level: "error", msg: "the node no longer has the Floor config's cursor signature; reading on from its newest. Floor history in the gap was not reviewed: check this program's proposals, executions and recovery key by hand", program });
+      } else if (r.status === "gap") {
+        log({ level: "error", msg: "Floor history older than a day, back to the saved cursor, was not reviewed: check this program's proposals, executions and recovery key by hand", program });
+      }
+      if (r.cursor) cursors.set(address, r.cursor);
+      else cursors.delete(address);
+      // No signature at all yet: ask again next poll, never from genesis.
+      if (r.status === "empty") continue;
+      await ingest(r.sigs, !resuming, (signature, s) => cursors.set(address, { signature, slot: s.slot ?? 0 }), program);
+      followed.add(address);
+    } catch (e) {
+      failed.push(`${program}: ${e?.message ?? e}`);
+    } finally {
+      saved();
+    }
+  }
+  if (failed.length) throw new Error(failed.join("; "));
+}
+
 /** Process one oldest-first signature batch, checkpointing only completed items. */
 export async function ingestSignatures(signatures, ingestOne, checkpoint = () => {}) {
   for (const signature of [...signatures].reverse()) {
