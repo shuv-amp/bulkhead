@@ -36,7 +36,7 @@ exclude_re = [
   # By line: `h ^= k` in the body and after the tail sits at the same column
   # and is not equivalent (tests catch it). scripts/mutants.sh fails if a move leaves
   # these lines with other than 3 such mutants, not if one swaps for another.
-  'floor\.rs:(327|330|333):11: replace \^= with \|= in murmur3_32$',  # 3
+  'floor\.rs:(355|358|361):11: replace \^= with \|= in murmur3_32$',  # 3
   # governance.rs: count == threshold already fails the quorum check
   'governance\.rs:\d+:50: replace > with >= in can_eject$',  # 1
 ]
