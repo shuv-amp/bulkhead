@@ -347,6 +347,7 @@ export const DEFAULT_POLICY = {
 const CONFIG_KEYS = new Set(["rpc", "rpcs", "vaultProgram", "protocolProgram", "mints", "guardianKey", "pollMs", "policy", "floorProgram", "floorProtected", "alert", "stateFile", "stallAlertS", "lagAlertS", "ingestBudgetMs", "ingestConcurrency", "freshnessCheckS", "startupMaxSignatures", "cluster", "minBalanceSol", "liveness"]);
 /** Genesis hashes of the clusters a config may name (`cluster`). */
 export const GENESIS = { "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", devnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", testnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY" };
+const CLUSTERS = new Set([...Object.keys(GENESIS), "localnet"]);
 
 /**
  * A guardian config, checked before anything runs: unknown settings (typos),
@@ -372,7 +373,7 @@ export function checkConfig(cfg) {
   if (cfg.floorProtected !== undefined && (!Array.isArray(cfg.floorProtected) || !cfg.floorProtected.every((m) => BASE58_KEY.test(m)) || !BASE58_KEY.test(cfg.floorProgram ?? ""))) throw new Error("config.floorProtected must be a list of program addresses, with config.floorProgram set");
   if (cfg.alert !== undefined && !url(cfg.alert?.url)) throw new Error("config.alert.url must be an http(s) URL");
   if (cfg.liveness !== undefined && (!url(cfg.liveness?.url) || (cfg.liveness.everyS !== undefined && !(cfg.liveness.everyS >= 10)))) throw new Error("config.liveness must be { url, everyS ≥ 10 }");
-  if (cfg.cluster !== undefined && !(cfg.cluster in GENESIS) && cfg.cluster !== "localnet") throw new Error(`config.cluster must be one of ${[...Object.keys(GENESIS), "localnet"].join(", ")}`);
+  if (cfg.cluster !== undefined && !CLUSTERS.has(cfg.cluster)) throw new Error(`config.cluster must be one of ${[...CLUSTERS].join(", ")}`);
   if (cfg.cluster === "mainnet-beta") {
     if (!cfg.rpcs?.length) throw new Error("a mainnet guardian needs at least one backup endpoint (config.rpcs) from another provider (docs/07 §6)");
     if (!cfg.alert) throw new Error("a mainnet guardian needs config.alert: without it nobody is told of a freeze, an error or a dead key");
