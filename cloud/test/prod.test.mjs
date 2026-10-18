@@ -35,6 +35,10 @@ test("a mainnet config needs backups and alerts; unknown settings are refused (f
   assert.throws(() => checkConfig({ ...base, polMs: 400 }), /not a guardian setting/);
   assert.throws(() => checkConfig({ ...base, pollMs: 5 }), /pollMs/);
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet" }), /must be one of/);
+  // Only the names themselves: `in` also took ["mainnet-beta"], which then
+  // skipped every mainnet rule below while matching mainnet's genesis hash,
+  // and names Object.prototype gives every object, such as "constructor".
+  for (const c of [["mainnet-beta"], "constructor", "__proto__", "toString"]) assert.throws(() => checkConfig({ ...base, cluster: c }), /must be one of/, JSON.stringify(c));
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet-beta", alert: { url: "https://hook.example" } }), /backup endpoint/);
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet-beta", rpcs: ["https://b.example"] }), /config.alert/);
   const w = checkConfig({ ...base, cluster: "mainnet-beta", rpcs: ["https://b.example"], alert: { url: "https://hook.example" } });
