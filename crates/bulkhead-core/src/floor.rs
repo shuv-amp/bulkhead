@@ -149,10 +149,13 @@ pub fn snapshot_matches(buffer_program: &[u8], programdata_program: &[u8]) -> bo
         && programdata_program[n..].iter().all(|&b| b == 0)
 }
 
-/// How long an ELF says it is: the furthest byte that its file header, its
-/// program and section header tables, its segments and its sections occupy.
-/// `None` if `elf` is not a 64-bit little-endian ELF whose tables lie inside
-/// it, or if it has more than 64 segments or 1,024 sections.
+/// How long an ELF says it is: the furthest byte of it that the loader reads
+/// and bounds-checks. Below sBPF v3 that is its file header, its program and
+/// section header tables, its segments and its sections; `None` if any of
+/// them ends past `elf`, or if it has more than 64 segments, 1,024 sections or
+/// too small table entries. (That loader bounds only `PT_LOAD` segments, so
+/// for a segment of another type past its end the rule is stricter: `None`.)
+/// `None` too if `elf` is not a 64-bit little-endian ELF.
 ///
 /// A snapshot must be at least this long, not only identical. The loader
 /// deploys the buffer's own bytes, so a binary cut before its trailing zeros
@@ -161,6 +164,15 @@ pub fn snapshot_matches(buffer_program: &[u8], programdata_program: &[u8]) -> bo
 /// (docs/09, finding 88). A `NOBITS` section holds no file bytes, but the
 /// loader's v0 checks still require its offset and size to lie inside the
 /// binary, so it counts like any other (finding 115).
+///
+/// From sBPF v3 (`e_flags` 3 and up) the loader's strict parser reads only
+/// the file header, the program header table (56-byte entries) and the
+/// segments it expects: the read-only data's if the first header is `PF_R`,
+/// then the code's. Section headers and later program headers count for
+/// nothing there, so here neither (finding 116). Counting them where they
+/// lie inside the bytes would make the extent grow when anyone extends the
+/// programdata (`ExtendProgram` needs no authority, finding 77), and a pinned
+/// snapshot would stop being long enough.
 pub fn elf_extent(elf: &[u8]) -> Option<usize> {
     if elf.len() < 64 || elf[..4] != *b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
         return None;
@@ -168,12 +180,34 @@ pub fn elf_extent(elf: &[u8]) -> Option<usize> {
     let u16_at = |at: usize| -> Option<usize> {
         Some(u16::from_le_bytes(elf.get(at..at.checked_add(2)?)?.try_into().ok()?) as usize)
     };
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            elf.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
     let u64_at = |at: usize| -> Option<usize> {
         usize::try_from(u64::from_le_bytes(
             elf.get(at..at.checked_add(8)?)?.try_into().ok()?,
         ))
         .ok()
     };
+    if u32_at(0x30)? >= SBPF_V3_FLAGS {
+        let (phoff, phnum) = (u64_at(0x20)?, u16_at(0x38)?);
+        let mut end = 64usize;
+        if phnum > 0 {
+            end = end.max(phoff.checked_add(phnum.checked_mul(56)?)?);
+            let read = if u32_at(phoff.checked_add(4)?)? == PF_R {
+                2
+            } else {
+                1
+            };
+            for i in 0..phnum.min(read) {
+                let h = phoff.checked_add(i.checked_mul(56)?)?;
+                end = end.max(u64_at(h.checked_add(8)?)?.checked_add(u64_at(h.checked_add(32)?)?)?);
+            }
+        }
+        return (end <= elf.len()).then_some(end);
+    }
     let (phoff, shoff) = (u64_at(0x20)?, u64_at(0x28)?);
     let (phentsize, phnum) = (u16_at(0x36)?, u16_at(0x38)?);
     let (shentsize, shnum) = (u16_at(0x3a)?, u16_at(0x3c)?);

@@ -10,8 +10,11 @@
 //! parser, which reads the section headers) and v3 (the strict one, which
 //! does not).
 //!
-//! The rule may be stricter than the loader; that costs only a refused pin.
-//! Each test prints how often it is (docs/09, finding 88's coverage row).
+//! For v3 the rule is exact, and the tests assert it: a v3 binary the loader
+//! takes always has an extent, and the loader refuses it one byte short
+//! (finding 116). For v0 it may be stricter than the loader: a refused pin,
+//! or for code with a segment other than `PT_LOAD` past its end no extent at
+//! all, so nothing could ever be pinned. The tests print how often.
 
 mod common;
 
@@ -119,13 +122,19 @@ fn sbpf_v0(elf: &[u8]) -> bool {
     elf[48..52] == [0, 0, 0, 0]
 }
 
-/// Every real binary: a copy of the live code is restorable exactly from its
-/// extent on, and the loader redeploys every restorable copy. Cut one byte
-/// short, a v0 binary is refused by the loader too (finding 88's premise).
+/// The strict parser's binaries (`e_flags` 3 and up), as `elf_extent` reads it.
+fn sbpf_v3(elf: &[u8]) -> bool {
+    u32::from_le_bytes(elf[48..52].try_into().unwrap()) >= 3
+}
+
+/// Every real binary: the loader takes its bytes from its extent on and
+/// refuses any fewer (finding 88's premise; for v3, finding 116), and every
+/// copy of the live code that is restorable redeploys. A v0 binary ends at
+/// its extent; a v3 one may run on in section headers nobody reads.
 #[test]
 fn every_restorable_copy_of_a_real_binary_redeploys() {
     let mut env = Env::new();
-    let (mut checked, mut stricter) = (0, vec![]);
+    let mut checked = 0;
     for (name, elf) in corpus() {
         let Some(live) = Live::deploy(&mut env, &elf, elf.len() + TAIL) else {
             // Built for the deprecated loader: no deploy, nothing to restore.
@@ -135,25 +144,24 @@ fn every_restorable_copy_of_a_real_binary_redeploys() {
         let mut programdata = elf.clone();
         programdata.resize(elf.len() + TAIL, 0);
         let extent = elf_extent(&programdata).unwrap_or_else(|| panic!("{name}: no extent"));
-        assert_eq!(extent, elf.len(), "{name}: a real binary ends where its ELF says");
-        for cut in [extent - 64, extent - 8, extent - 1, extent, extent + 1, extent + TAIL / 2, extent + TAIL] {
+        if sbpf_v0(&elf) {
+            assert_eq!(extent, elf.len(), "{name}: a v0 binary ends where its ELF says");
+        }
+        let len = elf.len();
+        let mut cuts = vec![extent - 64, extent - 8, extent - 1, extent, extent + 1, len, len + TAIL / 2, len + TAIL];
+        cuts.sort();
+        cuts.dedup();
+        for cut in cuts {
             let copy = &programdata[..cut];
             let restorable = snapshot_restorable(copy, &programdata);
-            assert_eq!(restorable, cut >= extent, "{name}: cut at {cut}, extent {extent}");
-            let redeploys = live.upgrade(&mut env, copy);
-            if restorable {
-                assert!(redeploys, "{name}: restorable from {cut} bytes, but the loader refuses them");
-                checked += 1;
-            } else if redeploys {
-                stricter.push(format!("{name}@{}", extent - cut));
-            }
-            if cut == extent - 1 && sbpf_v0(&elf) {
-                assert!(!redeploys, "{name}: v0, one byte short of its extent, yet the loader takes it");
-            }
+            let identical = programdata[cut..].iter().all(|&b| b == 0);
+            assert_eq!(restorable, cut >= extent && identical, "{name}: cut at {cut}, extent {extent}");
+            assert_eq!(live.upgrade(&mut env, copy), cut >= extent, "{name}: cut at {cut}, extent {extent}");
+            checked += restorable as usize;
         }
     }
-    println!("{checked} restorable copies of 13 binaries redeploy; the loader also took {} cuts the rule refuses: {}", stricter.len(), stricter.join(" "));
-    assert_eq!(checked, 13 * 4);
+    println!("{checked} restorable copies of 13 binaries redeploy");
+    assert_eq!(checked, 49);
 }
 
 /// SPL Memo 4.0.0 (v0) laid out three more ways, each of which puts a
@@ -221,9 +229,10 @@ fn read(b: &[u8], at: usize, width: usize) -> u64 {
 }
 
 /// `elf` with `TAIL` zeros after it and one to three header fields rewritten:
-/// the section table's offset or count, a program header's type, offset,
-/// file size or memory size, or a section's type, offset or size. The new
-/// values aim at the edges: the old one nudged, zero, the tail, the extent.
+/// the section table's offset or count, the program header count, a program
+/// header's type, flags, offset, file size or memory size, or a section's
+/// type, offset or size. The new values aim at the edges: the old one
+/// nudged, zero, the tail, the extent, a type or flag.
 fn mutate(r: &mut Rng, elf: &[u8]) -> Vec<u8> {
     let mut b = elf.to_vec();
     b.resize(elf.len() + TAIL, 0);
@@ -231,9 +240,11 @@ fn mutate(r: &mut Rng, elf: &[u8]) -> Vec<u8> {
     let (phoff, phnum) = (read(&b, 0x20, 8) as usize, read(&b, 0x38, 2));
     let (shoff, shnum) = (read(&b, 0x28, 8) as usize, read(&b, 0x3c, 2));
     for _ in 0..1 + r.below(3) {
-        let (at, width) = match r.below(6) {
+        let (at, width) = match r.below(8) {
             0 => (0x28, 8),
             1 => (0x3c, 2),
+            6 => (0x38, 2),
+            7 if phnum > 0 => (phoff + 56 * r.below(phnum) as usize + 4, 4),
             2 if phnum > 0 => (phoff + 56 * r.below(phnum) as usize + [8, 32, 40][r.below(3) as usize], 8),
             3 if phnum > 0 => (phoff + 56 * r.below(phnum) as usize, 4),
             4 if shnum > 0 => (shoff + 64 * r.below(shnum) as usize + [24, 32][r.below(2) as usize], 8),
@@ -251,7 +262,7 @@ fn mutate(r: &mut Rng, elf: &[u8]) -> Vec<u8> {
             3 => len + r.below(TAIL as u64),
             4 => ext.wrapping_sub(r.below(64)),
             5 => old.wrapping_add(r.below(TAIL as u64)),
-            6 => [1, 2, 3, 6, 8, 0x6000_0000][r.below(6) as usize], // PT_/SHT_ types
+            6 => [1, 2, 3, 4, 5, 6, 8, 0x6000_0000][r.below(8) as usize], // PT_/SHT_ types, PF_ flags
             _ => r.below(len + TAIL as u64),
         };
         b[at..at + width].copy_from_slice(&new.to_le_bytes()[..width]);
@@ -261,8 +272,10 @@ fn mutate(r: &mut Rng, elf: &[u8]) -> Vec<u8> {
 
 /// Mutated binaries: whenever the loader takes one whole, the loader takes
 /// every copy of it `snapshot_restorable` passes (cut at its extent, and at a
-/// point in the zeros after it). 1,000 mutants of each small binary by
-/// default; BULKHEAD_ELF_MUTANTS sets the number.
+/// point in the zeros after it). For v3 the rule is exact: every v3 mutant
+/// the loader takes has an extent, and none is taken one byte short of it
+/// (finding 116). 1,000 mutants of each small binary by default;
+/// BULKHEAD_ELF_MUTANTS sets the number.
 #[test]
 fn no_restorable_copy_of_a_mutated_binary_is_refused_by_the_loader() {
     let n: usize = std::env::var("BULKHEAD_ELF_MUTANTS").ok().map(|s| s.parse().unwrap()).unwrap_or(1_000);
@@ -302,5 +315,8 @@ fn no_restorable_copy_of_a_mutated_binary_is_refused_by_the_loader() {
         // mutants the loader takes that the rule calls restorable.
         assert!(c[2] >= n / 5, "{name}: only {} restorable copies", c[2]);
         assert_eq!(c[3], 0, "{name}: a restorable copy the loader refuses");
+        if sbpf_v3(&elf) {
+            assert_eq!((c[1], c[4]), (0, 0), "{name}: v3, the rule is stricter than the loader");
+        }
     }
 }

@@ -439,3 +439,121 @@ fn elf_extent_rules_at_their_edges() {
     assert_eq!(elf_extent(&e), None);
     assert_eq!(elf_extent(&synth_elf(64, 0, 0, &[], 0, 0, &[])[..63]), None);
 }
+
+/// Finding 116: from sBPF v3 (`e_flags` 3 and up) the loader's strict parser
+/// reads only the program header table (56-byte entries) and the one or two
+/// segments it expects: the read-only data if the first header is `PF_R`,
+/// then the code. Nothing else counts, and nothing else can leave no extent.
+#[test]
+fn elf_extent_for_sbpf_v3_counts_what_the_strict_loader_reads() {
+    use bulkhead_core::floor::elf_extent;
+    let v3 = |mut e: Vec<u8>, first_flags: u32| {
+        e[0x30] = 3;
+        e[0x44..0x48].copy_from_slice(&first_flags.to_le_bytes());
+        e
+    };
+    let (rodata, code) = (4, 1);
+    // Sections and their table count for nothing; under v2 they still do.
+    let e = synth_elf(1000, 64, 56, &[(120, 80)], 900, 64, &[(1, 950, 100)]);
+    assert_eq!(elf_extent(&e), None, "v0: the section past the bytes");
+    let mut v2 = e.clone();
+    v2[0x30] = 2;
+    assert_eq!(elf_extent(&v2), None, "v2: the lenient parser");
+    assert_eq!(elf_extent(&v3(e, code)), Some(200), "v3: the code's end");
+    let mut e = synth_elf(1000, 64, 56, &[(120, 80)], 0, 0, &[]);
+    e[0x28..0x30].copy_from_slice(&5000u64.to_le_bytes());
+    e[0x3c] = 1;
+    assert_eq!(
+        elf_extent(&v3(e, code)),
+        Some(200),
+        "v3: a section table past the bytes"
+    );
+    // The second header counts only after a PF_R first one; a third never.
+    let e = synth_elf(1000, 64, 56, &[(176, 40), (216, 80)], 0, 0, &[]);
+    assert_eq!(
+        elf_extent(&v3(e.clone(), rodata)),
+        Some(296),
+        "rodata, then code"
+    );
+    assert_eq!(
+        elf_extent(&v3(e, code)),
+        Some(216),
+        "code first: one segment"
+    );
+    assert_eq!(
+        elf_extent(&v3(
+            synth_elf(1000, 64, 56, &[(176, 40), (5000, 8)], 0, 0, &[]),
+            code
+        )),
+        Some(216),
+        "an unread second header past the bytes"
+    );
+    assert_eq!(
+        elf_extent(&v3(
+            synth_elf(1000, 64, 56, &[(176, 40), (5000, 8)], 0, 0, &[]),
+            rodata
+        )),
+        None,
+        "a read second header past the bytes"
+    );
+    let e = synth_elf(1000, 64, 56, &[(232, 40), (272, 80), (5000, 8)], 0, 0, &[]);
+    assert_eq!(
+        elf_extent(&v3(e, rodata)),
+        Some(352),
+        "a third header is never read"
+    );
+    // PF_R is the whole 32-bit field.
+    let e = synth_elf(1000, 64, 56, &[(176, 40), (216, 80)], 0, 0, &[]);
+    assert_eq!(elf_extent(&v3(e, rodata | 1 << 16)), Some(216));
+    // The table's end counts, in 56-byte entries whatever e_phentsize says,
+    // with no limit on their number but the bytes.
+    let e = synth_elf(1000, 64, 56, &[(100, 8), (0, 0)], 0, 0, &[]);
+    assert_eq!(elf_extent(&v3(e, code)), Some(176), "the table's end");
+    let mut e = synth_elf(1000, 64, 56, &[(176, 40), (216, 80)], 0, 0, &[]);
+    e[0x36] = 0;
+    assert_eq!(elf_extent(&v3(e, rodata)), Some(296), "e_phentsize 0");
+    let phs65 = vec![(0u64, 64u64); 65];
+    assert_eq!(
+        elf_extent(&v3(
+            synth_elf(64 + 65 * 56, 64, 56, &phs65, 0, 0, &[]),
+            code
+        )),
+        Some(64 + 65 * 56),
+        "65 headers"
+    );
+    // Past the bytes: the code's end, or the table's.
+    assert_eq!(
+        elf_extent(&v3(synth_elf(199, 64, 56, &[(120, 80)], 0, 0, &[]), code)),
+        None
+    );
+    let mut e = v3(synth_elf(200, 64, 56, &[(120, 80)], 0, 0, &[]), code);
+    e[0x38] = 3;
+    assert_eq!(elf_extent(&e), None, "a table of 3 ends at 232");
+    // No headers: the file header, whatever e_phoff says (no flags are read
+    // at 98, past the bytes).
+    assert_eq!(
+        elf_extent(&v3(synth_elf(100, 0, 0, &[], 0, 0, &[]), 0)),
+        Some(64)
+    );
+    let mut e = v3(synth_elf(100, 0, 0, &[], 0, 0, &[]), 0);
+    e[0x20] = 98;
+    assert_eq!(elf_extent(&e), Some(64), "an empty table at 98");
+    // Zeros after the bytes change nothing, as when anyone extends the
+    // programdata: the unread headers that point past the bytes here would
+    // land inside them (finding 116).
+    let mut e = synth_elf(
+        1000,
+        64,
+        56,
+        &[(176, 40), (2000, 8)],
+        1100,
+        64,
+        &[(8, 1200, 64)],
+    );
+    e[0x3c] = 1;
+    let e = v3(e, code);
+    let mut extended = e.clone();
+    extended.resize(4000, 0);
+    assert_eq!(elf_extent(&e), Some(216));
+    assert_eq!(elf_extent(&extended), Some(216), "extended");
+}
