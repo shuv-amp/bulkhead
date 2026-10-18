@@ -622,13 +622,13 @@ pub fn patterned(len: usize, disc: &[u8; 8]) -> Vec<u8> {
     d
 }
 
-/// A protected program with Floor registered: 3 guardians, threshold 2,
+/// A protected program with Floor registered: 4 guardians, threshold 2,
 /// 7-day heartbeats, 72h delay, an abort buffer staged, a snapshot pinned.
 pub struct Protected {
     pub f: Floor,
     pub team: Keypair,
     pub owner: Keypair,
-    pub g: [Keypair; 3],
+    pub g: [Keypair; 4],
     pub abort_buffer: Address,
     pub snapshot: Address,
     pub original: Vec<u8>,
@@ -646,7 +646,7 @@ pub fn protect(env: &mut Env, elf: &[u8]) -> Protected {
     let (program, _) = env.deploy(elf, &team, elf.len().max(2048) * 2); // 2x headroom, like real deploys
     let f = Floor::new(env.floor, program);
     let owner = Keypair::new();
-    let g = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let g = [Keypair::new(), Keypair::new(), Keypair::new(), Keypair::new()];
     for k in &g {
         env.fund(k);
     }

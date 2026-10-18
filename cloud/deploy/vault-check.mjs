@@ -17,7 +17,7 @@ import { VaultClient } from "../lib/bulkhead.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 import { Keypair } from "../lib/signer.mjs";
 import { errorName } from "./errors.mjs";
-import { harborIx, vaultIx, registerArgs, defaultLimits, CAPS } from "./market.mjs";
+import { harborIx, vaultIx, registerArgs, defaultLimits, CAPS, guardianKeys, guardianMarginProblem, MIN_GUARDIANS, THRESHOLD } from "./market.mjs";
 
 const [url, dir] = process.argv.slice(2);
 if (!dir) {
@@ -29,7 +29,7 @@ const wld = JSON.parse(readFileSync(`${dir}/world.json`, "utf8"));
 const kp = (name) => Keypair.load(`${dir}/keys/${name}.json`);
 const admin = kp("admin");
 const whale = kp("whale");
-const guardians = [kp("guardian0"), kp("guardian1"), kp("guardian2")];
+const guardians = guardianKeys(dir);
 const destination = kp("lifeboat-destination");
 const stranger = Keypair.generate(); // appears only in simulations
 const vc = await new VaultClient(wld.vaultProgram, wld.harbor).init();
@@ -83,9 +83,13 @@ console.log(`market ${wld.protocol} on ${url}`);
 console.log("\n1. the accounts are what setup configured");
 check("protocol program is Harbor, and its caller PDA", p.protocolProgram === wld.harbor && p.caller === wld.caller);
 check("admin is keys/admin", p.admin === admin.address, p.admin);
-check("guardians are keys/guardian0..2, quorum 2", JSON.stringify(p.guardians) === JSON.stringify(guardians.map((g) => g.address)) && p.threshold === 2);
+const n = p.guardians.length;
+check(`guardians are keys/guardian0..${n - 1}, quorum ${THRESHOLD}`, JSON.stringify(p.guardians) === JSON.stringify(guardians.slice(0, n).map((g) => g.address)) && p.threshold === THRESHOLD);
+for (const [i, g] of guardians.slice(n).entries()) console.log(`   info     keys/guardian${n + i} (${g.address}) is not in the set: a renewal not executed yet?`);
+const margin = guardianMarginProblem(n, p.threshold);
+if (margin) console.log(`   info     ${margin}; this set keeps working, and renew-guardians proposes ${MIN_GUARDIANS} keys`);
 const live = p.lastHeartbeat.filter((t) => now - t <= p.heartbeatIntervalS).length;
-check("every guardian is live (heartbeat within 7 days)", live === 3 && p.heartbeatIntervalS === 7 * DAY, `${live}/3`);
+check("every guardian is live (heartbeat within 7 days)", live === n && p.heartbeatIntervalS === 7 * DAY, `${live}/${n}`);
 check("loosening waits 72h", p.loosenDelayS === 3 * DAY);
 check("lifeboat destination is keys/lifeboat-destination", p.lifeboatDestination === destination.address);
 console.log(`   info     recovery key (replaces a stolen admin after the delay): ${p.recovery ?? "none set"}`);
@@ -123,7 +127,7 @@ await expect("a stranger proposing the seal", [vaultIx(m, 4, new Uint8Array(0), 
 await expect("a stranger vetoing the seal", [vaultIx(m, 6, new Uint8Array(0), [w(m.protocol), s(stranger.publicKey)])], "NotGuardian");
 await expect("a stranger freezing the protocol", [vc.freeze(stranger.publicKey, 3_600)], "NotGuardian");
 await expect("a guardian freezing for 25h (the maximum is 24h)", [vc.freeze(guardians[0].publicKey, 25 * 3_600)], "FreezeTooLong");
-await expect("a stranger registering Harbor again with its own admin", [harborIx(m, 0, registerArgs(stranger.publicKey, [0, 1, 2].map(() => Keypair.generate().publicKey), Keypair.generate().publicKey), [], [
+await expect("a stranger registering Harbor again with its own admin", [harborIx(m, 0, registerArgs(stranger.publicKey, [0, 1, 2, 3].map(() => Keypair.generate().publicKey), Keypair.generate().publicKey), [], [
   s(admin.publicKey, true), w(m.protocol), r(m.harbor), r(m.harbor), r(m.caller), r(IDS.system),
 ])], "AlreadyInitialized");
 await expect("a second vault for the same mint", [vaultIx(m, 1, defaultLimits(), [

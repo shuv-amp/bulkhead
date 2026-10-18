@@ -41,7 +41,7 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 
-for k in admin guardian0 guardian1 guardian2; do
+for k in admin guardian0 guardian1 guardian2 guardian3; do
   addr=$(solana-keygen pubkey "$E/keys/$k.json")
   curl -s "$RPC" -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"$addr\",10000000000]}" >/dev/null

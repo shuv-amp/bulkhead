@@ -52,12 +52,26 @@ found=$(grep -c "already on chain" "$D/resume.log" || true)
 seal_first=$(grep -o 'seal executable from .*' "$D/deploy.log")
 seal_resumed=$(grep -o 'seal executable from .*' "$D/resume.log" || true)
 same_world=$(node -e 'const [a, b] = process.argv.slice(1).map((f) => ({ ...JSON.parse(require("fs").readFileSync(f)), sealProposal: 0 })); console.log(JSON.stringify(a) === JSON.stringify(b))' "$D/world.json.first" "$D/market/world.json")
-if [ "$found" != 13 ] || [ "$before" != "$after" ] || [ "$seal_first" != "$seal_resumed" ] || [ "$same_world" != true ]; then
+if [ "$found" != 14 ] || [ "$before" != "$after" ] || [ "$seal_first" != "$seal_resumed" ] || [ "$same_world" != true ]; then
   tail -20 "$D/resume.log"
-  echo "DRY RUN FAILED: the resumed setup was not a no-op ($found of 13 steps on chain; balance $before -> $after; $seal_first -> $seal_resumed; same world: $same_world)"
+  echo "DRY RUN FAILED: the resumed setup was not a no-op ($found of 14 steps on chain; balance $before -> $after; $seal_first -> $seal_resumed; same world: $same_world)"
   exit 1
 fi
-echo "resumed setup found all 13 steps on chain, spent nothing, left the seal time alone ($seal_first) and rebuilt the same world.json"
+echo "resumed setup found all 14 steps on chain, spent nothing, left the seal time alone ($seal_first) and rebuilt the same world.json"
+
+echo "== resuming a market registered with three guardian keys (before finding 107) makes no fourth"
+mv "$D/market/keys/guardian3.json" "$D/guardian3.json.aside"
+if ! node cloud/deploy/market.mjs setup "$RPC" "$D/market" "$D/deployer.json" "$(solana-keygen pubkey target/deploy/bulkhead_vault-keypair.json)" "$(solana-keygen pubkey target/deploy/bulkhead_harbor-keypair.json)" > "$D/three-keys.log" 2>&1; then
+  tail -5 "$D/three-keys.log"
+  echo "DRY RUN FAILED: resuming a three-key market failed"
+  exit 1
+fi
+if [ -e "$D/market/keys/guardian3.json" ]; then
+  echo "DRY RUN FAILED: resuming a registered market made keys/guardian3.json, a key its set does not hold"
+  exit 1
+fi
+mv "$D/guardian3.json.aside" "$D/market/keys/guardian3.json"
+echo "resumed without making a guardian key the chain lacks"
 
 echo "== a second market must not take over the same Harbor (Harbor lets anyone register it)"
 if out=$(node cloud/deploy/market.mjs setup "$RPC" "$D/other" "$D/deployer.json" "$(solana-keygen pubkey target/deploy/bulkhead_vault-keypair.json)" "$(solana-keygen pubkey target/deploy/bulkhead_harbor-keypair.json)" 2>&1); then

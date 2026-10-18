@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { key, b58encode } from "../lib/solana.mjs";
-import { stepDisposition, marketDirProblem } from "../deploy/market.mjs";
+import { stepDisposition, marketDirProblem, guardianKeys, guardianMarginProblem } from "../deploy/market.mjs";
+import { Keypair } from "../lib/signer.mjs";
 
 const vault = "HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b";
 const harbor = "6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh";
@@ -58,4 +61,47 @@ test("the canonical Harbor build passes the devnet vault and ignores a leftover 
   }).toString();
   assert.equal(resolve(vault), vault);
   assert.equal(resolve(""), vault);
+});
+
+test("a market from before finding 107 keeps its three guardian keys unless a renewal adds one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bulkhead-keys-"));
+  try {
+    mkdirSync(join(dir, "keys"));
+    const old = [0, 1, 2].map((i) => {
+      const kp = Keypair.generate();
+      kp.save(join(dir, "keys", `guardian${i}.json`));
+      return kp.address;
+    });
+    assert.deepEqual(guardianKeys(dir).map((g) => g.address), old);
+    assert.equal(existsSync(join(dir, "keys", "guardian3.json")), false);
+    const renewed = guardianKeys(dir, true).map((g) => g.address);
+    assert.deepEqual(renewed.slice(0, 3), old);
+    assert.equal(renewed.length, 4);
+    assert.deepEqual(guardianKeys(dir, true).map((g) => g.address), renewed);
+    assert.deepEqual(guardianKeys(dir).map((g) => g.address), renewed);
+    rmSync(join(dir, "keys", "guardian1.json"));
+    for (const create of [false, true]) assert.throws(() => guardianKeys(dir, create), /guardian2\.json exists but .*guardian1\.json does not/);
+    assert.equal(existsSync(join(dir, "keys", "guardian1.json")), false); // a gap is never filled with a new key
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the margin check names a set without two keys beyond its quorum", () => {
+  assert.equal(guardianMarginProblem(4, 2), null);
+  assert.equal(guardianMarginProblem(8, 6), null);
+  assert.match(guardianMarginProblem(3, 2), /2-of-3: a new set needs at least 4 keys/);
+  assert.match(guardianMarginProblem(7, 6), /6-of-7: a new set needs at least 8 keys/);
+});
+
+test("an unregistered market gets four guardian keys, made once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bulkhead-keys-"));
+  try {
+    mkdirSync(join(dir, "keys"));
+    const made = guardianKeys(dir, true).map((g) => g.address);
+    assert.equal(made.length, 4);
+    assert.deepEqual(guardianKeys(dir, true).map((g) => g.address), made);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

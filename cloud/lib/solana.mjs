@@ -445,6 +445,15 @@ export class FailoverRpc extends Rpc {
 }
 
 // --- Bulkhead account decoders ----------------------------------------------
+/** Keys a new guardian set needs beyond its threshold: core governance.rs
+ * GUARDIAN_MARGIN (finding 107). A stored set is not checked again. */
+export const GUARDIAN_MARGIN = 2;
+
+/** Why a guardian set breaks the margin rule (finding 107), or null. */
+export function guardianMarginProblem(count, threshold) {
+  const need = threshold + GUARDIAN_MARGIN;
+  return count >= need ? null : `${threshold}-of-${count}: a new set needs at least ${need} keys (finding 107)`;
+}
 const text = (b) => new TextDecoder().decode(b);
 
 export function decodeProtocol(d) {
