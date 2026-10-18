@@ -207,6 +207,29 @@ test("failover: onSwitch is told each endpoint's index, a URL listed twice too (
   }
 });
 
+test("failover: a throwing onSwitch neither drops the answer nor sends the request on (finding 121)", async () => {
+  // The switch's report ran inside the request's try: its error read as the
+  // endpoint that had just answered failing, so the transaction went on to
+  // the next endpoint, and the dead one stayed active.
+  const f = stubFetch({ "a.invalid": "down", "b.invalid": () => ({ result: "sig" }), "c.invalid": () => ({ result: "sig" }) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid", "http://c.invalid"], { onSwitch: () => { throw new Error("log failed"); } });
+    const said = [];
+    const error = console.error;
+    console.error = (line) => said.push(line);
+    try {
+      assert.equal(await rpc.call("sendTransaction", ["x"]), "sig");
+    } finally {
+      console.error = error;
+    }
+    assert.deepEqual(said, ["FailoverRpc: onSwitch threw: log failed"], "the hook's failure leaves a trace");
+    assert.deepEqual(f.calls.filter(([host]) => host !== "a.invalid"), [["b.invalid", "sendTransaction"]], "sent once, to the endpoint that answered");
+    assert.equal(rpc.active, 1);
+  } finally {
+    f.restore();
+  }
+});
+
 test("hostOf names a host, and only a host, for logs (finding 121)", () => {
   assert.equal(hostOf("https://rpc.example:8899/?api-key=secret"), "rpc.example:8899");
   assert.equal(hostOf("http//rpc.example"), "(endpoint)");
@@ -652,6 +675,44 @@ test("failover: call() moving between two lagging endpoints does not restart eit
   assert.deepEqual(switches, [[e(0), e(1)], [e(1), e(0)], [e(0), e(2)]]);
 });
 
+test("failover: a hook whose error cannot be printed, or is long, is passed over too (finding 121)", async () => {
+  // The trace's own String() throws on these; a message-less error is named;
+  // a long message is cut at 160 characters.
+  for (const [thrown, line] of [[Object.create(null), null], [Symbol("s"), "FailoverRpc: onSwitch threw: Symbol(s)"], [new Error(), "FailoverRpc: onSwitch threw: Error"], [new Error("x".repeat(161)), `FailoverRpc: onSwitch threw: ${"x".repeat(160)}`]]) {
+    const f = stubFetch({ "a.invalid": "down", "b.invalid": () => ({ result: "sig" }), "c.invalid": () => ({ result: "sig" }) });
+    const said = [];
+    const error = console.error;
+    console.error = (l) => said.push(l);
+    try {
+      const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid", "http://c.invalid"], { onSwitch: () => { throw thrown; } });
+      assert.equal(await rpc.call("sendTransaction", ["x"]), "sig");
+      assert.deepEqual(f.calls.filter(([host]) => host !== "a.invalid"), [["b.invalid", "sendTransaction"]]);
+    } finally {
+      console.error = error;
+      f.restore();
+    }
+    assert.deepEqual(said, line ? [line] : []);
+  }
+});
+
+test("failover: crossCheck's switch with a throwing onSwitch is made and returned to its caller (finding 121)", async () => {
+  // e0 lacks S since 0; at 31 s the check moves to e1, on S or on e0's slot
+  // lag. A report that throws must not hide the switch from the guardian's
+  // loop, which logs it, nor keep e0's old wait.
+  for (const cause of ["signature", "slot"]) {
+    let behind = false;
+    const { rpc } = laggingIndexRpc({ slot: (i) => (behind && i === 0 ? 0 : 1_000) });
+    assert.equal((await rpc.crossCheck("addr", { nowMs: 0 })).switched, false);
+    rpc.onSwitch = () => { throw new Error("log failed"); };
+    behind = cause === "slot";
+    assert.equal((await rpc.crossCheck("addr", { nowMs: 31_000 })).switched, true, cause);
+    assert.equal(rpc.active, 1, cause);
+    behind = false;
+    rpc.switchTo(0, new Error("e1: fetch failed"));
+    assert.equal((await rpc.crossCheck("addr", { nowMs: 32_000 })).switched, false, `${cause}: e0's wait started again`);
+  }
+});
+
 test("failover: after crossCheck's own switch on a signature, every endpoint's wait starts again", async () => {
   // Evidence names the backup that had S then. e1 lacks S since 10 s; the
   // check leaves e0 for e2 at 31 s; e2 dies and call() moves to e1. The old
@@ -1061,6 +1122,18 @@ test("failover: with every endpoint on another cluster, a call fails saying so (
   const f = stubFetch({ "a.invalid": onCluster(DEVNET_HASH, 9), "b.invalid": onCluster(DEVNET_HASH, 9) });
   try {
     await assert.rejects(new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH }).call("getSlot"), /^Error: getSlot: no RPC endpoint on the expected cluster$/);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: a throwing onCluster does not pass over an endpoint on the right cluster (finding 121)", async () => {
+  const f = stubFetch({ "a.invalid": onCluster(MAINNET_HASH, 9), "b.invalid": onCluster(MAINNET_HASH, 8) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH, onCluster: () => { throw new Error("log failed"); } });
+    assert.equal(await rpc.call("getSlot"), 9);
+    assert.deepEqual(f.calls.filter(([host]) => host === "b.invalid"), [], "the backup is not asked");
+    assert.equal(rpc.active, 0);
   } finally {
     f.restore();
   }
