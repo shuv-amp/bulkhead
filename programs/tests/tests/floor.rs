@@ -1592,6 +1592,43 @@ fn a_snapshot_shorter_than_its_elf_is_never_pinned() {
     assert_eq!(env.programdata_bytes(&f.programdata), p.original);
 }
 
+/// Finding 115: the length rule skipped NOBITS sections, which hold no file
+/// bytes, but the loader's v0 checks still require every section's offset
+/// and size to lie inside the binary. A live binary whose last bytes are the
+/// zeros under a NOBITS section matched a copy cut before them, which the
+/// loader refuses: pinned by anyone, it took the quorum's restore away, as in
+/// finding 88.
+#[test]
+fn a_snapshot_short_of_a_nobits_section_is_never_pinned() {
+    let mut env = Env::new();
+    let mut elf = real_v0_program();
+    let shnum = u16::from_le_bytes([elf[0x3c], elf[0x3d]]);
+    let end = elf.len() as u64;
+    let shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().unwrap());
+    assert_eq!(shoff + 64 * shnum as u64, end, "the section table ends the file");
+    let mut nobits = [0u8; 64];
+    nobits[4] = 8; // SHT_NOBITS, over 64 zero bytes after the section table
+    nobits[24..32].copy_from_slice(&(end + 64).to_le_bytes());
+    nobits[32..40].copy_from_slice(&64u64.to_le_bytes());
+    elf.extend_from_slice(&nobits);
+    elf.extend_from_slice(&[0; 64]);
+    elf[0x3c..0x3e].copy_from_slice(&(shnum + 1).to_le_bytes());
+    let p = protect(&mut env, &elf);
+    let (f, gs) = (&p.f, p.guardians());
+    let attacker = Keypair::new();
+    env.fund(&attacker);
+    let cut = env.write_buffer(&elf[..elf.len() - 64], &attacker);
+    env.set_buffer_authority(&cut, &attacker, &f.authority);
+    assert_eq!(env.fails(&[f.pin_snapshot(&cut)], &[]), err::SNAPSHOT_MISMATCH);
+    env.next_slot();
+    assert_eq!(env.fails(&[f.abort(&gs[0], &p.abort_buffer, Some(&cut))], &[&p.g[0]]), err::SNAPSHOT_MISMATCH);
+    // The whole binary still pins, and the quorum restores it.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
+    assert_eq!(env.programdata_bytes(&f.programdata), p.original);
+}
+
 /// Finding 88: the staged abort binary could never be replaced, so if a
 /// runtime change made it undeployable every stop would fail. A live guardian
 /// quorum now replaces it (with the minimal fallback, say); one key cannot.

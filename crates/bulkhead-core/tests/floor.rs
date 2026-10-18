@@ -338,7 +338,8 @@ fn elf_extent_rules_at_their_edges() {
     assert_eq!(elf_extent(&e), Some(250), "segment end beyond the table");
     let e = synth_elf(400, 64, 56, &[(70, 10)], 0, 0, &[]);
     assert_eq!(elf_extent(&e), Some(120), "the table's end (64 + 56)");
-    // The section header table counts, and each section's data, except NOBITS.
+    // The section header table counts, and each section's data, NOBITS too:
+    // the loader's v0 checks bound every section's range (finding 115).
     let e = synth_elf(
         1000,
         64,
@@ -346,7 +347,7 @@ fn elf_extent_rules_at_their_edges() {
         &[(0, 64)],
         300,
         64,
-        &[(1, 120, 80), (NOBITS, 150, 5000), (1, 200, 30)],
+        &[(1, 120, 80), (NOBITS, 150, 50), (1, 200, 30)],
     );
     assert_eq!(
         elf_extent(&e),
@@ -360,19 +361,17 @@ fn elf_extent_rules_at_their_edges() {
         &[(0, 64)],
         120,
         64,
-        &[(1, 700, 100), (NOBITS, 150, 5000)],
+        &[(1, 700, 100), (NOBITS, 150, 50)],
     );
-    assert_eq!(
-        elf_extent(&e),
-        Some(800),
-        "a section's data; the NOBITS size never counts"
-    );
+    assert_eq!(elf_extent(&e), Some(800), "a section's data");
     let e = synth_elf(1000, 64, 56, &[(0, 64)], 120, 64, &[(NOBITS, 900, 50)]);
     assert_eq!(
         elf_extent(&e),
-        Some(184),
-        "a NOBITS section alone adds nothing"
+        Some(950),
+        "a NOBITS section's range, like any other"
     );
+    let e = synth_elf(1000, 64, 56, &[(0, 64)], 120, 64, &[(NOBITS, 900, 101)]);
+    assert_eq!(elf_extent(&e), None, "a NOBITS range past the bytes");
     // Anything past the bytes: not an ELF to trust.
     assert_eq!(
         elf_extent(&synth_elf(249, 64, 56, &[(200, 50)], 0, 0, &[])),

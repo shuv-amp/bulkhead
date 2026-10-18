@@ -19,9 +19,9 @@ fn le(e: &[u8], at: u128, n: usize) -> u128 {
         .fold(0, |v, &b| v << 8 | b as u128)
 }
 
-// The furthest byte the header, both tables, every segment and every
-// non-NOBITS section occupy. None if `e` is not a 64-bit little-endian ELF,
-// has too many or too small table entries, or if any of them ends past `e`.
+// The furthest byte the header, both tables, every segment and every section
+// (NOBITS too, finding 115) occupy. None if `e` is not a 64-bit little-endian
+// ELF, has too many or too small table entries, or if any of them ends past `e`.
 fn extent(e: &[u8]) -> Option<usize> {
     if e.len() < 64 || e[..4] != *b"\x7fELF" || e[4] != 2 || e[5] != 1 {
         return None;
@@ -49,9 +49,7 @@ fn extent(e: &[u8]) -> Option<usize> {
         end = end.max(le(e, h + 8, 8) + le(e, h + 32, 8));
     }
     for h in (0..shnum).map(|i| shoff + i * shentsize) {
-        if le(e, h + 4, 4) != 8 {
-            end = end.max(le(e, h + 24, 8) + le(e, h + 32, 8));
-        }
+        end = end.max(le(e, h + 24, 8) + le(e, h + 32, 8));
     }
     (end <= len).then_some(end as usize)
 }
