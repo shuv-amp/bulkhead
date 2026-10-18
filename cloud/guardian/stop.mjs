@@ -28,7 +28,7 @@
 // key cannot stop it (not a live guardian, no abort buffer, no config, no
 // endpoint on the config's cluster).
 import { readFileSync } from "node:fs";
-import { Rpc, FailoverRpc, key, b58encode, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, hostOf, key, b58encode, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 import { GENESIS } from "./policy.mjs";
@@ -69,10 +69,10 @@ if (cfg.cluster === undefined) log({ level: "warn", msg: "config.cluster is not 
 // before anything was sent (docs/09, finding 85). An endpoint on another
 // cluster is never read from (finding 117).
 const urls = [cfg.rpc, ...(cfg.rpcs ?? [])];
-const endpointName = (i) => `${new URL(urls[i]).host} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
+const endpointName = (i) => `${hostOf(urls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(urls, {
-    onSwitch: (from, to, e) => log({ level: "warn", msg: `RPC ${new URL(from).host} left; now using ${new URL(to).host}`, cause: e?.message?.slice(0, 120) }),
+    onSwitch: (from, to, e, fromAt, toAt) => log({ level: "warn", msg: `RPC ${endpointName(fromAt)} left; now using ${endpointName(toAt)}`, cause: e?.message?.slice(0, 120) }),
     genesis,
     onCluster: (url, got, at) => {
       if (got === genesis) return;

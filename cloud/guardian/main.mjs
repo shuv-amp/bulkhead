@@ -78,7 +78,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, hostOf, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
@@ -127,8 +127,7 @@ const configWarnings = await must(() => checkConfig(cfg));
 const policy = await must(() => checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) }));
 // With backup endpoints, reads and sends move to the next endpoint when one
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
-// only in the log: RPC URLs often carry an API key.
-const hostOf = (url) => { try { return new URL(url).host; } catch { return "(endpoint)"; } };
+// only in the log (hostOf).
 // With `cluster`, a backup is used only once its genesis hash matches (finding 114).
 const rpcUrls = [cfg.rpc, ...(cfg.rpcs ?? [])];
 const endpointName = (i) => `${hostOf(rpcUrls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;

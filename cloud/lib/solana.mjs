@@ -358,6 +358,14 @@ export const SLOT_LAG_SWITCH = 150;
 export const SIGNATURE_LAG_SWITCH_MS = 30_000;
 
 /**
+ * An endpoint's host, for logs: RPC URLs often carry an API key. A URL that
+ * does not parse, or has no host ("localhost:8899" reads as a scheme), gives
+ * "(endpoint)": the stop's own copy parsed it, and a typo in its primary
+ * made it read nothing through good backups (docs/09, finding 121).
+ */
+export const hostOf = (url) => { try { return new URL(url).host || "(endpoint)"; } catch { return "(endpoint)"; } };
+
+/**
  * Several endpoints behind one `Rpc` interface. Each call goes first to the
  * active endpoint; when it cannot answer (`endpointTrouble`), the next one
  * is tried after at most one quick retry instead of the single endpoint's
@@ -366,8 +374,9 @@ export const SIGNATURE_LAG_SWITCH_MS = 30_000;
  * call waits once, until the first busy endpoint's wait ends (30 s at
  * most, 36 s with jitter), and asks it again, so with every endpoint busy
  * calls still slow down as the servers asked. An answer is never retried elsewhere: a
- * refused simulation is the same on every node. `onSwitch(from, to, error)`
- * reports a change of endpoint.
+ * refused simulation is the same on every node. `onSwitch(from, to, error,
+ * fromAt, toAt)` reports a change of endpoint, with both URLs and indexes:
+ * a URL listed twice does not name its entry.
  *
  * With `genesis`, an endpoint is used only once its genesis hash has matched
  * it, asked before its first use and again before each cross-check until it
@@ -429,7 +438,7 @@ export class FailoverRpc extends Rpc {
   /** Make endpoint `at` the one asked first, and say so (`onSwitch`). */
   switchTo(at, cause) {
     if (at === this.active) return;
-    this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, cause);
+    this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, cause, this.active, at);
     this.active = at;
     this.switches++;
     this.url = this.endpoints[at].url;
