@@ -31,7 +31,7 @@ No finding allows a theft without a key. Every proven issue needed a key comprom
 | 88a | High | Before the seal, a stolen admin key swaps the guardians, proposes the seal (which locks the recovery key out), then seals and parks the vault in one transaction | Fixed: the lifeboat opens a loosen delay after the seal; the recovery key's `SetAdmin` applies during a seal review and ends it |
 | 88b | Medium | A stolen admin key closes a vault for good by tightening an abdicated kind to the extreme | Fixed: tightening an abdicated kind takes a live guardian quorum |
 | 88c | Low | Oracle settings unbounded (price of any age, no margin, confidence as wide as the price, zero feed) | Fixed: bounded in `consts.rs` |
-| 88d | Medium | Floor: a snapshot shorter than its ELF passes identity but is not redeployable; pinned by anyone, it takes the quorum's restore away (pre-v3 programs) | Fixed: `elf_extent` |
+| 88d | Medium | Floor: a snapshot shorter than its ELF passes identity but is not redeployable; pinned by anyone, it takes the quorum's restore away (pre-v3 programs) | Fixed: `elf_extent` (completed by `09` findings 115 and 116, not yet on devnet) |
 | 88e | Low/Medium | Floor: the staged abort binary cannot be replaced, so a runtime change breaking it breaks every stop | Fixed: a live quorum replaces it |
 | 88f | Low (Medium after SIMD-0433) | Floor: the stop's spill is chosen by whoever stops; with SIMD-0433 it would receive the programdata's excess rent | Fixed: the spill is the config |
 | 87a | Low | A replaced admin's queued loosenings still execute | Fixed: only the current admin's or recovery key's changes execute |
