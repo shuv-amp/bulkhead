@@ -1556,12 +1556,7 @@ fn registration_refuses_a_cut_off_recovery_key() {
 /// A real pre-v3 (sBPF v0) mainnet binary, as most protected programs are
 /// today: SPL Memo 4.0.0, shipped inside the LiteSVM crate.
 fn real_v0_program() -> Vec<u8> {
-    let home = std::env::var("HOME").unwrap();
-    std::fs::read_dir(format!("{home}/.cargo/registry/src"))
-        .unwrap()
-        .filter_map(|d| std::fs::read(d.ok()?.path().join("litesvm-0.16.0/src/programs/elf/spl_memo-4.0.0.so")).ok())
-        .next()
-        .expect("litesvm 0.16.0 sources in the cargo registry")
+    std::fs::read(litesvm_elf_dir().join("spl_memo-4.0.0.so")).unwrap()
 }
 
 /// Finding 88: a copy of the live code cut before its trailing zeros matched

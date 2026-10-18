@@ -143,6 +143,17 @@ pub struct Env {
     pub time: i64,
 }
 
+/// The mainnet binaries LiteSVM 0.16.0 ships, in the cargo registry
+/// (`$CARGO_HOME`, by default `~/.cargo`).
+pub fn litesvm_elf_dir() -> std::path::PathBuf {
+    let home = std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap()));
+    std::fs::read_dir(format!("{home}/registry/src"))
+        .unwrap()
+        .map(|d| d.unwrap().path().join("litesvm-0.16.0/src/programs/elf"))
+        .find(|d| d.is_dir())
+        .expect("litesvm 0.16.0 sources in the cargo registry")
+}
+
 pub fn floor_so() -> Vec<u8> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
