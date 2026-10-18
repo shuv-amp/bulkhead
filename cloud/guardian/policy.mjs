@@ -366,14 +366,14 @@ export function checkConfig(cfg) {
   for (const k of ["vaultProgram", "protocolProgram"]) if (!BASE58_KEY.test(cfg[k] ?? "")) throw new Error(`config.${k} must be a base58 address`);
   if (!Array.isArray(cfg.mints) || !cfg.mints.every((m) => BASE58_KEY.test(m))) throw new Error("config.mints must be a list of base58 mint addresses");
   if (typeof cfg.guardianKey !== "string") throw new Error("config.guardianKey must be the path of the guardian's keypair file");
-  for (const [k, lo, hi] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000], ["minBalanceSol", 0, 1_000]]) {
-    const v = cfg[k];
-    if (v !== undefined && (typeof v !== "number" || !(v >= lo && v <= hi))) throw new Error(`config.${k}: ${JSON.stringify(v)} is not a number from ${lo} to ${hi}`);
+  for (const [k, lo, hi] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000], ["minBalanceSol", 0, 1_000], ["liveness.everyS", 10, 86_400]]) {
+    const v = k.split(".").reduce((o, p) => o?.[p], cfg);
+    if (v !== undefined && (typeof v !== "number" || !(v >= lo && v <= hi))) throw new Error(`config.${k}: ${typeof v === "number" ? v : JSON.stringify(v)} is not a number from ${lo} to ${hi}`);
   }
   if (cfg.floorProtected !== undefined && (!Array.isArray(cfg.floorProtected) || !cfg.floorProtected.every((m) => BASE58_KEY.test(m)) || !BASE58_KEY.test(cfg.floorProgram ?? ""))) throw new Error("config.floorProtected must be a list of program addresses, with config.floorProgram set");
   if (cfg.policy !== undefined && (typeof cfg.policy !== "object" || cfg.policy === null || Array.isArray(cfg.policy))) throw new Error("config.policy must be an object of policy settings (cloud/guardian/policy.mjs, DEFAULT_POLICY)");
   if (cfg.alert !== undefined && !url(cfg.alert?.url)) throw new Error("config.alert.url must be an http(s) URL");
-  if (cfg.liveness !== undefined && (!url(cfg.liveness?.url) || (cfg.liveness.everyS !== undefined && !(cfg.liveness.everyS >= 10)))) throw new Error("config.liveness must be { url, everyS ≥ 10 }");
+  if (cfg.liveness !== undefined && !url(cfg.liveness?.url)) throw new Error("config.liveness must be an object with an http(s) url (and, optionally, everyS)");
   if (cfg.cluster !== undefined && !CLUSTERS.has(cfg.cluster)) throw new Error(`config.cluster must be one of ${[...CLUSTERS].join(", ")}`);
   if (cfg.cluster === "mainnet-beta") {
     if (!cfg.rpcs?.length) throw new Error("a mainnet guardian needs at least one backup endpoint (config.rpcs) from another provider (docs/07 §6)");
