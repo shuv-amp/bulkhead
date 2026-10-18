@@ -271,7 +271,7 @@ RULES = [
     (r"fuzzing, (\d+) targets", ["fuzz"]),
     (N + r" findings", ["findings"]),
     # The findings since the submission, as a range ending at the latest.
-    (WHOLE + r"96[–-](\d+) were found after the submission", ["findings"]),
+    (WHOLE + r"96[–-](\d+) were (?:found|recorded) after the submission", ["findings"]),
     # 12 only. The match overlaps the kept "95 findings at submission" before
     # it; only that statement's own number is exempt, so 96–N is checked.
     (r"submission;\s+96[–-](\d+) recorded", ["findings"]),
@@ -370,13 +370,15 @@ def self_test() -> int:
         ("| **Program tests** | Floor (5) and Vault (6) on x | 10/10 |", [], 1),
         ("we found 1,103 findings", [], 0),
         ("we found 1,102 findings", [], 1),
-        ("96–1,103 were found after the submission", [], 0),
+        ("96–1,103 were recorded after the submission", [], 0),
         # A sub-range (which of them are fixed) must not read as the latest.
-        ("96–99, 101 and 103 are fixed; 96–1,103 were found after the submission", [], 0),
+        ("96–99, 101 and 103 are fixed; 96–1,103 were recorded after the submission", [], 0),
         ("96–99, 101 and 103 fixed; 1 at submission; 96–1,103 recorded 13–14 Oct", [], 0),
-        ("96–1,102 were\nfound after the submission", [], 1),
-        ("96-1,102 were found after the submission", [], 1),
-        ("196–1,102 were found after the submission", [], 0),
+        ("96–1,102 were\nrecorded after the submission", [], 1),
+        ("96-1,102 were recorded after the submission", [], 1),
+        ("196–1,102 were recorded after the submission", [], 0),
+        ("96–1,102 were found after the submission", [], 1),
+        ("96–1,103 were found after the submission", [], 0),
         ("1 at submission; 96–1,103 recorded 13–14 Oct", [], 0),
         ("1 at submission; 96–1,102 recorded 13–14 Oct", [], 1),
         ("1 at submission; 96-1,102 recorded 13–14 Oct", [], 1),
