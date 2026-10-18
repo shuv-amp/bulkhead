@@ -225,11 +225,31 @@ export function formatFor(url, format) {
   return ALERT_FORMATS.includes(meant) ? meant : "json";
 }
 
-/** The webhook body for `format`. */
+const SLACK_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+const [OPEN, CLOSE] = ["\n```\n", "\n```"];
+
+/**
+ * The webhook body for `format`. The detail can hold an RPC's own error text
+ * (solana.mjs puts its JSON error in the message), so the chat bodies show it
+ * as typed: in a code block (none when it is empty), which keeps a masked
+ * link "[label](url)", a spoiler or a heading from rendering. Its backticks
+ * are swapped for ˋ so it cannot close the block, and half surrogate pairs
+ * (cut upstream) for U+FFFD. Slack's body also escapes &, < and >, without which
+ * "<!channel>" pings the channel and "<url|label>" is a link under any label,
+ * and unfurls no link (unfurl_links, unfurl_media).
+ * Discord's parses no mentions ("@everyone"), shows no link previews (flags 4,
+ * SUPPRESS_EMBEDS), and its cut to 2000 keeps the block closed and no half
+ * surrogate pair.
+ */
 export function webhookBody(alert, format = "json", protocol = "") {
-  const text = `${alert.severity === "critical" ? "🚨" : "⚠️"} ${alert.title}${protocol ? ` (protocol ${protocol})` : ""}\n${alert.detail}`;
-  if (format === "slack") return { text };
-  if (format === "discord") return { content: text.slice(0, 2000) };
+  const head = `${alert.severity === "critical" ? "🚨" : "⚠️"} ${alert.title}${protocol ? ` (protocol ${protocol})` : ""}`;
+  const detail = alert.detail.toWellFormed().replaceAll("`", "ˋ");
+  const block = (d) => (d ? `${OPEN}${d}${CLOSE}` : "");
+  if (format === "slack") return { text: `${head}${block(detail)}`.replace(/[&<>]/g, (c) => SLACK_ESCAPES[c]), unfurl_links: false, unfurl_media: false };
+  if (format === "discord") {
+    const cut = detail.slice(0, 2000 - head.length - OPEN.length - CLOSE.length).replace(/[\uD800-\uDBFF]$/, "");
+    return { content: `${head}${block(cut)}`, allowed_mentions: { parse: [] }, flags: 4 };
+  }
   return { ...alert, protocol };
 }
 

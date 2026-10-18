@@ -393,7 +393,7 @@ test("a guardian whose config is refused for a misspelt alert format still alert
     assert.equal(bodies.length, 1, "one alert reached the webhook");
     assert.equal(bodies[0][0], "/services/T/B/x");
     const body = JSON.parse(bodies[0][1]);
-    assert.deepEqual(Object.keys(body), ["text"]);
+    assert.deepEqual(Object.keys(body), ["text", "unfurl_links", "unfurl_media"]);
     assert.match(body.text, /guardian stopped: config\.alert\.format: "slak" is not one of json, slack, discord/);
   } finally {
     server.close();
