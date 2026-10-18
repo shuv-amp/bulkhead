@@ -280,7 +280,14 @@ fn mutate(r: &mut Rng, elf: &[u8]) -> Vec<u8> {
 fn no_restorable_copy_of_a_mutated_binary_is_refused_by_the_loader() {
     let n: usize = std::env::var("BULKHEAD_ELF_MUTANTS").ok().map(|s| s.parse().unwrap()).unwrap_or(1_000);
     let mut env = Env::new();
-    for (name, elf) in corpus().into_iter().filter(|(_, e)| e.len() <= 10_000) {
+    let small: Vec<_> = corpus().into_iter().filter(|(_, e)| e.len() <= 10_000).collect();
+    // Harbor is the only compiled v3 binary here: if it grows past the
+    // bound or stops being v3, the v3 assertions below lose their one real
+    // program.
+    let names: Vec<(&str, bool)> = small.iter().map(|(n, e)| (n.as_str(), sbpf_v3(e))).collect();
+    let want = [("ABORT_ELF", true), ("ABORT_ELF_MINIMAL", true), ("harbor", true), ("spl_memo-4.0.0.so", false)];
+    assert_eq!(names, want, "the binaries under 10 KB or their versions changed: review docs/09");
+    for (name, elf) in small {
         let live = Live::deploy(&mut env, &elf, elf.len() + TAIL).unwrap();
         let mut r = Rng(0x9e37_79b9_7f4a_7c15 ^ elf.len() as u64);
         // whole, no extent, restorable copies, refused restorable copies,
