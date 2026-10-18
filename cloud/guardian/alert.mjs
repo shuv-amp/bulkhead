@@ -4,7 +4,8 @@
 // too late.
 //
 // Config: "alert": { "url": "https://hooks.slack.com/...", "format": "slack" }
-// (format "slack" | "discord" | "json"). The URL is a secret: it is never
+// (format "slack" | "discord" | "json"; without one, the URL's own, see
+// formatFor). The URL is a secret: it is never
 // logged. An alert never delays the guardian: it is sent in the background,
 // with a timeout, and a failure is only logged.
 
@@ -199,6 +200,31 @@ export async function scanAll(scans, onError = () => {}) {
 /** The bodies webhookBody writes, by `alert.format` (checkConfig refuses others). */
 export const ALERT_FORMATS = ["json", "slack", "discord"];
 
+/**
+ * The body format the alerter posts: `format` when it is one of
+ * ALERT_FORMATS; else the webhook's own: a Slack incoming webhook
+ * (hooks.slack.com/services/...) Slack's, a Discord webhook (discord.com or
+ * discordapp.com or a subdomain of either,
+ * /api[/vN]/webhooks/<id>/<token>[/]) Discord's; else a format refused only
+ * for its case or spacing ("Slack") as meant; else JSON. Slack workflow
+ * triggers take the JSON body's keys, so they keep it. The fatal alert of a
+ * config checkConfig refused (a misspelt format, or a misspelt key beside the
+ * url) is sent with that config, and Slack and Discord drop a JSON body, so
+ * the alert saying the guardian did not start was lost.
+ */
+export function formatFor(url, format) {
+  if (ALERT_FORMATS.includes(format)) return format;
+  let host = "";
+  let path = "";
+  try {
+    ({ hostname: host, pathname: path } = new URL(url));
+  } catch {}
+  if (host === "hooks.slack.com" && path.startsWith("/services/")) return "slack";
+  if (/(^|\.)discord(app)?\.com$/.test(host) && /^\/api(\/v\d+)?\/webhooks\/[^/]+\/[^/]+\/?$/.test(path)) return "discord";
+  const meant = typeof format === "string" ? format.trim().toLowerCase() : "";
+  return ALERT_FORMATS.includes(meant) ? meant : "json";
+}
+
 /** The webhook body for `format`. */
 export function webhookBody(alert, format = "json", protocol = "") {
   const text = `${alert.severity === "critical" ? "🚨" : "⚠️"} ${alert.title}${protocol ? ` (protocol ${protocol})` : ""}\n${alert.detail}`;
@@ -218,16 +244,17 @@ export function webhookBody(alert, format = "json", protocol = "") {
  * is tried again after each of `retryDelaysMs`; one never delivered is
  * un-muted, so its next occurrence is tried again rather than suppressed for
  * the window. One failed post used to drop even a freeze's alert and mute it
- * for 10 minutes (docs/09, finding 83).
+ * for 10 minutes (docs/09, finding 83). The body's format is formatFor's.
  */
-export function alerter({ url, format = "json", protocol = "", windowMs, timeoutMs = 5_000, retryDelaysMs = [1_000, 3_000, 9_000] } = {}, { fetchFn = globalThis.fetch, onError = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export function alerter({ url, format, protocol = "", windowMs, timeoutMs = 5_000, retryDelaysMs = [1_000, 3_000, 9_000] } = {}, { fetchFn = globalThis.fetch, onError = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const seen = new Map();
   const inflight = new Set();
+  const bodyFormat = formatFor(url, format);
   function send(line) {
     if (!url) return;
     const alert = alertFor(line, seen, now(), { windowMs });
     if (!alert) return;
-    const body = JSON.stringify(webhookBody(alert, format, typeof protocol === "function" ? protocol() : protocol));
+    const body = JSON.stringify(webhookBody(alert, bodyFormat, typeof protocol === "function" ? protocol() : protocol));
     const post = async () => {
       const r = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
       if (!r.ok) throw new Error(`webhook answered ${r.status}`);

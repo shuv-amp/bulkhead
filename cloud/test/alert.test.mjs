@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -42,6 +42,42 @@ test("webhook bodies: Slack text, Discord content (≤ 2000), plain JSON", () =>
   // would post the JSON one, which Slack and Discord do not show.
   const shapes = ALERT_FORMATS.map((f) => Object.keys(webhookBody(a, f)).join());
   assert.equal(new Set(shapes).size, ALERT_FORMATS.length, shapes.join(" | "));
+});
+
+test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {
+  const slack = "https://hooks.slack.com/services/T/B/x";
+  const discord = "https://discord.com/api/webhooks/1/x";
+  for (const f of ALERT_FORMATS) assert.equal(formatFor(slack, f), f, "a valid format is kept");
+  assert.equal(formatFor("https://chat.example/hooks/x", "Slack"), "slack", "in any case");
+  assert.equal(formatFor("https://chat.example/hooks/x", " DISCORD\n"), "discord");
+  assert.equal(formatFor(discord, "Slack"), "discord", "the webhook's own before a refused format");
+  assert.equal(formatFor(slack, "JSON"), "slack");
+  assert.equal(formatFor(slack, "slak"), "slack");
+  assert.equal(formatFor(slack, undefined), "slack");
+  assert.equal(formatFor("https://hooks.slack.com/triggers/T/1/x", undefined), "json", "a workflow trigger takes the JSON keys");
+  assert.equal(formatFor(discord, "discrod"), "discord");
+  assert.equal(formatFor("https://discordapp.com/api/v10/webhooks/1/x/", undefined), "discord");
+  assert.equal(formatFor("https://ptb.discord.com/api/webhooks/1/x", undefined), "discord");
+  assert.equal(formatFor(`${discord}/slack`, undefined), "json", "Discord's Slack-compatible endpoint is not guessed");
+  assert.equal(formatFor("https://discord.com/api/channels/1/messages", undefined), "json");
+  assert.equal(formatFor("https://hooks.slack.com.evil.example/services/x", "slak"), "json");
+  assert.equal(formatFor("https://notslack.com/services/T/B/x", undefined), "json");
+  assert.equal(formatFor("https://notdiscord.com/api/webhooks/1/x", undefined), "json");
+  assert.equal(formatFor("https://discord.com.evil.example/api/webhooks/1/x", undefined), "json");
+  assert.equal(formatFor("https://hook.example/x", "slak"), "json");
+  assert.equal(formatFor("not a url", "slak"), "json");
+  // Whatever JSON gave: checkConfig refuses it after this runs.
+  assert.equal(formatFor("https://hook.example/x", ["Slack"]), "json");
+  assert.equal(formatFor("https://hook.example/x", { toString: null }), "json");
+  // The alerter posts that format: the "config refused" alert of a config
+  // with "format": "Slack" reached Slack as a JSON body it does not show.
+  const posted = [];
+  const send = alerter({ url: slack, format: "Slack" }, { fetchFn: async (url, init) => { posted.push(JSON.parse(init.body)); return { ok: true }; } });
+  send({ level: "error", msg: "guardian stopped: config.alert.format: \"Slack\" is not one of json, slack, discord" });
+  await send.flush();
+  assert.equal(posted.length, 1);
+  assert.deepEqual(Object.keys(posted[0]), ["text"]);
+  assert.match(posted[0].text, /guardian stopped: config\.alert\.format/);
 });
 
 test("sending returns at once, survives a dead or hanging webhook, and needs a URL", async () => {
