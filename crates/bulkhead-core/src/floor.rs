@@ -193,16 +193,16 @@ pub fn elf_extent(elf: &[u8]) -> Option<usize> {
     };
     if u32_at(0x30)? >= SBPF_V3_FLAGS {
         let (phoff, phnum) = (u64_at(0x20)?, u16_at(0x38)?);
-        let mut end = 64usize;
+        let mut end = EHDR;
         if phnum > 0 {
-            end = end.max(phoff.checked_add(phnum.checked_mul(56)?)?);
+            end = end.max(phoff.checked_add(phnum.checked_mul(PHDR)?)?);
             let read = if u32_at(phoff.checked_add(4)?)? == PF_R {
                 2
             } else {
                 1
             };
             for i in 0..phnum.min(read) {
-                let h = phoff.checked_add(i.checked_mul(56)?)?;
+                let h = phoff.checked_add(i.checked_mul(PHDR)?)?;
                 end = end.max(u64_at(h.checked_add(8)?)?.checked_add(u64_at(h.checked_add(32)?)?)?);
             }
         }
