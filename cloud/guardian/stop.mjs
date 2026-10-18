@@ -32,6 +32,7 @@ import { Rpc, FailoverRpc, hostOf, key, b58encode, decodeFloor } from "../lib/so
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 import { GENESIS } from "./policy.mjs";
+import { jsonText } from "./alert.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (name, dflt) => {
@@ -62,7 +63,7 @@ if (cfg.cluster !== undefined && cfg.cluster !== "localnet" && !Object.hasOwn(GE
   process.exit(2);
 }
 const genesis = GENESIS[cfg.cluster] ?? null;
-const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
+const log = (o) => console.log(jsonText({ t: new Date().toISOString(), ...o }));
 if (cfg.cluster === undefined) log({ level: "warn", msg: "config.cluster is not set: the RPC's cluster is not checked" });
 // Reads go to the next endpoint when one cannot answer, as the guardian's do:
 // the primary alone used to decide, and one refused read ended the stop

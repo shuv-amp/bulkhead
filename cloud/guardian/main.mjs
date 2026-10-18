@@ -84,7 +84,7 @@ import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, startSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
-import { alerter, stallWatch, scanAll, actionLine } from "./alert.mjs";
+import { alerter, stallWatch, scanAll, actionLine, jsonText } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
 import { attestLocal } from "../lib/limits.mjs";
@@ -97,11 +97,11 @@ const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 // Alerts are never on the guardian's critical path.
 let protocolLabel = "";
 const sendAlert = alerter({ url: cfg.alert?.url, format: cfg.alert?.format, protocol: () => protocolLabel }, {
-  onError: (e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
+  onError: (e) => console.log(jsonText({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
 });
 const log = (o) => {
   const line = { t: new Date().toISOString(), ...o };
-  console.log(JSON.stringify(line, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+  console.log(jsonText(line));
   sendAlert(line);
 };
 // A guardian that stops must say so and exit, so its supervisor starts a fresh
@@ -232,7 +232,7 @@ function saveIncident() {
     // Said once per cause, not on every poll.
     if (saveError !== e.message) {
       saveError = e.message;
-      console.log(JSON.stringify({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state to ${stateFile}: ${e.message}` }));
+      console.log(jsonText({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state to ${stateFile}: ${e.message}` }));
     }
   }
 }

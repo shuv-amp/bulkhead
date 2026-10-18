@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -122,6 +122,23 @@ test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's 
   assert.equal(posted.length, 1);
   assert.deepEqual(Object.keys(posted[0]), ["text", "unfurl_links", "unfurl_media"]);
   assert.match(posted[0].text, /guardian stopped: config\.alert\.format/);
+});
+
+test("log lines and webhook bodies are well-formed JSON, even when a cut halves a surrogate pair", async () => {
+  // "😀".slice(0, 1) is what `.slice(0, 160)` leaves when the cut falls
+  // inside the pair: JSON.stringify writes it as "\ud83d", which serde_json
+  // refuses.
+  const half = `rpc said ${"😀".slice(0, 1)}`;
+  assert.equal(jsonText({ error: half, at: [{ low: "\uDE00x" }], n: 5n, ok: "😀" }), '{"error":"rpc said \uFFFD","at":[{"low":"\uFFFDx"}],"n":"5","ok":"😀"}');
+  for (const format of ALERT_FORMATS) {
+    const posted = [];
+    const send = alerter({ url: "https://hook.invalid/x", format }, { fetchFn: async (url, init) => { posted.push(init.body); return { ok: true }; } });
+    send({ level: "error", msg: "guardian stalled", reason: half });
+    await send.flush();
+    assert.equal(posted.length, 1, format);
+    assert.doesNotMatch(posted[0], /\\u[dD][89a-fA-F]/, format);
+    assert.match(posted[0], /rpc said \uFFFD/, format);
+  }
 });
 
 test("sending returns at once, survives a dead or hanging webhook, and needs a URL", async () => {
