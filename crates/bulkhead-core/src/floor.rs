@@ -150,27 +150,23 @@ pub fn snapshot_matches(buffer_program: &[u8], programdata_program: &[u8]) -> bo
 }
 
 /// How long an ELF says it is: the furthest byte that its file header, its
-/// program and section header tables, its segments and its sections (other
-/// than `NOBITS`) occupy. `None` if `elf` is not a 64-bit little-endian ELF
-/// whose tables lie inside it, or if it has more than 64 segments or 1,024
-/// sections.
+/// program and section header tables, its segments and its sections occupy.
+/// `None` if `elf` is not a 64-bit little-endian ELF whose tables lie inside
+/// it, or if it has more than 64 segments or 1,024 sections.
 ///
 /// A snapshot must be at least this long, not only identical. The loader
 /// deploys the buffer's own bytes, so a binary cut before its trailing zeros
 /// (the last section header's zero fields) matched the live code but could not
 /// be redeployed: pinned by anyone, it took the quorum's restore away
-/// (docs/09, finding 88).
+/// (docs/09, finding 88). A `NOBITS` section holds no file bytes, but the
+/// loader's v0 checks still require its offset and size to lie inside the
+/// binary, so it counts like any other (finding 115).
 pub fn elf_extent(elf: &[u8]) -> Option<usize> {
     if elf.len() < 64 || elf[..4] != *b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
         return None;
     }
     let u16_at = |at: usize| -> Option<usize> {
         Some(u16::from_le_bytes(elf.get(at..at.checked_add(2)?)?.try_into().ok()?) as usize)
-    };
-    let u32_at = |at: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(
-            elf.get(at..at.checked_add(4)?)?.try_into().ok()?,
-        ))
     };
     let u64_at = |at: usize| -> Option<usize> {
         usize::try_from(u64::from_le_bytes(
@@ -201,9 +197,7 @@ pub fn elf_extent(elf: &[u8]) -> Option<usize> {
     }
     for i in 0..shnum {
         let h = shoff.checked_add(i.checked_mul(shentsize)?)?;
-        if u32_at(h.checked_add(4)?)? != 8 {
-            end = end.max(u64_at(h.checked_add(24)?)?.checked_add(u64_at(h.checked_add(32)?)?)?);
-        }
+        end = end.max(u64_at(h.checked_add(24)?)?.checked_add(u64_at(h.checked_add(32)?)?)?);
     }
     if end > elf.len() {
         return None;

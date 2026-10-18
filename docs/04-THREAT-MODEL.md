@@ -71,7 +71,7 @@ A security product with a bug is worse than no product. This file lists every ad
 | I12 | No token leaves a vault except release, settle, lifeboat | program-vs-model differential (vault balance equals the model after every step) |
 | I13 | Releases fail before the seal | program `nothing_can_be_released_before_the_seal…` |
 | I14 | `vault.queued_amount == Σ pending tickets` | program-vs-model differential, after every step |
-| I15 | Floor: no new binary before 72h unless a quorum approved that exact frozen buffer during a restore, or the snapshot is restored | 58 Floor tests on the real loader (`programs/tests/tests/floor.rs`) |
+| I15 | Floor: no new binary before 72h unless a quorum approved that exact frozen buffer during a restore, or the snapshot is restored | 59 Floor tests on the real loader (`programs/tests/tests/floor.rs`) |
 | I16 | Python reference and Rust core agree on every input | diff (6,943,561 identical lines in the final 6-seed run; 36 fixtures with expected outputs) |
 
 ## 4. The #1 risk: a bug in Bulkhead itself
