@@ -54,8 +54,16 @@ test("a mainnet config needs backups and alerts; unknown settings are refused (f
   const live = (everyS) => checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" }, liveness: { url: "https://hc.example/x", everyS } });
   for (const v of [10, 86_400]) assert.deepEqual(live(v), [], String(v));
   for (const [v, shown] of [["600", '"600"'], [[600], "[600]"], [9, "9"], [86_401, "86401"], [Infinity, "Infinity"]]) {
-    assert.throws(() => live(v), { message: `config.liveness.everyS: ${shown} is not a number from 10 to 86400` }, shown);
+    assert.throws(() => live(v), { message: `config.liveness.everyS: ${shown} is not a whole number from 10 to 86400` }, shown);
   }
+  // Counts, seconds and milliseconds are whole numbers, as in checkPolicy and
+  // docs/07; only minBalanceSol takes a fraction.
+  for (const [k, lo, hi] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000]]) {
+    assert.throws(() => checkConfig({ ...base, [k]: lo + 0.5 }), { message: `config.${k}: ${lo + 0.5} is not a whole number from ${lo} to ${hi}` }, k);
+  }
+  assert.throws(() => live(60.5), /liveness\.everyS: 60\.5 is not a whole number/);
+  assert.match(checkConfig({ ...base, minBalanceSol: 0.25 }).join(" "), /cluster is not set/, "a fraction of a SOL is fine");
+  assert.throws(() => checkConfig({ ...base, minBalanceSol: 1_000.5 }), { message: "config.minBalanceSol: 1000.5 is not a number from 0 to 1000" });
   for (const l of [{ everyS: 60 }, { url: "hc.example/x" }, true, null, "https://hc.example/x", ["https://hc.example/x"]]) assert.throws(() => checkConfig({ ...base, liveness: l }), /config\.liveness must be an object with an http\(s\) url/, JSON.stringify(l));
   // Typos inside alert and liveness: each used to fall back to a default, and
   // a misspelt format posts a JSON body a Slack or Discord webhook won't show.

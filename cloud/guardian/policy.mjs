@@ -367,9 +367,9 @@ export function checkConfig(cfg) {
   for (const k of ["vaultProgram", "protocolProgram"]) if (!BASE58_KEY.test(cfg[k] ?? "")) throw new Error(`config.${k} must be a base58 address`);
   if (!Array.isArray(cfg.mints) || !cfg.mints.every((m) => BASE58_KEY.test(m))) throw new Error("config.mints must be a list of base58 mint addresses");
   if (typeof cfg.guardianKey !== "string") throw new Error("config.guardianKey must be the path of the guardian's keypair file");
-  for (const [k, lo, hi] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000], ["minBalanceSol", 0, 1_000], ["liveness.everyS", 10, 86_400]]) {
+  for (const [k, lo, hi, whole = true] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000], ["minBalanceSol", 0, 1_000, false], ["liveness.everyS", 10, 86_400]]) {
     const v = k.split(".").reduce((o, p) => o?.[p], cfg);
-    if (v !== undefined && (typeof v !== "number" || !(v >= lo && v <= hi))) throw new Error(`config.${k}: ${typeof v === "number" ? v : JSON.stringify(v)} is not a number from ${lo} to ${hi}`);
+    if (v !== undefined && (typeof v !== "number" || !(v >= lo && v <= hi) || (whole && !Number.isInteger(v)))) throw new Error(`config.${k}: ${typeof v === "number" ? v : JSON.stringify(v)} is not a ${whole ? "whole number" : "number"} from ${lo} to ${hi}`);
   }
   if (cfg.floorProtected !== undefined && (!Array.isArray(cfg.floorProtected) || !cfg.floorProtected.every((m) => BASE58_KEY.test(m)) || !BASE58_KEY.test(cfg.floorProgram ?? ""))) throw new Error("config.floorProtected must be a list of program addresses, with config.floorProgram set");
   if (cfg.policy !== undefined && (typeof cfg.policy !== "object" || cfg.policy === null || Array.isArray(cfg.policy))) throw new Error("config.policy must be an object of policy settings (cloud/guardian/policy.mjs, DEFAULT_POLICY)");
