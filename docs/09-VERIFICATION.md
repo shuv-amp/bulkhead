@@ -74,13 +74,15 @@ The programs are checked against the core as a model (§7). Two implementations 
 ## 3. Commands
 
 ```bash
-scripts/check.sh                       # fmt, the docs' stated counts, clippy, core tests, golden + fixtures, 150k differential, model,
-                                       # floor_check and mutant_exclusions self-tests, JavaScript tests
+scripts/check.sh                       # fmt, the docs' stated counts, the mutant_exclusions self-test, the exclusions
+                                       # against cargo-mutants (with CI's cargo-mutants version), clippy, core tests,
+                                       # golden + fixtures, 150k differential, model, floor_check self-test, JavaScript tests
 scripts/check-programs.sh              # build the programs, every LiteSVM test, then clippy on the harness (E2E=1: also cloud/e2e)
 BULKHEAD_CASES=100000 cargo test --release -p bulkhead-core    # deeper properties
 python3 reference/diff_runner.py --cases 200000 --seed 7
 scripts/prove.sh                       # Kani, 19 harnesses (~6 min; more in CI)
 scripts/mutants.sh                     # mutation testing, release profile (~45 min)
+scripts/mutants.sh --exclusions-only   # only the exclusions against cargo-mutants' list; no other argument (check.sh runs it)
 scripts/fuzz.sh                        # libFuzzer, every target 60 s in parallel (SECONDS_PER=600 for longer)
 (cd fuzz && cargo clippy --all-targets -- -D warnings)   # lint the fuzz crate (its own workspace; CI's fuzz job)
 scripts/build-programs.sh              # Floor, Vault, Harbor for sBPF v3; checks e_flags == 3
@@ -343,7 +345,7 @@ Every timeout since run 3 is in the backed-amount search: the mutated `hi - lo` 
 
 **Run 9 (6 Oct).** The first full run since 29 Sep, so the first over the code of findings 30–42 (version binding, `rescale_windows`, the recovery key, the genesis rule). Its 22 survivors outside `lane_always_closed` are exactly the 22 equivalents below. The 5 timeouts are the backed-amount search, as in every run. A first attempt in the debug profile, on a machine busy with another build, timed out 69 mutants at 120 s; cargo-mutants counts a timeout as detected, so that run would have overstated the result. `scripts/mutants.sh` now tests in the release profile (overflow checks stay on), where the suite takes ~5 s instead of ~36 s and a timeout means a loop.
 
-**In CI.** `.cargo/mutants.toml` excludes exactly these 22, matched by file, column, mutation and function (the murmur3 tail by line, since `h ^= k`, in the body and after the tail, shares its column); checked against `cargo mutants --list` on 18 Oct (800 mutants): the exclusions remove those 22 mutants and no other. From 9 to 15 Oct the murmur3 lines had moved and only 19 were excluded (finding 105). Finding 115's change (18 Oct) moved them again, from 327/330/333 to 355/358/361; CI's `mutants` job refused it (the pattern matched 0 of its 3) until the pattern was moved with them, and run on their own the three still survive while the body's and the final `h ^= k` are caught. Each pattern now carries the number of mutants it excludes, and `scripts/mutants.sh` fails unless every pattern matches exactly that number, no two patterns match the same mutant, and cargo-mutants excludes exactly what the patterns match. An edit that keeps a pattern's number but changes its mutants, such as an edit to an excluded line itself, is not caught: that mutant must be judged again by hand. CI's `mutants` job then requires every mutant on a pull request's changed lines to be caught.
+**In CI.** `.cargo/mutants.toml` excludes exactly these 22, matched by file, column, mutation and function (the murmur3 tail by line, since `h ^= k`, in the body and after the tail, shares its column); checked against `cargo mutants --list` on 18 Oct (800 mutants): the exclusions remove those 22 mutants and no other. From 9 to 15 Oct the murmur3 lines had moved and only 19 were excluded (finding 105). Finding 115's change (18 Oct) moved them again, from 327/330/333 to 355/358/361; CI's `mutants` job refused it (the pattern matched 0 of its 3) until the pattern was moved with them, and run on their own the three still survive while the body's and the final `h ^= k` are caught. Each pattern now carries the number of mutants it excludes, and `scripts/mutants.sh` fails unless every pattern matches exactly that number, no two patterns match the same mutant, and cargo-mutants excludes exactly what the patterns match. An edit that keeps a pattern's number but changes its mutants, such as an edit to an excluded line itself, is not caught: that mutant must be judged again by hand. `scripts/check.sh` runs the same check when the cargo-mutants version CI installs is installed, so a moved pinned line fails before review too. CI's `mutants` job then requires every mutant on a pull request's changed lines to be caught.
 
 **Equivalent mutants (22), each with the reason it can't change behavior:**
 
@@ -391,7 +393,7 @@ One workflow (`.github/workflows/ci.yml`) runs on every pull request, and at ful
 
 | Job | When | What |
 |---|---|---|
-| `check` | Always | `scripts/check.sh`: fmt, the counts README and docs state against the tree (`tools/claims.py`), clippy, the core's tests, golden vectors and fixtures, the Python-vs-Rust differential (300k cases; 3M weekly), the model, the self-tests of `tools/floor_check.py` and `tools/mutant_exclusions.py`, the JavaScript tests |
+| `check` | Always | `scripts/check.sh`: fmt, the counts README and docs state against the tree (`tools/claims.py`), the self-test of `tools/mutant_exclusions.py`, clippy, the core's tests, golden vectors and fixtures, the Python-vs-Rust differential (300k cases; 3M weekly), the model, the self-test of `tools/floor_check.py`, the JavaScript tests. Not the exclusion check itself: this job has no cargo-mutants, so `check.sh` passes it unchecked here; the `mutants` job runs it first (its row says when) |
 | `programs` | The programs, the core, Cloud, the reference | Build (sBPF v3), LiteSVM tests (including the account-layout contract with `cloud/lib/solana.mjs`), clippy on the test harness, the end-to-end run, the deploy rehearsal; the binaries and `SHA256SUMS` kept 14 days |
 | `scenarios` | The guardian, its libraries, the e2e scripts | `cloud/e2e/guardian-scenarios.sh`: the guardian on a real validator, one scenario per bug it once had (the incident hold across a restart, a restart after a quorum's unfreeze, a dead primary RPC, a thief proposing ahead of an approved change, a replaced recovery key; weekly also a forgotten cursor) |
 | `fuzz` | The fuzz targets, the core, the Vault and Floor | Every libFuzzer target in parallel, 60 s each (25 min weekly); clippy on the fuzz crate as the last step; the corpus carries over between runs, and the weekly run minimizes it |
