@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText, MESSAGE_MAX, MESSAGE_TAIL } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -86,6 +86,45 @@ test("webhook bodies show an RPC's error text as typed, not as mentions, links o
   assert.equal(webhookBody(half, "discord").content, "⚠️ Bulkhead guardian: <t> & co\n```\nx\uFFFD | ticket 7\n```");
   assert.equal(webhookBody({ ...a, detail: "" }, "slack").text, "⚠️ Bulkhead guardian: &lt;t&gt; &amp; co");
   assert.equal(webhookBody({ ...a, detail: "" }, "discord").content, "⚠️ Bulkhead guardian: <t> & co");
+});
+
+test("a long RPC error is cut in the detail, so what follows it reaches Discord", () => {
+  // A failed send quotes the RPC's JSON error, simulation logs included
+  // (solana.mjs), and main.mjs logs it uncut. Discord's body is cut to 2000
+  // units, so the ids after the error were lost. Every part at its longest:
+  // keys of 44, ids of 2^64 - 1, a reason as long as the guardian's longest
+  // (main.mjs, stalled). A failed action has no tx.
+  const K = "K".repeat(44), max = 2n ** 64n - 1n;
+  const line = { level: "error", action: "veto_change", reason: "r".repeat(240), error: `{"code":-32002,"logs":"${"l".repeat(12_000)}"}`,
+    what: K, target: `${K}t`, changeId: max, proposalId: max, program: `${K}p`, mint: `${K}m`, ticketId: max };
+  const a = alertFor(line, new Map(), 0);
+  assert.equal(a.title, "Bulkhead guardian: veto_change failed");
+  const [H, T] = [MESSAGE_MAX - MESSAGE_TAIL - 1, MESSAGE_TAIL];
+  assert.ok(a.detail.includes(`${line.reason} | ${line.error.slice(0, H)}…${line.error.slice(-T)} | `), a.detail.slice(0, 300));
+  const tail = ` | change ${max} | proposal ${max} | program ${K}p | mint ${K}m | ticket ${max}`;
+  assert.ok(a.detail.endsWith(tail));
+  const { content } = webhookBody(a, "discord", K);
+  assert.ok(content.length <= 2000, String(content.length));
+  assert.ok(content.endsWith(`${tail}\n\`\`\``));
+  // At the cap, uncut. Past it, the start and the end, and a cut through a
+  // surrogate pair drops the half. A part said only in the middle left out
+  // is named; one said in the end is not named twice.
+  const detail = (msg, extra = {}) => alertFor({ level: "error", msg, ...extra }, new Map(), 0).detail;
+  const m = (n) => "m".repeat(n);
+  assert.equal(detail(m(MESSAGE_MAX)), m(MESSAGE_MAX));
+  assert.equal(detail(m(MESSAGE_MAX + 1)), `${m(H)}…${m(T)}`);
+  assert.equal(detail(`${m(H - 1)}😀${m(400)}`), `${m(H - 1)}…${m(T)}`);
+  assert.equal(detail(`${m(800)}😀${m(T - 1)}`), `${m(H)}…${m(T - 1)}`);
+  assert.equal(detail(`${m(H)} change 4 ${m(400)}`, { changeId: 4 }), `${m(H)}…${m(T)} | change 4`);
+  assert.equal(detail(`${m(MESSAGE_MAX)} change 4`, { changeId: 4 }), `${m(H)}…${m(T - 9)} change 4`);
+  // A word at a cut reads as cut, whether it goes on ("change 45") or not,
+  // so the part is named again; a part before or after it is not.
+  assert.equal(detail(`${m(H - 9)} change 45 ${m(400)}`, { changeId: 4 }), `${m(H - 9)} change 4…${m(T)} | change 4`);
+  assert.equal(detail(`${m(H - 9)} change 4 ${m(400)}`, { changeId: 4 }), `${m(H - 9)} change 4…${m(T)} | change 4`);
+  assert.equal(detail(`${m(H - 12)} change 4 mm ${m(400)}`, { changeId: 4 }), `${m(H - 12)} change 4 mm…${m(T)}`);
+  const P = "Prog1111111111111111111111111111111111111111", y = "y".repeat(800);
+  assert.equal(detail(`${y}x${P} ${m(T - 45)}`, { program: P }), `${y.slice(0, H)}…${P} ${m(T - 45)} | program ${P}`);
+  assert.equal(detail(`${y} ${P} ${m(T - 46)}`, { program: P }), `${y.slice(0, H)}… ${P} ${m(T - 46)}`);
 });
 
 test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {

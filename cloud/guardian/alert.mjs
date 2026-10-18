@@ -37,6 +37,24 @@ const URGENT_WARNINGS = [
   /listed transactions at or before the start slot/,
 ];
 
+/**
+ * The most of a line's message (in UTF-16 units) an alert's detail shows: a
+ * longer one shows its first MESSAGE_MAX - MESSAGE_TAIL - 1 units, "…" and
+ * its last MESSAGE_TAIL, one fewer on a side whose cut would split a pair.
+ */
+export const MESSAGE_MAX = 1000;
+export const MESSAGE_TAIL = 300;
+
+/** The first `n` UTF-16 units of `s`, less a high surrogate left without its pair. */
+function firstUnits(s, n) {
+  return s.slice(0, n).replace(/[\uD800-\uDBFF]$/, "");
+}
+
+/** The last `n` UTF-16 units of `s`, less a low surrogate left without its pair. */
+function lastUnits(s, n) {
+  return s.slice(-n).replace(/^[\uDC00-\uDFFF]/, "");
+}
+
 /** Actions sent on chain: each one is news. */
 const ACTIONS = new Set(["freeze", "cancel", "veto_change", "veto_exit", "floor_veto", "execute"]);
 
@@ -66,7 +84,20 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   if (!landedFreeze && nowMs - (seen.get(kind) ?? -Infinity) < window) return null;
   seen.set(kind, nowMs);
   const what = action ? `${action}${line.signature ? " sent" : " failed"}` : level === "info" ? "notice" : level;
-  const detail = [line.reason, message, ...named(parts, [line.reason ?? "", message]), line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
+  // An RPC's error text can run to kilobytes (a failed send quotes the
+  // simulation's logs), and webhookBody cuts Discord's body to Discord's
+  // 2000-unit limit, so the change, program, mint or ticket after it were
+  // lost. The detail keeps its start (the RPC's message) and its end (the
+  // last logs, or what a line says after the error it quotes).
+  let shown = message, heard = [message];
+  if (message.length > MESSAGE_MAX) {
+    const [head, tail] = [firstUnits(message, MESSAGE_MAX - MESSAGE_TAIL - 1), lastUnits(message, MESSAGE_TAIL)];
+    shown = `${head}…${tail}`;
+    // A word at a cut does not name a part: it reads as cut ("change 4…"
+    // may be change 45), so that part is named again in full.
+    heard = [head.replace(/\w+$/, ""), tail.replace(/^\w+/, "")];
+  }
+  const detail = [line.reason, shown, ...named(parts, [line.reason ?? "", ...heard]), line.ticketId != null ? `ticket ${line.ticketId}` : null, line.signature ? `tx ${line.signature}` : null]
     .filter(Boolean).join(" | ");
   const alert = { severity: level === "error" || action === "freeze" ? "critical" : "warning", title: `Bulkhead guardian: ${what}`, detail, at: line.t };
   // Not part of the message: lets the sender un-mute an alert it could not deliver.
@@ -247,7 +278,7 @@ export function webhookBody(alert, format = "json", protocol = "") {
   const block = (d) => (d ? `${OPEN}${d}${CLOSE}` : "");
   if (format === "slack") return { text: `${head}${block(detail)}`.replace(/[&<>]/g, (c) => SLACK_ESCAPES[c]), unfurl_links: false, unfurl_media: false };
   if (format === "discord") {
-    const cut = detail.slice(0, 2000 - head.length - OPEN.length - CLOSE.length).replace(/[\uD800-\uDBFF]$/, "");
+    const cut = firstUnits(detail, 2000 - head.length - OPEN.length - CLOSE.length);
     return { content: `${head}${block(cut)}`, allowed_mentions: { parse: [] }, flags: 4 };
   }
   return { ...alert, protocol };
