@@ -371,6 +371,7 @@ export function checkConfig(cfg) {
     if (v !== undefined && (typeof v !== "number" || !(v >= lo && v <= hi))) throw new Error(`config.${k}: ${JSON.stringify(v)} is not a number from ${lo} to ${hi}`);
   }
   if (cfg.floorProtected !== undefined && (!Array.isArray(cfg.floorProtected) || !cfg.floorProtected.every((m) => BASE58_KEY.test(m)) || !BASE58_KEY.test(cfg.floorProgram ?? ""))) throw new Error("config.floorProtected must be a list of program addresses, with config.floorProgram set");
+  if (cfg.policy !== undefined && (typeof cfg.policy !== "object" || cfg.policy === null || Array.isArray(cfg.policy))) throw new Error("config.policy must be an object of policy settings (cloud/guardian/policy.mjs, DEFAULT_POLICY)");
   if (cfg.alert !== undefined && !url(cfg.alert?.url)) throw new Error("config.alert.url must be an http(s) URL");
   if (cfg.liveness !== undefined && (!url(cfg.liveness?.url) || (cfg.liveness.everyS !== undefined && !(cfg.liveness.everyS >= 10)))) throw new Error("config.liveness must be { url, everyS ≥ 10 }");
   if (cfg.cluster !== undefined && !CLUSTERS.has(cfg.cluster)) throw new Error(`config.cluster must be one of ${[...CLUSTERS].join(", ")}`);
