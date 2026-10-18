@@ -28,6 +28,7 @@ import contextlib
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -166,10 +167,62 @@ def self_test() -> int:
         if run.returncode != 1 or run.stdout or not lines or not all(x.startswith(CONFIG + ": ") for x in lines):
             failed.append(f"the command line: exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr!r};"
                           f" expected 1 and problems naming {CONFIG}")
+        # scripts/check.sh runs this check as `scripts/mutants.sh --exclusions-only`,
+        # which must skip it, and pass, only when cargo-mutants is not CI's version,
+        # and must stop after it. It runs here on a copy of mutants.sh and this file
+        # in a planted tree (the config above, a ci.yml), so the repo's target/ is
+        # not touched. A planted `cargo` in $HOME/.cargo/bin (mutants.sh puts it
+        # first on PATH) logs each call, reports the version it is given or fails
+        # as when cargo-mutants is missing, and serves the two lists; python3 is
+        # linked beside it, since a python3 found through the real $HOME would not run.
+        tree, home = os.path.join(d, "tree"), os.path.join(d, "home")
+        for path in ["scripts/mutants.sh", "tools/mutant_exclusions.py"]:
+            os.makedirs(os.path.dirname(os.path.join(tree, path)), exist_ok=True)
+            shutil.copy2(os.path.join(ROOT, path), os.path.join(tree, path))
+        os.makedirs(os.path.join(tree, ".cargo"))
+        os.makedirs(os.path.join(tree, ".github/workflows"))
+        shutil.copy(config, os.path.join(tree, CONFIG))
+        os.makedirs(os.path.join(home, ".cargo/bin"))
+        os.symlink(sys.executable, os.path.join(home, ".cargo/bin/python3"))
+        shim = put("home/.cargo/bin/cargo", '#!/bin/sh\necho "$*" >> "$SHIM_LOG"\ncase "$*" in\n'
+                   '  "mutants --version") [ -n "$SHIM_VERSION" ] || exit 101; echo "cargo-mutants $SHIM_VERSION" ;;\n'
+                   '  "mutants --list "*"--no-config "*) cat "$SHIM_ALL" ;;\n'
+                   '  "mutants --list "*) cat "$SHIM_KEPT" ;;\n  *) exit 3 ;;\nesac\n')
+        os.chmod(shim, 0o755)
+        install = "        run: cargo install --locked cargo-mutants@{}\n"
+        listed = ["mutants --version", "mutants --list --colors never --no-config", "mutants --list --colors never"]
+        shell_runs = [
+            # (extra arguments, versions ci.yml installs, the shim's version, kept list,
+            #  exit status, what stderr says, cargo calls)
+            (["--config", "x"], ["9.9.9"], "0.0.0", part, 2, "takes no other argument", []),
+            (["--config=x"], ["9.9.9"], "9.9.9", part, 2, "takes no other argument", []),
+            ([], ["9.9.9"], "0.0.0", part, 0, "not checked, they need cargo-mutants 9.9.9", listed[:1]),
+            ([], ["9.9.9"], "", part, 0, "not checked", listed[:1]),
+            ([], ["9.9.9", "9.9.8"], "9.9.9", part, 2, "must install one cargo-mutants version", []),
+            ([], [], "9.9.9", part, 2, "must install one cargo-mutants version", []),
+            # The same line in two jobs is one version; a pre-release is not X.Y.Z.
+            ([], ["9.9.9", "9.9.9"], "0.0.0", part, 0, "not checked, they need cargo-mutants 9.9.9 ", listed[:1]),
+            ([], ["9.9.9-rc.1"], "9.9.9", part, 2, "must install one cargo-mutants version", []),
+            # CI's version: the check runs, and mutants.sh stops after it.
+            ([], ["9.9.9"], "9.9.9", part, 0, CONFIG + ": 1 of 3 mutants excluded", listed),
+            ([], ["9.9.9"], "9.9.9", full, 1, CONFIG + ": cargo-mutants excludes 0 mutants, the patterns match 1", listed),
+        ]
+        for args, installs, version, kept, code, want, calls in shell_runs:
+            put("tree/.github/workflows/ci.yml", "".join(install.format(v) for v in installs))
+            log = put("calls.log", "")
+            env = dict(os.environ, HOME=home, SHIM_LOG=log, SHIM_VERSION=version, SHIM_ALL=full, SHIM_KEPT=kept)
+            run = subprocess.run([os.path.join(tree, "scripts/mutants.sh"), "--exclusions-only"] + args,
+                                 capture_output=True, text=True, timeout=60, env=env)
+            with open(log, encoding="utf-8") as f:
+                made = [c.split(" --package")[0] for c in f.read().splitlines()]
+            if run.returncode != code or want not in run.stderr or made != calls:
+                failed.append(f"mutants.sh --exclusions-only {args}, ci.yml installing {installs}, cargo-mutants"
+                              f" {version!r}: exit {run.returncode}, stderr {run.stderr!r}, cargo calls {made};"
+                              f" expected {code}, {want!r} and {calls}")
     for f in failed:
         print("self-test FAILED:", f)
     if not failed:
-        print(f"self-test OK: {len(cases) + len(runs) + 2} cases")
+        print(f"self-test OK: {len(cases) + len(runs) + len(shell_runs) + 2} cases")
     return 1 if failed else 0
 
 
