@@ -194,7 +194,7 @@ def arch(t):
     s.append(arrow(t, [(550, fc), (688, fc)])); s.append(lab(t, 562, fc-8, "DEPLOYS"))
 
     # guardians: authority, not value
-    s.append(box(t, 0, fy, 200, fh, None, "Guardians", ["3–8 keys. Stop, never steal:", "none can move a token."], dashed=True))
+    s.append(box(t, 0, fy, 200, fh, None, "Guardians", ["4–8 keys. Stop, never steal:", "none can move a token."], dashed=True))
     bus = 322
     s.append(f'<path d="M100,{fy} L100,{bus} L845,{bus}" fill="none" stroke="{t["ink"]}" stroke-width="1.2" stroke-dasharray="3 4"/>')
     s.append(arrow(t, [(845, bus), (845, r3+30)], dashed=True)); s.append(lab(t, 853, bus-10, "FREEZE · CANCEL"))

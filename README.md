@@ -179,7 +179,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 ## Live on devnet
 
-Deployed 28 Sep 2026. All three programs have been upgraded in place since then (same ids, market and seal), most recently on 15 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #85, `main` at `3eec968` (Harbor: the same bytes since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. CI repeats this check every week on `main`'s build, so it reports Floor and Vault as different until finding 107 is deployed.
+Deployed 28 Sep 2026. All three programs have been upgraded in place since then (same ids, market and seal), most recently on 15 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #85, `main` at `3eec968` (Harbor: the same bytes since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. CI repeats this check every week on `main`'s build, so its `devnet` job, and with it the required `ci` check, fails for Floor and Vault until finding 107 is deployed.
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
