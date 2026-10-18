@@ -424,7 +424,7 @@ export class FailoverRpc extends Rpc {
     }
     if (typeof got !== "string") throw new Error("getGenesisHash: no hash");
     this.cluster[at] = got === this.genesis ? "ok" : "wrong";
-    this.onCluster(this.endpoints[at].url, got, at);
+    this.report("onCluster", this.endpoints[at].url, got, at);
   }
   /**
    * Per endpoint index, the signatures crossCheck found missing from lists
@@ -435,10 +435,30 @@ export class FailoverRpc extends Rpc {
   restartWaits() {
     this.missing = [];
   }
+  /**
+   * Calls a report hook (`onSwitch`, `onCluster`; synchronous). One that
+   * throws is passed over, with a line on stderr: it ran inside call()'s
+   * try, so the endpoint that had just answered read as failing, its answer
+   * was dropped, and the request, a transaction too, went on to the next
+   * endpoint (docs/09, finding 121).
+   */
+  report(hook, ...args) {
+    try {
+      this[hook](...args);
+    } catch (e) {
+      // A log line's own failure says nothing about the endpoint. Nor may
+      // the trace's: String() of some thrown values throws too.
+      try {
+        console.error(`FailoverRpc: ${hook} threw: ${String(e?.message || e).slice(0, 160)}`);
+      } catch {
+        // nothing more to say
+      }
+    }
+  }
   /** Make endpoint `at` the one asked first, and say so (`onSwitch`). */
   switchTo(at, cause) {
     if (at === this.active) return;
-    this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, cause, this.active, at);
+    this.report("onSwitch", this.endpoints[this.active].url, this.endpoints[at].url, cause, this.active, at);
     this.active = at;
     this.switches++;
     this.url = this.endpoints[at].url;
