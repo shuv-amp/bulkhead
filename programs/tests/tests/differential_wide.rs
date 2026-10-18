@@ -156,7 +156,7 @@ fn program_matches_the_core_model_with_caps_freezes_and_the_lifeboat() {
     for k in [
         "deposit", "release", "backed", "instant", "queued", "refused", "quote", "settle", "cancel",
         "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_push", "extend_refused_call", "extend_refused_total", "reset", "reset_refused",
-        "settle_refused_frozen", "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "lifeboat_refused_window", "insufficient", "tighten", "loosen_waits",
+        "settle_refused_frozen", "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "lifeboat_refused_window", "insufficient", "refused_lane_closed", "refused_queue_full", "tighten", "loosen_waits",
         "loosen_executed", "loosen_stale", "loosen_early",
     ] {
         let n = totals.get(k).copied().unwrap_or(0);
@@ -288,14 +288,14 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 let params = params_from_config(&md.cfg, md.base(now));
                 let mut lim = md.limiter;
                 let decision = if unbacked > 0 {
-                    request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until() * 1_000).map(Some).map_err(|_| "limiter")
+                    request(&mut lim, &params, now * 1_000, unbacked, md.frozen_until() * 1_000).map(Some).map_err(verr::limiter)
                 } else {
                     Ok(None)
                 };
                 let decision = match decision {
                     Ok(d) => {
                         let instant = if d == Some(Decision::Instant) { unbacked } else { 0 };
-                        if backed + instant > md.balance { Err("insufficient") } else { Ok(d) }
+                        if backed + instant > md.balance { Err(verr::INSUFFICIENT_BALANCE) } else { Ok(d) }
                     }
                     e => e,
                 };
@@ -315,11 +315,7 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                         let o = outcome(meta);
                         assert_eq!((o.backed, o.instant, o.queued, o.eta_s), *e, "{}", at("quote"));
                     }
-                    (Err(f), Err(why)) => {
-                        if *why == "insufficient" {
-                            assert_eq!(custom_code(f), Some(verr::INSUFFICIENT_BALANCE), "{}", at("quote error"));
-                        }
-                    }
+                    (Err(f), Err(code)) => assert_eq!(custom_code(f), Some(*code), "{}: {:?}", at("quote error"), f.err),
                     (q, e) => panic!("{}: quote {:?} vs model {e:?}", at("quote"), q.as_ref().map(outcome).map_err(|f| f.err.clone())),
                 }
                 count("quote");
@@ -357,11 +353,14 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                             count("instant");
                         }
                     }
-                    (Err(f), Err(why)) => {
-                        if why == "insufficient" {
-                            assert_eq!(custom_code(f), Some(verr::INSUFFICIENT_BALANCE), "{}", at("release error"));
-                            count("insufficient");
-                        }
+                    (Err(f), Err(code)) => {
+                        assert_eq!(custom_code(f), Some(code), "{}: {:?}", at("release error"), f.err);
+                        count(match code {
+                            verr::LANE_CLOSED => "refused_lane_closed",
+                            verr::QUEUE_FULL => "refused_queue_full",
+                            verr::INSUFFICIENT_BALANCE => "insufficient",
+                            _ => panic!("{}: release refused with {code}, which has no counter", at("release error")),
+                        });
                         count("refused");
                     }
                     (r, e) => panic!("{}: program {:?} vs model {e:?}", at("release"), r.as_ref().map(outcome).map_err(|f| f.err.clone())),
