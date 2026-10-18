@@ -18,6 +18,7 @@
 mod common;
 
 use bulkhead_core::classify::{classify_limits, Class, LimitConfig};
+use bulkhead_core::consts::{MAX_TICKET_EXTENSION_S, MAX_TICKET_TOTAL_EXTENSION_S};
 use bulkhead_core::ema::{ema_update, WindowLow};
 use bulkhead_core::ledger::{Ledger, PricedAsset, Pricing};
 use bulkhead_core::limiter::{available_now, capacity_base, max_unbacked_over, params_from_config, request, rescale_windows, reset_backlog, Decision, LimiterState};
@@ -154,13 +155,16 @@ fn program_matches_the_core_model_with_caps_freezes_and_the_lifeboat() {
     // Coverage: every operation and outcome occurred, so a pass is not vacuous.
     for k in [
         "deposit", "release", "backed", "instant", "queued", "refused", "quote", "settle", "cancel",
-        "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_refused", "reset", "reset_refused",
-        "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "lifeboat_refused_window", "insufficient", "tighten", "loosen_waits",
+        "freeze_vault", "freeze_protocol", "unfreeze", "extend", "extend_push", "extend_refused_call", "extend_refused_total", "reset", "reset_refused",
+        "settle_refused_frozen", "lifeboat_in", "lifeboat_out", "lifeboat_refused", "lifeboat_refused_frozen", "lifeboat_refused_window", "insufficient", "tighten", "loosen_waits",
         "loosen_executed", "loosen_stale", "loosen_early",
     ] {
         let n = totals.get(k).copied().unwrap_or(0);
         assert!(n >= 10, "{k} occurred only {n} times: {totals:?}");
     }
+    // A due ticket the vault is short of (not frozen) needs lifeboat moves to
+    // drain it first, which the default run reaches only a few times.
+    assert!(totals.get("settle_refused_short").copied().unwrap_or(0) >= 1, "no short settle: {totals:?}");
 }
 
 fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
@@ -368,8 +372,13 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 let due = md.tickets.iter().find(|(_, tk)| tk.eta <= now).map(|(&id, tk)| (id, tk.amount, tk.account, tk.recipient));
                 if let Some((id, amount, account, recipient)) = due {
                     let r = env.send(&[m.settle_ix(&usdc, &account, &recipient, &env.payer.pubkey())], &[]);
-                    if now < md.frozen_until() || amount > md.balance {
-                        assert!(r.is_err(), "{}", at("settle must fail: frozen or short"));
+                    // The program's order: frozen, then short.
+                    if now < md.frozen_until() {
+                        assert_eq!(r.map_err(|f| custom_code(&f)).err(), Some(Some(verr::FROZEN)), "{}", at("settle while frozen"));
+                        count("settle_refused_frozen");
+                    } else if amount > md.balance {
+                        assert_eq!(r.map_err(|f| custom_code(&f)).err(), Some(Some(verr::INSUFFICIENT_BALANCE)), "{}", at("settle short of tokens"));
+                        count("settle_refused_short");
                     } else {
                         r.unwrap_or_else(|e| panic!("{}: {:?}", at("settle"), e.err));
                         md.touch(now);
@@ -389,28 +398,52 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                 }
             }
             // A guardian extends a ticket: at most 24h a call and 7 days in total.
+            // One draw in three pushes the ticket by up to 24h a call to exactly
+            // 7 days, then asks for 1 s more: the total's edge, not only the
+            // per-call bound.
             24..=25 => {
                 if !md.tickets.is_empty() {
                     let k = rng.below(md.tickets.len() as u64) as usize;
-                    let (&id, _) = md.tickets.iter().nth(k).unwrap();
-                    let secs = rng.pick(&[0i64, 1, 3_600, 86_400, 86_401]);
-                    let tk = md.tickets.get_mut(&id).unwrap();
-                    let mut args = secs.to_le_bytes().to_vec();
-                    args.extend_from_slice(&id.to_le_bytes());
-                    let ix = m.vault_ix(11, &args, vec![
-                        AccountMeta::new_readonly(m.protocol, false),
-                        AccountMeta::new(tk.account, false),
-                        AccountMeta::new_readonly(m.g[2].pubkey(), true),
-                    ]);
-                    let r = env.send(&[ix], &[&m.g[2]]);
-                    let legal = secs > 0 && secs <= 86_400 && tk.extended + secs <= 604_800;
-                    assert_eq!(r.is_ok(), legal, "{}", at("extend"));
-                    if legal {
-                        tk.eta += secs;
-                        tk.extended += secs;
-                        count("extend");
-                    } else {
-                        count("extend_refused");
+                    let (&id, tk) = md.tickets.iter_mut().nth(k).unwrap();
+                    let push = rng.below(3) == 0;
+                    loop {
+                        let left = MAX_TICKET_TOTAL_EXTENSION_S - tk.extended;
+                        let secs = if push {
+                            left.clamp(1, MAX_TICKET_EXTENSION_S)
+                        } else if rng.below(2) == 0 {
+                            rng.pick(&[1, 3_600, MAX_TICKET_EXTENSION_S])
+                        } else {
+                            rng.pick(&[i64::MIN, -86_400, -1, 0, MAX_TICKET_EXTENSION_S + 1, i64::MAX])
+                        };
+                        let mut args = secs.to_le_bytes().to_vec();
+                        args.extend_from_slice(&id.to_le_bytes());
+                        let ix = m.vault_ix(11, &args, vec![
+                            AccountMeta::new_readonly(m.protocol, false),
+                            AccountMeta::new(tk.account, false),
+                            AccountMeta::new_readonly(m.g[2].pubkey(), true),
+                        ]);
+                        let r = env.send(&[ix], &[&m.g[2]]);
+                        let per_call = secs > 0 && secs <= MAX_TICKET_EXTENSION_S;
+                        let legal = per_call && tk.extended + secs <= MAX_TICKET_TOTAL_EXTENSION_S;
+                        match &r {
+                            Ok(_) => assert!(legal, "{}", at("extend")),
+                            Err(e) => {
+                                assert!(!legal, "{}: {:?}\n{}", at("extend"), e.err, e.meta.logs.join("\n"));
+                                assert_eq!(custom_code(e), Some(verr::EXTENSION_TOO_LONG), "{}", at("extend"));
+                            }
+                        }
+                        if legal {
+                            tk.eta += secs;
+                            tk.extended += secs;
+                            count(if push { "extend_push" } else { "extend" });
+                        } else if per_call {
+                            count("extend_refused_total");
+                        } else {
+                            count("extend_refused_call");
+                        }
+                        if !push || !legal {
+                            break;
+                        }
                     }
                 }
             }
@@ -481,14 +514,17 @@ fn run(seed: u64, steps: u64) -> BTreeMap<&'static str, u64> {
                     AccountMeta::new_readonly(SYSTEM, false),
                 ]);
                 let r = env.send(&[mv], &[&m.admin]);
+                // Beyond the balance, the token program refuses the transfer
+                // (its InsufficientFunds, 1).
+                let refused = |r: Result<_, _>| r.map_err(|f| custom_code(&f)).err();
                 if now < lifeboat_opens {
-                    assert!(r.is_err(), "{}", at("lifeboat move within the delay after the seal (finding 88)"));
+                    assert_eq!(refused(r), Some(Some(verr::NOT_SEALED)), "{}", at("lifeboat move within the delay after the seal (finding 88)"));
                     count("lifeboat_refused_window");
                 } else if now < md.frozen_until() {
-                    assert!(r.is_err(), "{}", at("lifeboat move while frozen (finding 72)"));
+                    assert_eq!(refused(r), Some(Some(verr::FROZEN)), "{}", at("lifeboat move while frozen (finding 72)"));
                     count("lifeboat_refused_frozen");
                 } else if amount > md.balance {
-                    assert!(r.is_err(), "{}", at("lifeboat move beyond the balance"));
+                    assert_eq!(refused(r), Some(Some(1)), "{}", at("lifeboat move beyond the balance"));
                     count("lifeboat_refused");
                 } else {
                     r.unwrap_or_else(|e| panic!("{}: {:?}", at("lifeboat in"), e.err));
