@@ -400,7 +400,8 @@ test("a guardian whose config is refused for a misspelt alert format still alert
   }
 });
 
-// A JSON-RPC server answering each method from `answers` (null otherwise).
+// A JSON-RPC server answering each method from `answers` (null otherwise);
+// an answer `{ error }` is sent as that JSON-RPC error.
 async function fakeRpc(answers) {
   const server = createServer((req, res) => {
     let b = "";
@@ -408,7 +409,8 @@ async function fakeRpc(answers) {
     req.on("end", () => {
       const { id, method } = JSON.parse(b);
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ jsonrpc: "2.0", id, result: answers[method] ?? null }));
+      const answer = answers[method];
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, ...(answer?.error ? { error: answer.error } : { result: answer ?? null }) }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -462,6 +464,22 @@ test("a guardian whose backup endpoint does not answer starts, and says its clus
     assert.doesNotMatch(out, /guardian stopped/);
   } finally {
     primary.server.close();
+  }
+});
+
+test("a guardian's log line stays well-formed JSON when its cut of an RPC error halves a surrogate pair", async () => {
+  // The backup's error is cut to 160 UTF-16 units; the emoji's first half is unit 159.
+  const pre = 'getGenesisHash: {"code":-32005,"message":"';
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.devnet });
+  const backup = await fakeRpc({ getGenesisHash: { error: { code: -32005, message: `${"x".repeat(159 - pre.length)}😀` } } });
+  try {
+    const { code, out } = await startGuardian(primary.url, [backup.url], /no record of executed changes yet/);
+    assert.equal(code, null, out);
+    assert.match(out, /\(rpcs\[0\]\): getGenesisHash: \{\\"code\\":-32005,\\"message\\":\\"x+\uFFFD: no answer to getGenesisHash/);
+    assert.doesNotMatch(out, /\\u[dD][89a-fA-F]/);
+  } finally {
+    primary.server.close();
+    backup.server.close();
   }
 });
 

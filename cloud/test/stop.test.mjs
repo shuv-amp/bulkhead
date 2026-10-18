@@ -181,6 +181,20 @@ test("a stop with one endpoint that will never say its cluster ends at once with
   }
 });
 
+test("a stop's log line stays well-formed JSON when its cut of an RPC error halves a surrogate pair", async () => {
+  // The error is cut to 160 UTF-16 units; the emoji's first half is unit 159.
+  const pre = 'getGenesisHash: {"code":-32601,"message":"';
+  const only = await stubRpc({ code: -32601, message: `${"x".repeat(159 - pre.length)}😀` }, stopped);
+  try {
+    const { code, out } = await runStop(only.url, undefined);
+    assert.equal(code, 2, out);
+    assert.match(out, /"error":"getGenesisHash: \{\\"code\\":-32601,\\"message\\":\\"x+\uFFFD"/);
+    assert.doesNotMatch(out, /\\u[dD][89a-fA-F]/);
+  } finally {
+    only.server.close();
+  }
+});
+
 test("a stop whose primary is on another cluster and whose backup is down gives up at the time limit (finding 117)", async () => {
   const primary = await stubRpc(GENESIS.testnet, stopped);
   try {

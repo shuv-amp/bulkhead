@@ -254,6 +254,18 @@ export function webhookBody(alert, format = "json", protocol = "") {
 }
 
 /**
+ * The JSON text of a log line or a webhook body. An RPC's error text cut by
+ * UTF-16 units (`.slice(0, 160)`) can end in half a surrogate pair, which
+ * JSON.stringify writes as "\ud83d": strict parsers (Rust's serde_json)
+ * refuse the whole line or body. Each string value is made well-formed
+ * (U+FFFD for a half pair; keys are the guardian's own names) and a bigint
+ * is written as its digits.
+ */
+export function jsonText(v) {
+  return JSON.stringify(v, (_, x) => (typeof x === "string" ? x.toWellFormed() : typeof x === "bigint" ? x.toString() : x));
+}
+
+/**
  * A sender: `send(line)` returns at once; the POST runs in the background with
  * a timeout. `fetchFn` and `onError` are injectable for tests. `protocol` may
  * be a function: the guardian creates its alerter before it knows the
@@ -274,7 +286,7 @@ export function alerter({ url, format, protocol = "", windowMs, timeoutMs = 5_00
     if (!url) return;
     const alert = alertFor(line, seen, now(), { windowMs });
     if (!alert) return;
-    const body = JSON.stringify(webhookBody(alert, bodyFormat, typeof protocol === "function" ? protocol() : protocol));
+    const body = jsonText(webhookBody(alert, bodyFormat, typeof protocol === "function" ? protocol() : protocol));
     const post = async () => {
       const r = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
       if (!r.ok) throw new Error(`webhook answered ${r.status}`);
