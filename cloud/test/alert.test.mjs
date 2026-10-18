@@ -44,6 +44,50 @@ test("webhook bodies: Slack text, Discord content (≤ 2000), plain JSON", () =>
   assert.equal(new Set(shapes).size, ALERT_FORMATS.length, shapes.join(" | "));
 });
 
+test("webhook bodies show an RPC's error text as typed, not as mentions, links or markup", () => {
+  // An RPC's JSON error reaches the detail verbatim (solana.mjs puts it in
+  // the Error's message): a provider could ping the operator channel, show
+  // a link under a label of its choosing, or hide the rest in a spoiler.
+  const detail = 'scan failed: {"message":"<!channel> fees & limits: <https://x.example|approve here> @everyone [ok](https://x.example) ||``` # hi"} | tx s';
+  const a = { severity: "warning", title: "Bulkhead guardian: <t> & co", detail, at: "t" };
+  const sl = webhookBody(a, "slack");
+  assert.deepEqual([sl.unfurl_links, sl.unfurl_media], [false, false], "Slack shows no preview of a link in it");
+  assert.equal(
+    sl.text,
+    '⚠️ Bulkhead guardian: &lt;t&gt; &amp; co\n```\nscan failed: {"message":"&lt;!channel&gt; fees &amp; limits: &lt;https://x.example|approve here&gt; @everyone [ok](https://x.example) ||ˋˋˋ # hi"} | tx s\n```',
+  );
+  const d = webhookBody(a, "discord");
+  assert.equal(
+    d.content,
+    '⚠️ Bulkhead guardian: <t> & co\n```\nscan failed: {"message":"<!channel> fees & limits: <https://x.example|approve here> @everyone [ok](https://x.example) ||ˋˋˋ # hi"} | tx s\n```',
+  );
+  assert.deepEqual(d.allowed_mentions, { parse: [] }, "Discord pings no one the text names");
+  assert.equal(d.flags, 4, "and shows no preview of a link in it");
+  // Discord's cut at 2000 keeps the block closed and no half surrogate
+  // pair: the title line is 30 UTF-16 units and the fences and their line
+  // breaks 9, so unit 1961 of the detail is the second 😀's high half.
+  // With the protocol's label the title line is 44 + 12 units longer.
+  const label = "1".repeat(44);
+  const labelled = webhookBody({ ...a, detail: "d".repeat(3000) }, "discord", label).content;
+  assert.ok(labelled.length === 2000 && labelled.endsWith(`(protocol ${label})\n\`\`\`\n${"d".repeat(1961 - 56)}\n\`\`\``));
+  const cut = webhookBody({ ...a, detail: `${"d".repeat(1958)}😀😀` }, "discord").content;
+  assert.ok(cut.isWellFormed(), `ends ${JSON.stringify(cut.slice(-6))}`);
+  assert.equal(cut.length, 1999, "only the split pair is dropped");
+  assert.ok(cut.endsWith("d😀\n```"));
+  // A pair that ends exactly at the cut is kept whole.
+  const pair = webhookBody({ ...a, detail: `${"d".repeat(1959)}😀😀` }, "discord").content;
+  assert.ok(pair.length === 2000 && pair.isWellFormed() && pair.endsWith("d😀\n```"), `ends ${JSON.stringify(pair.slice(-6))}`);
+  const whole = webhookBody({ ...a, detail: "d".repeat(1961) }, "discord").content;
+  assert.ok(whole.length === 2000 && whole.endsWith("d\n```"), "a detail that fits is not cut");
+  // Half a pair cut upstream (main.mjs cuts RPC errors to 160 or 200
+  // units) shows as U+FFFD; an empty detail gets no block.
+  const half = { ...a, detail: "x\uD83D | ticket 7" };
+  assert.equal(webhookBody(half, "slack").text, "⚠️ Bulkhead guardian: &lt;t&gt; &amp; co\n```\nx\uFFFD | ticket 7\n```");
+  assert.equal(webhookBody(half, "discord").content, "⚠️ Bulkhead guardian: <t> & co\n```\nx\uFFFD | ticket 7\n```");
+  assert.equal(webhookBody({ ...a, detail: "" }, "slack").text, "⚠️ Bulkhead guardian: &lt;t&gt; &amp; co");
+  assert.equal(webhookBody({ ...a, detail: "" }, "discord").content, "⚠️ Bulkhead guardian: <t> & co");
+});
+
 test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {
   const slack = "https://hooks.slack.com/services/T/B/x";
   const discord = "https://discord.com/api/webhooks/1/x";
@@ -76,7 +120,7 @@ test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's 
   send({ level: "error", msg: "guardian stopped: config.alert.format: \"Slack\" is not one of json, slack, discord" });
   await send.flush();
   assert.equal(posted.length, 1);
-  assert.deepEqual(Object.keys(posted[0]), ["text"]);
+  assert.deepEqual(Object.keys(posted[0]), ["text", "unfurl_links", "unfurl_media"]);
   assert.match(posted[0].text, /guardian stopped: config\.alert\.format/);
 });
 
