@@ -34,6 +34,10 @@ test("a policy typo, a percent for a fraction or a string for seconds stops the 
 test("a mainnet config needs backups and alerts; unknown settings are refused (finding 83)", () => {
   assert.deepEqual(checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" } }), []);
   assert.throws(() => checkConfig({ ...base, rpcs: "https://b.example" }), /list of http/);
+  // Spread into DEFAULT_POLICY at start, these add no keys: the guardian
+  // ran on the defaults alone, with no word that the policy was dropped.
+  for (const p of [true, 5, [], null, ""]) assert.throws(() => checkConfig({ ...base, policy: p }), /config.policy must be/, JSON.stringify(p));
+  assert.deepEqual(checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" }, policy: {} }), []);
   assert.throws(() => checkConfig({ ...base, polMs: 400 }), /not a guardian setting/);
   assert.throws(() => checkConfig({ ...base, pollMs: 5 }), /pollMs/);
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet" }), /must be one of/);
