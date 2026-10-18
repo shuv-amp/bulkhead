@@ -160,6 +160,21 @@ fn s4_bank_run_every_depositor_gets_their_own_deposit_back_instantly() {
     assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
 }
 
+/// A zero amount is refused up front. Nothing after the check refuses it: a
+/// zero release has no unbacked part, so it never reaches the limiter,
+/// which is called only when `unbacked > 0` (custody.rs:361).
+#[test]
+fn a_zero_deposit_or_release_is_refused() {
+    let mut w = World::new();
+    let u = w.user();
+    let acc = w.deposit("usdc", &u, 1_000 * USDC);
+    let ix = w.m.deposit_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 0);
+    assert_eq!(w.env.fails(&[ix], &[&u]), verr::ZERO_AMOUNT, "deposit");
+    w.seal();
+    let ix = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 0, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[ix], &[&u]), verr::ZERO_AMOUNT, "release");
+}
+
 // ---------------------------------------------------------------------------
 // S9: an honest borrower is 100% backed at conservative prices.
 // ---------------------------------------------------------------------------
@@ -451,6 +466,9 @@ fn a_ticket_settles_after_its_eta_to_its_stored_recipient_only() {
     let other = w.account("usdc", &Keypair::new().pubkey());
     let wrong = w.m.settle_ix(&w.usdc, &ticket, &other, &w.env.payer.pubkey());
     assert!(w.env.send(&[wrong], &[]).is_err());
+    // Nor can it be settled through another vault of the same protocol.
+    let via_sol = w.m.settle_ix(&w.sol, &ticket, &to, &w.env.payer.pubkey());
+    assert_eq!(w.env.fails(&[via_sol], &[]), verr::WRONG_VAULT);
     let ok = w.m.settle_ix(&w.usdc, &ticket, &to, &w.env.payer.pubkey());
     w.env.ok(&[ok], &[]);
     assert_eq!(w.env.balance(&to), 300_000 * USDC);
@@ -1009,6 +1027,11 @@ fn an_unvetoed_loosening_executes_after_the_delay() {
     );
     w.env.ok(&[exec], &[]);
     assert_eq!(w.m.attest(&mut w.env, &w.usdc).available_now, 300_000 * USDC);
+    // An executed change can be neither vetoed nor withdrawn.
+    let veto = veto_change_ix(&w, 0, &w.m.g[1].pubkey());
+    assert_eq!(w.env.fails(&[veto], &[&w.m.g[1]]), verr::CHANGE_EXECUTED);
+    let cancel = cancel_change_ix(&w, 0, &w.m.admin.pubkey());
+    assert_eq!(w.env.fails(&[cancel], &[&w.m.admin]), verr::CHANGE_EXECUTED);
 }
 
 /// A1 on the real runtime: after a large backed withdrawal, the burst is sized
@@ -1350,6 +1373,26 @@ fn a_release_cannot_pay_any_account_the_vault_owns() {
     assert_eq!(w.env.fails(&[pay], &[&w.m.admin]), verr::DUPLICATE_ACCOUNT, "re-owned vault account");
     let q = w.m.quote_ix(&w.env, &w.usdc, &own, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
     assert_eq!(w.env.fails(&[q], &[]), verr::DUPLICATE_ACCOUNT, "quote: re-owned vault account");
+}
+
+/// A payout goes only to an account a token program owns. Here the bytes of
+/// a real USDC account (right mint, the whale as owner) sit in an account the
+/// system program owns. Without the owner check the release still fails, in
+/// the runtime at the transfer, but the quote promises the payout.
+#[test]
+fn a_payout_goes_only_to_an_account_a_token_program_owns() {
+    let mut w = World::new();
+    let whale = w.user();
+    let real = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let mut fake = w.env.svm.get_account(&real).unwrap();
+    fake.owner = SYSTEM;
+    let fake_address = Address::new_unique();
+    w.env.svm.set_account(fake_address, fake).unwrap();
+    let q = w.m.quote_ix(&w.env, &w.usdc, &fake_address, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[q], &[]), verr::WRONG_TOKEN_PROGRAM, "quote");
+    let pay = w.m.withdraw_ix(&w.env, &w.usdc, &whale.pubkey(), &fake_address, 1_000 * USDC, &w.usdc_prices(false));
+    assert_eq!(w.env.fails(&[pay], &[&whale]), verr::WRONG_TOKEN_PROGRAM, "release");
 }
 
 /// A payout goes only to an account of the vault's mint, for a release and
@@ -1743,6 +1786,10 @@ fn lengthening_a_window_is_a_tightening_that_grants_no_new_burst() {
 
 fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
     let (mint, _) = w.env.create_mint(6, &token_program());
+    create_vault_for_ix(w, limits, &mint, &token_program())
+}
+
+fn create_vault_for_ix(w: &World, limits: &Limits, mint: &Address, program: &Address) -> Instruction {
     let vault = pda(&[b"vault", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
     let vault_tokens = pda(&[b"vault-tokens", w.m.protocol.as_ref(), mint.as_ref()], &w.m.vault_program);
     w.m.vault_ix(1, &limits.bytes(), vec![
@@ -1751,18 +1798,22 @@ fn create_vault_ix(w: &mut World, limits: &Limits) -> Instruction {
         AccountMeta::new(w.m.protocol, false),
         AccountMeta::new(vault, false),
         AccountMeta::new(vault_tokens, false),
-        AccountMeta::new_readonly(mint, false),
-        AccountMeta::new_readonly(token_program(), false),
+        AccountMeta::new_readonly(*mint, false),
+        AccountMeta::new_readonly(*program, false),
         AccountMeta::new_readonly(SYSTEM, false),
     ])
 }
 
 fn import_ix(w: &World, owner: &Address, amount: u64) -> Instruction {
+    import_into_ix(w, &w.usdc.vault, owner, amount)
+}
+
+fn import_into_ix(w: &World, vault: &Address, owner: &Address, amount: u64) -> Instruction {
     w.m.vault_ix(3, &amount.to_le_bytes(), vec![
         AccountMeta::new(w.env.payer.pubkey(), true),
         AccountMeta::new_readonly(w.m.admin.pubkey(), true),
         AccountMeta::new_readonly(w.m.protocol, false),
-        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(*vault, false),
         AccountMeta::new(w.m.backing(owner), false),
         AccountMeta::new_readonly(*owner, false),
         AccountMeta::new_readonly(SYSTEM, false),
@@ -1832,6 +1883,9 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
     w.seal();
     let ix = create_vault_ix(&mut w, &Limits::default_limits());
     assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::GENESIS_ONLY);
+    // A vault that exists says so first, whatever the seal's state.
+    let again = create_vault_for_ix(&w, &Limits::default_limits(), &w.usdc.mint, &w.usdc.token_program);
+    assert_eq!(w.env.fails(&[again], &[&w.m.admin]), verr::ALREADY_INITIALIZED);
     // A floor alone opens a bucket: no bps but a floor is still an open lane.
     let mut floor_only = Limits::default_limits();
     floor_only.short_bps = 0;
@@ -1854,6 +1908,26 @@ fn after_the_seal_a_new_vault_starts_with_its_unbacked_lane_closed() {
     w.env.ok(&[ix], &[&w.m.admin]);
     let d = w.env.account(&vault).data;
     assert_eq!(u16::from_le_bytes(d[8 + 32 * 4..8 + 32 * 4 + 2].try_into().unwrap()), 0, "still closed: the opening is only a proposal");
+}
+
+/// A backing ledger holds `MAX_SLOTS` (8) mints. An import into a ninth is
+/// refused: taken, it would count toward the vault's imported total, which
+/// the seal must cover, but stand in no ledger the owner could draw on.
+#[test]
+fn an_import_into_a_ninth_mint_is_refused() {
+    let mut w = World::new();
+    let mut vaults = vec![w.usdc.vault, w.sol.vault];
+    for i in 0..7u8 {
+        vaults.push(w.m.create_vault(&mut w.env, 6, Limits::default_limits(), [10 + i; 32], None).vault);
+    }
+    let owner = Keypair::new().pubkey();
+    for v in &vaults[..8] {
+        let ix = import_into_ix(&w, v, &owner, 1_000);
+        w.env.ok(&[ix], &[&w.m.admin]);
+    }
+    assert_eq!(ledger_of(&w.env, &w.m.backing(&owner)).len(), 8);
+    let ix = import_into_ix(&w, &vaults[8], &owner, 1_000);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::NO_SLOT);
 }
 
 #[test]
@@ -1917,10 +1991,15 @@ fn the_seal_checks_each_vault_once() {
     assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "adjacent");
     let ix = w.m.execute_seal_ix(&[&w.sol, &third, &fourth, &third]);
     assert_eq!(w.env.fails(&[ix], &[]), verr::DUPLICATE_ACCOUNT, "neither");
+    // Leaving the vault out would skip its check too.
+    let ix = w.m.execute_seal_ix(&[&w.sol, &third, &fourth]);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::VAULT_COUNT_MISMATCH, "left out");
     let ix = w.m.execute_seal_ix(&[&w.usdc, &w.sol, &third, &fourth]);
     assert_eq!(w.env.fails(std::slice::from_ref(&ix), &[]), verr::IMPORT_EXCEEDS_BALANCE, "the skipped vault");
     w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &w.usdc.vault_tokens, 1_000 * USDC, &w.usdc.token_program);
     w.env.ok(&[ix], &[]);
+    // Once sealed, there is no second seal to propose.
+    assert_eq!(w.env.fails(&[w.m.propose_seal_ix()], &[&w.m.admin]), verr::ALREADY_SEALED);
 }
 
 #[test]
@@ -2108,6 +2187,14 @@ fn queued_releases_built_from_the_same_state_do_not_collide() {
     // A payer reusing its own nonce is refused, and nothing else is.
     let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
     assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
+}
+
+fn veto_change_ix(w: &World, id: u64, guardian: &Address) -> Instruction {
+    w.m.vault_ix(19, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.m.change_address(id), false),
+        AccountMeta::new_readonly(*guardian, true),
+    ])
 }
 
 fn cancel_change_ix(w: &World, id: u64, signer: &Address) -> Instruction {
@@ -3225,6 +3312,127 @@ fn a_cancel_or_extension_names_its_ticket() {
     w.env.ok(&[right], &[&w.m.g[0]]);
 }
 
+/// A ticket stays in its own protocol. Any program can register a protocol
+/// and name its own guardians, so a guardian of another protocol extending
+/// this one's tickets could hold every queued payout back, up to the total
+/// extension limit.
+#[test]
+fn another_protocols_guardian_cannot_extend_a_ticket() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 2_000_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let mut args = 3_600i64.to_le_bytes().to_vec();
+    args.extend_from_slice(&ticket_id(&w.env, &ticket).to_le_bytes());
+    let extend = |m: &Market, guardian: &Address| {
+        m.vault_ix(11, &args, vec![
+            AccountMeta::new_readonly(m.protocol, false),
+            AccountMeta::new(ticket, false),
+            AccountMeta::new_readonly(*guardian, true),
+        ])
+    };
+    let eta = |w: &World| bulkhead_vault::Ticket::load(&w.env.account(&ticket).data).expect("a Vault ticket").eta_s;
+    let before = eta(&w);
+    let other = Market::new(&mut w.env);
+    let ix = extend(&other, &other.g[0].pubkey());
+    assert_eq!(w.env.fails(&[ix], &[&other.g[0]]), verr::WRONG_VAULT);
+    assert_eq!(eta(&w), before, "the refused extension moved nothing");
+    // The same instruction from this protocol's own guardian extends it.
+    let ix = extend(&w.m, &w.m.g[0].pubkey());
+    w.env.ok(&[ix], &[&w.m.g[0]]);
+    assert_eq!(eta(&w), before + 3_600);
+}
+
+/// An extension moves a ticket's ETA later by more than 0 and at most 24h a
+/// call, and by at most 7 days in total, however it is split (docs/05 row
+/// 11). A live guardian, or a stolen guardian key, could otherwise pull a
+/// queued payout's ETA into the past and skip the queue, or hold it back for
+/// ever, 24h at a time.
+#[test]
+fn a_ticket_is_extended_later_by_at_most_a_day_a_call_and_seven_in_total() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let payee = w.user();
+    let to = w.account("usdc", &payee.pubkey());
+    let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), 2_000_000 * USDC, &w.usdc_prices(true));
+    let (_, ticket) = w.m.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&w.m.admin]);
+    let id = ticket_id(&w.env, &ticket);
+    let g0 = w.m.g[0].pubkey();
+    let extend = |w: &World, secs: i64| {
+        let mut args = secs.to_le_bytes().to_vec();
+        args.extend_from_slice(&id.to_le_bytes());
+        w.m.vault_ix(11, &args, vec![
+            AccountMeta::new_readonly(w.m.protocol, false),
+            AccountMeta::new(ticket, false),
+            AccountMeta::new_readonly(g0, true),
+        ])
+    };
+    let eta = |w: &World| bulkhead_vault::Ticket::load(&w.env.account(&ticket).data).expect("a Vault ticket").eta_s;
+    let before = eta(&w);
+    for (secs, why) in [(-3_600, "earlier"), (0, "zero"), (DAY + 1, "more than 24h")] {
+        let ix = extend(&w, secs);
+        assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::EXTENSION_TOO_LONG, "{why}");
+        assert_eq!(eta(&w), before, "{why}: the refused extension moved nothing");
+    }
+    // Six full days, then 23h: one hour of the total is left.
+    for _ in 0..6 {
+        let ix = extend(&w, DAY);
+        w.env.ok(&[ix], &[&w.m.g[0]]);
+    }
+    let ix = extend(&w, DAY - 3_600);
+    w.env.ok(&[ix], &[&w.m.g[0]]);
+    // Two hours, within the 24h a call may add, is past the total.
+    let ix = extend(&w, 7_200);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::EXTENSION_TOO_LONG);
+    assert_eq!(eta(&w), before + 7 * DAY - 3_600, "the refused extension moved nothing");
+    // The hour left is still granted, and then nothing more.
+    let ix = extend(&w, 3_600);
+    w.env.ok(&[ix], &[&w.m.g[0]]);
+    assert_eq!(eta(&w), before + 7 * DAY);
+    let ix = extend(&w, 1);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.g[0]]), verr::EXTENSION_TOO_LONG);
+    assert_eq!(eta(&w), before + 7 * DAY, "the refused extension moved nothing");
+}
+
+/// A vault whose unbacked lane is closed (either bucket at capacity 0)
+/// refuses an unbacked payout with its own code, not as a full queue. The
+/// same payout from a vault with both buckets open is taken: the control.
+#[test]
+fn a_closed_lane_refuses_an_unbacked_payout() {
+    for closed in [None, Some("short"), Some("long")] {
+        let mut w = World::new();
+        let whale = w.user();
+        w.deposit("usdc", &whale, 10_000_000 * USDC);
+        let mut limits = Limits::default_limits();
+        match closed {
+            Some("short") => limits.short_bps = 0,
+            Some(_) => limits.long_bps = 0,
+            None => {}
+        }
+        let vault = w.usdc.vault;
+        let ix = w.m.propose_change_ix(&w.env, 0, &vault, &limits.bytes(), Some(&vault));
+        w.env.ok(&[ix], &[&w.m.admin]);
+        w.seal();
+        let payee = w.user();
+        let to = w.account("usdc", &payee.pubkey());
+        let ix = w.m.admin_payout_ix(&w.env, &w.usdc, &to, &payee.pubkey(), USDC, &w.usdc_prices(true));
+        match closed {
+            Some(bucket) => assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::LANE_CLOSED, "{bucket} bucket closed"),
+            None => {
+                w.env.ok(&[ix], &[&w.m.admin]);
+            }
+        }
+    }
+}
+
 /// Finding 64: every Vault event ends with the protocol it concerns, so a
 /// reader can tell one protocol's events from another's in one transaction.
 #[test]
@@ -3444,6 +3652,35 @@ fn replace_recovery_respects_the_seal_review_abdication_and_never_picks_a_guardi
     w.env.ok(&[ix], &[]);
 }
 
+/// A protocol registers once. Registration has no check of its own for an
+/// existing protocol account: the guard at the top of `create_pda` refuses it.
+/// That guard has two halves (data present, or not owned by the system
+/// program), and an existing protocol fails both. So each half is also tried
+/// alone, on an account planted at a fresh protocol address that fails just
+/// that half. No transaction is known to make one: data or a new owner at a
+/// PDA needs its signature, which only this program gives, and `create_pda`
+/// gives both in one instruction.
+#[test]
+fn a_protocol_registers_once() {
+    let mut w = World::new();
+    let ix = w.m.register_ix(&w.env, w.m.harbor, 3 * DAY);
+    assert_eq!(w.env.fails(&[ix], &[]), verr::ALREADY_INITIALIZED);
+    let harbor_so = so("bulkhead_harbor");
+    for (data, owner, half) in [
+        (vec![0u8; 8], SYSTEM, "data, owned by the system program"),
+        (vec![], Address::new_unique(), "no data, owned by another program"),
+    ] {
+        let harbor = Address::new_unique();
+        w.env.svm.add_program(harbor, &harbor_so).unwrap();
+        let protocol = pda(&[b"protocol", harbor.as_ref()], &w.m.vault_program);
+        let lamports = w.env.svm.minimum_balance_for_rent_exemption(data.len());
+        let planted = solana_account::Account { lamports, data, owner, executable: false, rent_epoch: 0 };
+        w.env.svm.set_account(protocol, planted).unwrap();
+        let ix = w.m.register_ix(&w.env, harbor, 3 * DAY);
+        assert_eq!(w.env.fails(&[ix], &[]), verr::ALREADY_INITIALIZED, "{half}");
+    }
+}
+
 /// A recovery key cut short at registration is an error, not "no recovery key".
 #[test]
 fn registration_refuses_a_cut_off_recovery_key() {
@@ -3568,7 +3805,40 @@ fn the_lifeboat_stays_shut_until_the_seal() {
     w.env.ok(&[ix], &[&alice]);
     w.env.advance(3 * DAY + 1);
     w.env.ok(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]);
+    let owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &owner);
+    let exit = r2_execute_exit(&w, &owner, &dest);
+    assert_eq!(w.env.fails(&[exit], &[&w.m.destination]), verr::NOTHING_TO_EXIT, "no exit proposed");
     w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
+}
+
+/// A lifeboat move names the vault's own mint and token program, in and out.
+#[test]
+fn a_lifeboat_move_names_the_vaults_own_mint() {
+    let mut w = World::new();
+    let alice = w.user();
+    w.deposit("usdc", &alice, 1_000_000 * USDC);
+    w.seal();
+    w.env.advance(3 * DAY + 1);
+    let mut wrong = r2_move_in(&w, 1_000 * USDC);
+    wrong.accounts[4].pubkey = w.sol.mint;
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.admin]), verr::WRONG_VAULT, "in: another mint");
+    let mut wrong = r2_move_in(&w, 1_000 * USDC);
+    wrong.accounts[5].pubkey = token_2022();
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.admin]), verr::WRONG_VAULT, "in: another token program");
+    w.env.ok(&[r2_move_in(&w, 1_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000 * USDC)], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    let owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &owner);
+    let mut wrong = r2_execute_exit(&w, &owner, &dest);
+    wrong.accounts[3].pubkey = w.sol.mint;
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.destination]), verr::WRONG_VAULT, "out: another mint");
+    let mut wrong = r2_execute_exit(&w, &owner, &dest);
+    wrong.accounts[5].pubkey = token_2022();
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.destination]), verr::WRONG_VAULT, "out: another token program");
+    w.env.ok(&[r2_execute_exit(&w, &owner, &dest)], &[&w.m.destination]);
+    assert_eq!(w.env.balance(&dest), 1_000 * USDC);
 }
 
 /// Issue #38: a lifeboat destination this program owns (here the SOL vault,
@@ -4358,10 +4628,36 @@ fn oracle_settings_of_a_priced_asset_are_bounded() {
         (asset_bytes(true, 8_500, 10_500, 20_000, 60, 100, [0; 32]), "no feed"),
     ] {
         let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &cfg);
-        assert!(w.env.send(&[ix], &[&w.m.admin]).is_err(), "{what} must be refused");
+        assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_ASSET, "{what} must be refused");
     }
     let ix = w.m.upsert_asset_ix(&w.env, &w.sol, &asset_bytes(false, 8_500, 10_500, 20_000, 60, 100, [0; 32]));
     w.env.ok(&[ix], &[&w.m.admin]);
+}
+
+/// Limits and asset settings are bounded wherever they enter: when a vault
+/// is created, and in a proposed change. Execution parses the change again,
+/// but from the bytes its proposal checked, and the bounds read nothing
+/// else, so no transaction reaches that copy. The genesis upsert's bounds
+/// are refused, with the same code, in the test above.
+#[test]
+fn invalid_limits_and_assets_are_refused_wherever_they_enter() {
+    let mut w = World::new();
+    let mut over = Limits::default_limits();
+    over.short_bps = 10_001;
+    let ix = create_vault_ix(&mut w, &over);
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_LIMITS, "a new vault");
+    w.seal();
+    let vault = w.usdc.vault;
+    let mut no_window = Limits::default_limits();
+    no_window.long_window_s = 0;
+    let ix = w.m.propose_change_ix(&w.env, 0, &vault, &no_window.bytes(), Some(&vault));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_LIMITS, "a limits change");
+    let (asset, mint, program) = (w.usdc.asset, w.usdc.mint, w.usdc.token_program);
+    let over_haircut = asset_bytes(true, 10_001, 10_100, 20_000, 60, 100, USDC_FEED);
+    let mut ix = w.m.propose_change_ix(&w.env, 1, &mint, &over_haircut, Some(&asset));
+    ix.accounts.push(AccountMeta::new_readonly(mint, false));
+    ix.accounts.push(AccountMeta::new_readonly(program, false));
+    assert_eq!(w.env.fails(&[ix], &[&w.m.admin]), verr::INVALID_ASSET, "an asset change");
 }
 
 /// Finding 89: a payout to a token account the protocol PDA owns is refused,
