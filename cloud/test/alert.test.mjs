@@ -2,7 +2,7 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch, actionLine } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS } from "../guardian/alert.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -38,6 +38,10 @@ test("webhook bodies: Slack text, Discord content (≤ 2000), plain JSON", () =>
   assert.match(webhookBody(a, "slack", "P").text, /^🚨 Bulkhead guardian: freeze sent \(protocol P\)\n/);
   assert.equal(webhookBody(a, "discord").content.length, 2000);
   assert.deepEqual(webhookBody(a, "json", "P"), { ...a, protocol: "P" });
+  // checkConfig takes exactly these: a format listed without its own body
+  // would post the JSON one, which Slack and Discord do not show.
+  const shapes = ALERT_FORMATS.map((f) => Object.keys(webhookBody(a, f)).join());
+  assert.equal(new Set(shapes).size, ALERT_FORMATS.length, shapes.join(" | "));
 });
 
 test("sending returns at once, survives a dead or hanging webhook, and needs a URL", async () => {

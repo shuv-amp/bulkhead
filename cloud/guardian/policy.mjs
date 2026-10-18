@@ -6,6 +6,7 @@
 // recipient; the programs enforce that, not this file.
 
 import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, MAX_GUARDIANS, guardianMarginProblem } from "../lib/solana.mjs";
+import { ALERT_FORMATS } from "./alert.mjs";
 
 const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -372,8 +373,17 @@ export function checkConfig(cfg) {
   }
   if (cfg.floorProtected !== undefined && (!Array.isArray(cfg.floorProtected) || !cfg.floorProtected.every((m) => BASE58_KEY.test(m)) || !BASE58_KEY.test(cfg.floorProgram ?? ""))) throw new Error("config.floorProtected must be a list of program addresses, with config.floorProgram set");
   if (cfg.policy !== undefined && (typeof cfg.policy !== "object" || cfg.policy === null || Array.isArray(cfg.policy))) throw new Error("config.policy must be an object of policy settings (cloud/guardian/policy.mjs, DEFAULT_POLICY)");
+  // Read by name only, so a typo here used to fall back to a default: a
+  // misspelt format posted the JSON body, which a Slack or Discord webhook
+  // does not show, and liveness.every_s pinged every 60 s. Checked before
+  // the URLs, so a misspelt url is named as such.
+  for (const [k, keys] of [["alert", ["url", "format"]], ["liveness", ["url", "everyS"]]]) {
+    const o = cfg[k];
+    if (o && typeof o === "object" && !Array.isArray(o)) for (const s of Object.keys(o)) if (!keys.includes(s)) throw new Error(`config.${k}.${s} is not a setting of config.${k} (${keys.join(", ")})`);
+  }
   if (cfg.alert !== undefined && !url(cfg.alert?.url)) throw new Error("config.alert.url must be an http(s) URL");
   if (cfg.liveness !== undefined && !url(cfg.liveness?.url)) throw new Error("config.liveness must be an object with an http(s) url (and, optionally, everyS)");
+  if (cfg.alert?.format !== undefined && !ALERT_FORMATS.includes(cfg.alert.format)) throw new Error(`config.alert.format: ${JSON.stringify(cfg.alert.format)} is not one of ${ALERT_FORMATS.join(", ")}`);
   if (cfg.cluster !== undefined && !CLUSTERS.has(cfg.cluster)) throw new Error(`config.cluster must be one of ${[...CLUSTERS].join(", ")}`);
   if (cfg.cluster === "mainnet-beta") {
     if (!cfg.rpcs?.length) throw new Error("a mainnet guardian needs at least one backup endpoint (config.rpcs) from another provider (docs/07 §6)");
