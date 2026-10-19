@@ -12,6 +12,7 @@ import { stateJson, restoreState, writeStateFile } from "../guardian/statefile.m
 import { followAccount, followConfigs, startSlot } from "../guardian/follow.mjs";
 import { stallWatch, scanAll, alertFor } from "../guardian/alert.mjs";
 import { Keypair } from "../lib/signer.mjs";
+import { FailoverRpc } from "../lib/solana.mjs";
 
 const PROTOCOL = "8sZ5d3jB3kGqEoTz6eYpNw2bR3aUqv1uJ8sZtLWGd7Vb";
 
@@ -271,15 +272,67 @@ test("the start slot is the highest confirmed slot any endpoint gives, and none 
     return slot;
   } });
   let own = 0;
-  const failover = { call: async () => { own += 1; return 90; }, endpoints: [endpoint(90), endpoint(new Error("fetch failed")), endpoint(120), endpoint(100)] };
+  const admit = async () => true; // each on the configured cluster
+  const failover = { call: async () => { own += 1; return 90; }, admit, endpoints: [endpoint(90), endpoint(new Error("fetch failed")), endpoint(120), endpoint(100)] };
   assert.equal(await startSlot(failover), 120, "one endpoint behind or down does not move the line back");
   assert.ok(asked.every(([m, p]) => m === "getSlot" && p[0].commitment === "confirmed"));
   assert.deepEqual([asked.length, own], [4, 0], "every endpoint is asked, and the active one not twice");
   assert.equal(await startSlot(endpoint(7)), 7, "a plain Rpc is asked itself");
   // Every endpoint busy when asked on its own (hurried): FailoverRpc.call waits once and answers.
   const busy = () => endpoint(new Error("429 Too Many Requests"));
-  assert.equal(await startSlot({ ...endpoint(130), endpoints: [busy(), busy()] }), 130);
-  await assert.rejects(startSlot({ ...busy(), endpoints: [busy(), busy()] }), /no RPC endpoint gave its slot/);
+  assert.equal(await startSlot({ ...endpoint(130), admit, endpoints: [busy(), busy()] }), 130);
+  await assert.rejects(startSlot({ ...busy(), admit, endpoints: [busy(), busy()] }), /no RPC endpoint gave its slot/);
+});
+
+// startSlot asked every endpoint for its slot past the cluster check. A
+// backup still unchecked after the start's check (it missed the grace, was
+// busy, or answers all but getGenesisHash) and on another cluster set the
+// Floor replay line for the life of the process (finding 131).
+test("the start slot is read only from endpoints found on the configured cluster (finding 131)", async () => {
+  const MAINNET = GENESIS["mainnet-beta"];
+  const refused = { error: { code: -32601, message: "Method not found" } };
+  let backupGenesis = refused;
+  let backupSlotAsked = 0;
+  let primarySlot = 300_000_000;
+  const primary = await fakeRpc({ getGenesisHash: MAINNET, get getSlot() { return primarySlot; } });
+  const backup = await fakeRpc({ get getGenesisHash() { return backupGenesis; }, get getSlot() { backupSlotAsked += 1; return 999_000_000; } });
+  // As the start's cluster check leaves it: the primary found on the
+  // cluster, the backup not (it refused getGenesisHash).
+  const started = async (genesis = MAINNET) => {
+    backupGenesis = refused;
+    const rpc = new FailoverRpc([primary.url, backup.url], { genesis, timeoutMs: 2_000 });
+    await Promise.all(rpc.endpoints.map((_, i) => rpc.admit(i).catch(() => {})));
+    return rpc;
+  };
+  try {
+    // Still refusing getGenesisHash: never asked its slot.
+    let rpc = await started();
+    assert.deepEqual(rpc.cluster, ["ok", "unknown"]);
+    assert.equal(await startSlot(rpc), 300_000_000, "an unchecked backup's slot is not the line");
+    assert.deepEqual([rpc.cluster, backupSlotAsked], [["ok", "unknown"], 0]);
+    // It answers now, from devnet: found on another cluster, and not read.
+    rpc = await started();
+    backupGenesis = GENESIS.devnet;
+    assert.equal(await startSlot(rpc), 300_000_000, "a backup on another cluster gives no line");
+    assert.deepEqual([rpc.cluster, backupSlotAsked], [["ok", "wrong"], 0]);
+    // The primary gives no slot: the start fails rather than take the slot
+    // of a backup unchecked or on another cluster.
+    primarySlot = refused;
+    await assert.rejects(startSlot(await started()), /no RPC endpoint gave its slot/);
+    await assert.rejects(startSlot(rpc), /no RPC endpoint gave its slot/);
+    assert.equal(backupSlotAsked, 0);
+    // It answers now, from mainnet: admitted, and its higher slot is the line.
+    primarySlot = 300_000_000;
+    rpc = await started();
+    backupGenesis = MAINNET;
+    assert.equal(await startSlot(rpc), 999_000_000, "a backup ahead on the right cluster still moves the line on");
+    assert.deepEqual([rpc.cluster, backupSlotAsked], [["ok", "ok"], 1]);
+    // With no cluster configured nothing is checked, as before.
+    assert.equal(await startSlot(await started(null)), 999_000_000);
+  } finally {
+    primary.server.close();
+    backup.server.close();
+  }
 });
 
 test("a Floor config's walk asks the node whether it has the last full page's oldest signature (finding 81)", async () => {
