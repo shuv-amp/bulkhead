@@ -39,12 +39,15 @@ def page(t, w, h, body):
 # ---------------------------------------------------------------- header
 def mark(t, x, y, s):
     """The Bulkhead mark: a hull capsule, the bulkhead through it, the contained charge."""
+    # Proportions from docs/assets/logo.jpg: the bulkhead cuts a gap through the capsule and the charge alike.
     k = s / 100
-    return f"""<g transform="translate({x},{y}) scale({k})" fill="none" stroke="{t['ink']}" stroke-width="9" stroke-linecap="round">
-      <path d="M62 30 H30 a20 20 0 0 0 0 40 H62"/>
-      <path d="M62 30 H70 a20 20 0 0 1 0 40 H62" />
-      <circle cx="76" cy="50" r="8" fill="{t['sig']}" stroke="none"/>
-      <line x1="62" y1="14" x2="62" y2="86"/>
+    return f"""<defs><clipPath id="mk"><rect x="-1" y="0" width="66.3" height="100"/><rect x="79.9" y="0" width="21" height="100"/></clipPath></defs>
+    <g transform="translate({x},{y}) scale({k})">
+      <g clip-path="url(#mk)">
+        <path d="M72.6 27.8 H26.9 A22.2 22.2 0 0 0 26.9 72.2 H72.6 A22.2 22.2 0 0 0 72.6 27.8 Z" fill="none" stroke="{t['ink']}" stroke-width="7.4"/>
+        <circle cx="72.6" cy="50" r="13.5" fill="{t['sig']}"/>
+      </g>
+      <line x1="72.6" y1="13" x2="72.6" y2="87" stroke="{t['ink']}" stroke-width="7" stroke-linecap="round"/>
     </g>"""
 
 def header(t):
