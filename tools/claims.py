@@ -251,6 +251,7 @@ RULES = [
     (r"\*\*Property tests\*\* \| (\d+) tests", ["property"]),
     (r"Property tests\b[^|]*\| (\d+)/(\d+)", ["property", "property"]),
     (N + r" exhaustive tests", ["exhaustive"]),
+    (N + r" targeted unit tests", ["targeted"]),
     (r"\*\*Exhaustive checks\*\* \| (\d+) tests", ["exhaustive"]),
     (r"Exhaustive checks \((\d+) tests", ["exhaustive"]),
     (r"\*\*Floor core tests\*\* \| (\d+) tests", ["floor_core"]),

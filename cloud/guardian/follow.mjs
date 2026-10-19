@@ -257,15 +257,20 @@ function newerThan(sigs, slot) {
  * The slot a restart's Floor replay runs up to (followConfigs'
  * `liveAfterSlot`): the highest confirmed slot that any of a FailoverRpc's
  * endpoints gives. One endpoint behind would put the line early, and what
- * landed while the guardian was down would be acted on as new. If none
- * answers, or `rpc` has no endpoints (a plain Rpc), `rpc` itself is asked:
- * an endpoint asked directly leaves at once when busy (`hurry`), and
- * FailoverRpc.call waits for one once. Throws when that fails too.
+ * landed while the guardian was down would be acted on as new. Each endpoint
+ * is admitted first, as crossCheck does (one not yet checked is asked its
+ * genesis hash again): one unchecked or on another cluster is never read. Its
+ * slot, higher, replayed every Floor event; lower, acted on what landed while
+ * the guardian was down (docs/09, finding 131). If none answers, or `rpc` has
+ * no endpoints (a plain Rpc), `rpc` itself is asked: an endpoint asked
+ * directly leaves at once when busy (`hurry`), and FailoverRpc.call waits for
+ * one once. Throws when that fails too.
  */
 export async function startSlot(rpc) {
-  const ask = (e) => e.call("getSlot", [{ commitment: "confirmed" }]).catch(() => null);
-  let slots = (await Promise.all((rpc.endpoints ?? []).map(ask))).filter(Number.isInteger);
-  if (!slots.length) slots = [await ask(rpc)].filter(Number.isInteger);
+  const slot = (e) => e.call("getSlot", [{ commitment: "confirmed" }]);
+  const ask = (p) => p.catch(() => null);
+  let slots = (await Promise.all((rpc.endpoints ?? []).map((e, i) => ask(rpc.admit(i).then((ok) => (ok ? slot(e) : null)))))).filter(Number.isInteger);
+  if (!slots.length) slots = [await ask(slot(rpc))].filter(Number.isInteger);
   if (!slots.length) throw new Error("no RPC endpoint gave its slot, so the Floor replay has no start");
   return Math.max(...slots);
 }
