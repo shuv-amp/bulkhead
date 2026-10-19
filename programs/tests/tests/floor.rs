@@ -1137,7 +1137,7 @@ fn every_floor_account_substitution_is_refused() {
     let mut keys: Vec<&Keypair> = vec![&p.owner, &q.owner, &p.team, &q.team, &stranger];
     keys.extend(p.g.iter());
     keys.extend(q.g.iter());
-    let mut s = Sweep::new(&env, err::INVALID_INSTRUCTION, decoys, &keys);
+    let mut s = Sweep::new(&env, env.floor, err::INVALID_INSTRUCTION, decoys, &keys);
     s.forgery("A's config, forged", f.config);
     // Floor names the loader by its fixed id in every loader call (loader.rs),
     // so the runtime, not Floor, refuses any other account there.
@@ -1256,6 +1256,9 @@ fn every_floor_account_substitution_is_refused() {
     let forged: Vec<(String, String)> = loads_a.iter().map(|r| (r.to_string(), "A's config, forged".to_string())).collect();
     assert_eq!(s.forged, forged);
     assert_eq!(s.unused_forgeries(), Vec::<String>::new());
+    // The one other config at a swept slot, the third program's, is copied
+    // by the sweep itself.
+    assert_eq!(s.copied, vec![("execute release to none".to_string(), f3.config)]);
     // The stop names the config twice (as the spill, finding 88): swapped at
     // both, a config only its owner check refuses meets that check.
     assert_eq!(s.together, vec![("abort (stop)".to_string(), f.config)]);

@@ -3449,6 +3449,37 @@ fn every_account_substitution_is_refused() {
     .collect();
     assert_eq!(s.forged, forged);
     assert_eq!(s.unused_forgeries(), Vec::<String>::new());
+    // Every other account of the Vault's at a swept slot is copied by the
+    // sweep itself, Harbor's calls included: in the first world the
+    // protocol, the USDC vault, its asset record and the whale's backing;
+    // in the seal's, the protocol, an asset an upsert rewrites and the
+    // three vaults the seal reads. A run that adds or drops one changes
+    // the runs offered a copy (56 and 11).
+    let copied = |c: &[(String, Address)]| {
+        c.iter()
+            .map(|(_, a)| *a)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let main = [
+        w.m.protocol,
+        w.usdc.vault,
+        w.usdc.asset,
+        w.m.backing(&whale.pubkey()),
+    ];
+    assert_eq!(copied(&s.copied), std::collections::HashSet::from(main));
+    let seal = [
+        p.m.protocol,
+        p.usdc.asset,
+        p.usdc.vault,
+        p.sol.vault,
+        third_vault,
+    ];
+    assert_eq!(copied(&sp.copied), std::collections::HashSet::from(seal));
+    assert!(s.copied.contains(&("heartbeat".into(), w.m.protocol)));
+    assert!(s
+        .copied
+        .contains(&("withdraw (backed)".into(), w.usdc.asset)));
+    assert_eq!((s.copied.len(), sp.copied.len()), (56, 11));
     for (run, set) in [
         ("settle ticket", "the USDC vault and ticket t2"),
         ("cancel ticket", "the USDC vault and ticket t1"),
