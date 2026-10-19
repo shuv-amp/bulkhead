@@ -9,7 +9,7 @@ Bulkhead is a small Solana program that holds a protocol's token accounts on the
 
 **[The attack](#what-it-does-to-an-attack)** · **[How it works](#how-it-works)** · **[Verify it](#verify-it-yourself)** · **[Devnet](#live-on-devnet)** · **[FAQ](docs/FAQ.md)** · **[Docs](#documentation)**
 
-[![CI](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg)](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml) [![devnet](https://img.shields.io/badge/devnet-live-57606A?style=flat-square)](#live-on-devnet) [![Kani](https://img.shields.io/badge/Kani_proofs-19%2F19-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![tests](https://img.shields.io/badge/program_tests-174%2F174-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![audit](https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-E5481B?style=flat-square)](SECURITY.md) [![license](https://img.shields.io/badge/license-Apache--2.0-57606A?style=flat-square)](LICENSE)
+[![CI](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml/badge.svg)](https://github.com/shuv-amp/bulkhead/actions/workflows/ci.yml) [![devnet](https://img.shields.io/badge/devnet-live-57606A?style=flat-square)](#live-on-devnet) [![Kani](https://img.shields.io/badge/Kani_proofs-19%2F19-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![tests](https://img.shields.io/badge/program_tests-176%2F176-57606A?style=flat-square)](docs/09-VERIFICATION.md) [![audit](https://img.shields.io/badge/audit-not_yet,_not_for_real_funds-E5481B?style=flat-square)](SECURITY.md) [![license](https://img.shields.io/badge/license-Apache--2.0-57606A?style=flat-square)](LICENSE)
 
 <br>
 
@@ -151,7 +151,7 @@ scripts/floor-demo.sh <program-id>          # Floor on that program's real bytes
 scripts/deploy-dryrun.sh                    # the devnet deploy, rehearsed on a fresh local validator
 cloud/e2e/guardian-scenarios.sh             # the guardian on a validator: hold, restart, dead RPC, approvals, recovery key (cursor: ~10 min more)
 scripts/verify-deployed.sh <url> <id>=<name> # a deployed program runs exactly the code built from this checkout
-scripts/verify-devnet.sh                    # the three devnet programs == this checkout's canonical build (run it at `3eec968`, PR #85, until 107 is deployed)
+scripts/verify-devnet.sh                    # the three devnet programs == this checkout's canonical build (run it at `3eec968`, PR #85, until 107, 115 and 116 are deployed)
 scripts/build-programs-docker.sh            # that canonical (Linux x86_64) build on any machine with Docker
 scripts/floor-devnet.sh <url> <team.json> <dir>  # Floor's full lifecycle on a live cluster, forbidden actions simulated
 node cloud/deploy/vault-check.mjs <url> <market> # a live market checked without sending anything (needs its keys)
@@ -165,7 +165,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| **Programs on the real runtime** <br><sub>LiteSVM, mainnet feature set, mainnet token program</sub> | **174/174**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (7,075 swaps refused, 16 Oct) |
+| **Programs on the real runtime** <br><sub>LiteSVM, mainnet feature set, mainnet token program</sub> | **176/176**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (7,075 swaps refused, 16 Oct) |
 | **Bounded proofs** <br><sub>Kani, and exhaustive checks</sub> | **19/19 harnesses verified** on 16 Oct (16 for every value of their types), 240 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 6 exhaustive tests over ~584M inputs |
 | **Differential** <br><sub>an independent Python reference vs the Rust core</sub> | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | **Program vs model** | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
@@ -174,8 +174,8 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | **Property tests** <br><sub>G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection</sub> | 26/26, with coverage counters so a vacuous pass fails |
 | **Golden vectors** <br><sub>every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts</sub> | 119/119 identical, Rust = Python |
 | **End to end** | [Above](#what-it-does-to-an-attack) |
-| **On devnet** | All three programs run the build of PR #85 (15 Oct; this tree's Floor and Vault add finding 107, not deployed yet), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
-| **What this process found** <br><sub>in our own code and docs</sub> | **114 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–114 were recorded after the submission (107 is the engagement's AUD-2, decided 16 Oct): 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 105 (CI tooling), 106, 108, 112 and 113 (Vault tests), 107 (the guardian margin, not yet on devnet), 109 (fuzz targets), 110 and 111 (Floor tests), 114 (the guardian's startup checks, not yet on devnet) are fixed; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| **On devnet** | All three programs run the build of PR #85 (15 Oct; this tree's Floor and Vault add finding 107, and Floor findings 115 and 116, not deployed yet), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
+| **What this process found** <br><sub>in our own code and docs</sub> | **116 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–116 were recorded after the submission (107 is the engagement's AUD-2, decided 16 Oct): 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 105 (CI tooling), 106, 108, 112 and 113 (Vault tests), 107 (the guardian margin, not yet on devnet), 109 (fuzz targets), 110 and 111 (Floor tests), 114 (the guardian's startup checks, not yet on devnet), 115 and 116 (Floor's snapshot length rule, not yet on devnet; 116's class below sBPF v3 is stated) are fixed; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
 
 ## Live on devnet
 
@@ -188,7 +188,7 @@ Deployed 28 Sep 2026. All three programs have been upgraded in place since then 
 | **Harbor** <sub>demo protocol</sub> | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `543be60b…10adeb40` |
 
 ```bash
-scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet (run it at `3eec968` until 107 is deployed)
+scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet (run it at `3eec968` until 107, 115 and 116 are deployed)
 ```
 
 A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). All three programs share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).

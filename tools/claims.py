@@ -183,6 +183,7 @@ UNCOUNTED = {
     "programs/tests/tests/differential.rs": "a program-vs-model differential, reported in steps (09 §2)",
     "programs/tests/tests/differential_wide.rs": "a program-vs-model differential, reported in steps (09 §2)",
     "programs/tests/tests/floor_differential.rs": "a program-vs-model differential, reported in steps (09 §2)",
+    "programs/tests/tests/elf_extent_loader.rs": "a rule-vs-loader differential, reported in binaries and copies (09 §7)",
     "programs/tests/tests/curve_vectors.rs": "an #[ignore]d generator of the curve vectors, run by hand",
     "programs/tests/tests/e2e_world.rs": "an #[ignore]d builder of the end-to-end world, run by hand",
 }
