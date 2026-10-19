@@ -2867,6 +2867,10 @@ fn every_account_substitution_is_refused() {
     );
     let (_, t1) = w.m.next_ticket(&w.env);
     s.twin("the USDC vault and ticket t1", with_ticket(t1), verr::WRONG_VAULT);
+    // A ticket is checked by its owner and the addresses it records, not by
+    // its own address: only the owner check refuses a copy under another
+    // owner.
+    s.forgery("ticket t1, forged", t1);
     s.run(
         &mut w.env,
         "admin payout (queued)",
@@ -2916,6 +2920,7 @@ fn every_account_substitution_is_refused() {
     );
     let (_, t2) = w.m.next_ticket(&w.env);
     s.twin("the USDC vault and ticket t2", with_ticket(t2), verr::WRONG_VAULT);
+    s.forgery("ticket t2, forged", t2);
     w.env.ok(&[ix], &[&w.m.admin]);
     // Past the ticket's ETA, heartbeating on the way (a guardian silent
     // longer than its 7-day interval stops counting).
@@ -3043,6 +3048,10 @@ fn every_account_substitution_is_refused() {
     );
 
     // --- governance: propose, veto, cancel, execute -------------------------
+    // A change too (see ticket t1).
+    for n in 0..3 {
+        s.forgery(&format!("change {n}, forged"), w.m.change_address(n));
+    }
     let mut looser = Limits::default_limits();
     looser.short_bps = 300;
     let vault = w.usdc.vault;
@@ -3426,6 +3435,20 @@ fn every_account_substitution_is_refused() {
     // the runs whose vault check a ticket's check would otherwise hide.
     assert_eq!(s.unused_twins(), Vec::<String>::new());
     assert_eq!(sp.unused_twins(), Vec::<String>::new());
+    // Each run that loads a ticket or a change is offered its copy.
+    let forged: Vec<(String, String)> = [
+        ("extend ticket", "ticket t1"),
+        ("settle ticket", "ticket t2"),
+        ("cancel ticket", "ticket t1"),
+        ("veto change", "change 0"),
+        ("cancel change", "change 1"),
+        ("execute change", "change 2"),
+    ]
+    .iter()
+    .map(|(run, what)| (run.to_string(), format!("{what}, forged")))
+    .collect();
+    assert_eq!(s.forged, forged);
+    assert_eq!(s.unused_forgeries(), Vec::<String>::new());
     for (run, set) in [
         ("settle ticket", "the USDC vault and ticket t2"),
         ("cancel ticket", "the USDC vault and ticket t1"),

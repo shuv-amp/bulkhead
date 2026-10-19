@@ -3,25 +3,26 @@
 //! signer, which protocol or vault it belongs to). For each instruction this
 //! takes a transaction that succeeds and swaps one account at a time for a
 //! fresh address, every other account in the transaction, a second market's
-//! accounts, the other vault, programs and sysvars, and, for a signer, every
-//! other known key; then, per key that signs at any slot (a free one
-//! included) and stands at a checked slot, the key unsigned at every
-//! checked slot (a free slot where it signed gets the payer; not for the
-//! fee payer). Every swap must fail, except at positions the program
-//! deliberately leaves free (each listed with its reason), and fail with
-//! the swept program's own error code: a refusal that only a CPI or the
-//! runtime makes would hide that program's check being deleted. A slot
-//! where another program or the runtime refuses by design is listed as a
-//! backstop, with the errors it refuses with and who refuses; a backstop
+//! accounts, the other vault, programs and sysvars, copies under another
+//! owner of accounts only an owner check tells from the real ones
+//! (`forgery`), and, for a signer, every other known key; then, per key that
+//! signs at any slot (a free one included) and stands at a checked slot, the
+//! key unsigned at every checked slot (a free slot where it signed gets the
+//! payer; not for the fee payer). Every swap must fail, except at positions
+//! the program deliberately leaves free (each listed with its reason), and
+//! fail with the swept program's own error code: a refusal that only a CPI
+//! or the runtime makes would hide that program's check being deleted. A
+//! slot where another program or the runtime refuses by design is listed as
+//! a backstop, with the errors it refuses with and who refuses; a backstop
 //! whose errors never occur fails the sweep. The sweep cannot tell there
 //! whether the program's own check exists. Nor can it tell which of the
-//! program's checks refused: one deleted where a later check returns a
-//! code of the same program passes, so such checks need their own tests.
-//! A set of accounts that other checks tie to each other (a vault, its
-//! token account, its lifeboat) is also swapped whole for its twin in
-//! another protocol (`twin`), which must be refused with the code of the
-//! check that ties the set to this protocol: one at a time, the other
-//! checks refuse first, with the same code.
+//! program's checks refused: one deleted where a later check returns a code
+//! of the same program passes, so such checks need their own tests. A set of
+//! accounts that other checks tie to each other (a vault, its token account,
+//! its lifeboat) is also swapped whole for its twin in another protocol
+//! (`twin`), which must be refused with the code of the check that ties the
+//! set to this protocol: one at a time, the other checks refuse first, with
+//! the same code.
 #![allow(dead_code)]
 
 use super::vault::*;
@@ -111,10 +112,24 @@ struct Twin {
     code: u32,
 }
 
+/// A copy of an account under another owner, offered as a decoy.
+struct Forgery {
+    what: String,
+    real: Address,
+    forged: Address,
+    /// The copy's owner: a program nobody here deployed (an attacker's).
+    owner: Address,
+    /// The real account as last seen, under `owner`; None until it first
+    /// exists.
+    last: Option<Account>,
+}
+
 pub struct Sweep {
     /// The swept program's error codes (`codes`).
     own: Range<u32>,
     decoys: Vec<(String, Address)>,
+    /// Decoys rewritten before each run (`forgery`).
+    forgeries: Vec<Forgery>,
     keys: Vec<Keypair>,
     pub unexpected: Vec<String>,
     pub attempts: usize,
@@ -131,6 +146,9 @@ pub struct Sweep {
     twins: Vec<Twin>,
     /// (run name, set) for every transaction sent with a twin set swapped in.
     pub twinned: Vec<(String, String)>,
+    /// (run name, forgery) for every run that names a forgery's real
+    /// account at a slot swapped for decoys and was offered the copy.
+    pub forged: Vec<(String, String)>,
 }
 
 impl Sweep {
@@ -169,19 +187,7 @@ impl Sweep {
         ];
         keys.extend(m.g.iter().map(|k| k.insecure_clone()));
         keys.extend(other.g.iter().map(|k| k.insecure_clone()));
-        Sweep {
-            own: codes(verr::INVALID_INSTRUCTION),
-            decoys,
-            keys,
-            unexpected: vec![],
-            attempts: 0,
-            unsignable: 0,
-            backstopped: 0,
-            runs: 0,
-            unsigned: vec![],
-            twins: vec![],
-            twinned: vec![],
-        }
+        Sweep::with(codes(verr::INVALID_INSTRUCTION), decoys, keys)
     }
 
     /// A sweep with only the basic decoys and these keys, of a program whose
@@ -207,10 +213,15 @@ impl Sweep {
         d.extend(decoys);
         let mut k = vec![env.payer.insecure_clone()];
         k.extend(keys.iter().map(|x| x.insecure_clone()));
+        Sweep::with(codes(first_code), d, k)
+    }
+
+    fn with(own: Range<u32>, decoys: Vec<(String, Address)>, keys: Vec<Keypair>) -> Sweep {
         Sweep {
-            own: codes(first_code),
-            decoys: d,
-            keys: k,
+            own,
+            decoys,
+            forgeries: vec![],
+            keys,
             unexpected: vec![],
             attempts: 0,
             unsignable: 0,
@@ -219,6 +230,7 @@ impl Sweep {
             unsigned: vec![],
             twins: vec![],
             twinned: vec![],
+            forged: vec![],
         }
     }
 
@@ -232,6 +244,35 @@ impl Sweep {
     /// Another account a careless check would accept here.
     pub fn decoy(&mut self, name: &str, a: Address) {
         self.decoys.push((name.into(), a));
+    }
+
+    /// A decoy that copies `real` byte for byte, as it stands before each
+    /// run (its last copy once `real` is closed), but is owned by another
+    /// program, one nobody here deployed: only an owner check tells the two
+    /// apart. Offered from the first run where `real` exists.
+    pub fn forgery(&mut self, name: &str, real: Address) {
+        assert!(
+            !self.forgeries.iter().any(|f| f.what == name),
+            "forgery names are unique"
+        );
+        self.forgeries.push(Forgery {
+            what: name.into(),
+            real,
+            forged: Address::new_unique(),
+            owner: Address::new_unique(),
+            last: None,
+        });
+    }
+
+    /// The forgeries no run that names their real account at a slot swapped
+    /// for decoys was offered (stale: the runs they were for moved, or the
+    /// account never existed).
+    pub fn unused_forgeries(&self) -> Vec<String> {
+        self.forgeries
+            .iter()
+            .filter(|f| !self.forged.iter().any(|(_, what)| *what == f.what))
+            .map(|f| f.what.clone())
+            .collect()
     }
 
     /// A set of accounts to swap whole for their twins, refused with
@@ -349,6 +390,32 @@ impl Sweep {
         for k in extra_keys {
             if !self.keys.iter().any(|x| x.pubkey() == k.pubkey()) {
                 self.keys.push(k.insecure_clone());
+            }
+        }
+        // The forgeries go into this run's states only, not the one it
+        // leaves behind.
+        let clean = env.svm.clone();
+        for f in &mut self.forgeries {
+            if let Some(mut a) = env.svm.get_account(&f.real) {
+                a.owner = f.owner;
+                if f.last.is_none() {
+                    self.decoys.push((f.what.clone(), f.forged));
+                }
+                f.last = Some(a);
+            }
+            if let Some(a) = &f.last {
+                env.svm.set_account(f.forged, a.clone()).unwrap();
+                // At a slot swapped for decoys: checked, unsigned, and with no
+                // backstop to refuse the copy before the program does.
+                let swept = |(j, m): (usize, &AccountMeta)| {
+                    m.pubkey == f.real
+                        && !free.contains(&j)
+                        && !m.is_signer
+                        && refusals_at[j].is_empty()
+                };
+                if ix.accounts.iter().enumerate().any(swept) {
+                    self.forged.push((name.into(), f.what.clone()));
+                }
             }
         }
         let base = env.svm.clone();
@@ -568,7 +635,7 @@ impl Sweep {
             }
         }
         // Continue from the state after the real transaction.
-        env.svm = base;
+        env.svm = clean;
         assert_eq!(self.send(env, ix, None), Some(Ok(())));
     }
 }
