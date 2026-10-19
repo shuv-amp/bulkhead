@@ -172,6 +172,28 @@ test("a line with a message and an RPC's error alerts with both (finding 128)", 
   assert.deepEqual([...new Set(keys)], ["error"]);
 });
 
+test("a failover to another endpoint is news even when its host falls past the key's 60 units (finding 129)", () => {
+  // main.mjs logs `RPC endpoint <from> is failing; now using <to>`. Once
+  // <from> is 24 units long, <to> starts past the message's first 60 units,
+  // which keyed the line, so a move a -> b and then a -> c within the window
+  // was one kind: the operator was not told the guardian now reads from c.
+  // Each is named by its entry, so one host listed twice is two (c, d), and
+  // the line names both in fields, as <from> too can run past unit 60 (q).
+  const [a, b, c, d] = ["solana-mainnet.g.alchemy.com (rpc)", "mainnet.helius-rpc.com (rpcs[0])", "mainnet.helius-rpc.org (rpcs[1])", "mainnet.helius-rpc.org (rpcs[2])"];
+  const q = "a-long-endpoint-name.solana-mainnet.quiknode.pro";
+  const line = (from, to) => ({ level: "error", msg: `RPC endpoint ${from} is failing; now using ${to}`, error: "fetch failed", endpointFrom: from, endpoint: to });
+  const seen = new Map();
+  assert.ok(alertFor(line(a, b), seen, 0));
+  assert.equal(alertFor(line(a, b), seen, 1), null, "the same move repeats once a window");
+  const toC = alertFor(line(a, c), seen, 2);
+  assert.ok(toC, "a move to another endpoint alerts");
+  assert.equal(toC.detail, `${line(a, c).msg} | fetch failed`, "the message names the endpoint already");
+  assert.ok(alertFor(line(a, d), seen, 3), "and to another entry on the same host");
+  assert.ok(alertFor(line(c, b), seen, 4), "as does a move from another");
+  assert.ok(alertFor(line(`${q} (rpcs[3])`, b), seen, 5));
+  assert.ok(alertFor(line(`${q} (rpcs[4])`, b), seen, 6), "from another entry on a long host");
+});
+
 test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {
   const slack = "https://hooks.slack.com/services/T/B/x";
   const discord = "https://discord.com/api/webhooks/1/x";
