@@ -108,7 +108,9 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   const action = line.action;
   if (line.skipped) return null;
   const level = line.level ?? "info";
-  const message = line.msg ?? line.error ?? "";
+  // Its message makes it urgent and keys it; the detail shows both (below).
+  const texts = [line.msg, line.error].filter((s) => s != null && s !== "");
+  const message = texts[0] ?? "";
   // `notify`: an info line people should still hear about (a Floor restore,
   // a restore approval; finding 76). It alerts as a warning.
   const urgent = level === "error" || ACTIONS.has(action) || line.notify === true || (level === "warn" && URGENT_WARNINGS.some((r) => r.test(message)));
@@ -125,10 +127,13 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   // simulation's logs), and webhookBody cuts Discord's body to Discord's
   // 2000-unit limit, so the change, program, mint or ticket after it were
   // lost. The detail keeps its start (the RPC's message) and its end (the
-  // last logs, or what a line says after the error it quotes).
-  let shown = message, heard = [message];
-  if (message.length > MESSAGE_MAX) {
-    const [head, tail] = [firstUnits(message, MESSAGE_MAX - MESSAGE_TAIL - 1), lastUnits(message, MESSAGE_TAIL)];
+  // last logs, or what a line says after the error it quotes). A line with
+  // a message and the RPC's `error` shows both (finding 128): the alert used
+  // to say what failed but not why.
+  const said = texts.join(" | ");
+  let shown = said, heard = [said];
+  if (said.length > MESSAGE_MAX) {
+    const [head, tail] = [firstUnits(said, MESSAGE_MAX - MESSAGE_TAIL - 1), lastUnits(said, MESSAGE_TAIL)];
     shown = `${head}…${tail}`;
     // A word at a cut does not name a part: it reads as cut ("change 4…"
     // may be change 45), so that part is named again in full.
