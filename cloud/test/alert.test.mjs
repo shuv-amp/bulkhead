@@ -2,7 +2,10 @@
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText, MESSAGE_MAX, MESSAGE_TAIL } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText, MESSAGE_MAX, MESSAGE_TAIL, errorCause } from "../guardian/alert.mjs";
+import { Rpc, b58encode } from "../lib/solana.mjs";
+import { Keypair, send } from "../lib/signer.mjs";
+import { freezeRefusal } from "../guardian/policy.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -232,6 +235,88 @@ test("review fixes: distinct vetoes alert, skipped lines do not, failing freezes
   assert.ok(alertFor(failed, seen, 60_000));
   assert.ok(alertFor({ action: "freeze", signature: "e" }, seen, 60_001));
   assert.ok(alertFor({ action: "freeze", signature: "f" }, seen, 60_002));
+});
+
+test("a failed action's alert repeats per cause: an RPC's refusal, a transaction's failure", async () => {
+  // The errors as cloud/lib makes them, logged as main.mjs logs a failed action.
+  const real = globalThis.fetch;
+  let answer;
+  globalThis.fetch = async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: answer }), { status: 200 });
+  const refusal = (error, method = "sendTransaction") => {
+    answer = error;
+    return new Rpc("http://a.invalid", { retries: 0 }).call(method, ["x"]).then(() => assert.fail("refused"), (e) => e);
+  };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  // Sent without a preflight, as a freeze is, it lands and fails: the Vault's
+  // instruction after the two compute-budget ones.
+  const landed = (signature, custom) => send({
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async (method) => (method === "sendTransaction" ? signature : { value: [{ err: { InstructionError: [2, { Custom: custom }] } }] }),
+  }, payer, [ix], [], { skipPreflight: true, pollMs: 1, computeUnits: 50_000, microLamports: 1 }).then(() => assert.fail("failed"), (e) => e);
+  try {
+    // A local Agave 4.3 validator's preflight refusal, its logs cut short.
+    const preflight = (custom, lamports) => refusal({
+      code: -32002,
+      message: `Transaction simulation failed: Error processing Instruction 0: custom program error: 0x${custom.toString(16)}`,
+      data: { err: { InstructionError: [0, { Custom: custom }] }, logs: [`Transfer: insufficient lamports ${lamports}, need 1000000000000000000`], unitsConsumed: 150 },
+    });
+    const freeze = (e) => actionLine({ type: "freeze", reason: "unbacked outflow ≥ limit" }, { level: "error", error: e.message, errorCause: errorCause(e) });
+    const [one, other] = [await preflight(1, 5), await preflight(6002, 5)];
+    assert.equal(one.message.slice(0, 60), other.message.slice(0, 60), "every refusal starts alike");
+    const seen = new Map();
+    assert.ok(alertFor(freeze(one), seen, 0));
+    assert.ok(alertFor(freeze(other), seen, 1_000), "another cause within the minute");
+    assert.equal(alertFor(freeze(await preflight(1, 4)), seen, 2_000), null, "the same cause, a figure in its logs moved");
+    // A refusal with no transaction error is its code and text, figures aside.
+    const behind = async (n) => freeze(await refusal({ code: -32005, message: `Node is behind by ${n} slots`, data: { numSlotsBehind: n } }));
+    assert.ok(alertFor(await behind(42), seen, 3_000));
+    assert.equal(alertFor(await behind(43), seen, 4_000), null);
+    assert.ok(alertFor(freeze(await refusal({ code: -32004, message: "Node is behind by 42 slots" })), seen, 4_050), "the same text, another code");
+    const busy = async (ms) => freeze(await refusal({ code: -32000, message: `rate limited, retry in ${ms}ms` }));
+    assert.ok(alertFor(await busy(734), seen, 4_100));
+    assert.equal(alertFor(await busy(912), seen, 4_200), null, "digits in a word are a figure too");
+    assert.equal(errorCause(await refusal({ code: -32000, message: "x".repeat(500) })).length, 160, "a cause is cut");
+    assert.ok(alertFor(freeze(await refusal({ code: -32004, message: "Block not available for slot 9" })), seen, 5_000));
+    // A freeze that failed on chain: each retry is signed anew, and is one cause.
+    const [a, b] = [await landed(b58encode(new Uint8Array(64).fill(1)), 8006), await landed(b58encode(new Uint8Array(64).fill(2)), 8006)];
+    assert.ok(a.message.startsWith(`transaction ${a.signature} failed`));
+    assert.ok(alertFor(freeze(a), seen, 6_000));
+    assert.equal(alertFor(freeze(b), seen, 7_000), null, "the same failure, signed again");
+    assert.ok(alertFor(freeze(await landed(b58encode(new Uint8Array(64).fill(3)), 2)), seen, 8_000), "another failure");
+    // The same refusal by the freeze's own simulation (no budget instructions)
+    // and by a node's preflight: one cause however it came.
+    assert.equal(alertFor(freeze(freezeRefusal({ InstructionError: [0, { Custom: 8006 }] })), seen, 9_000), null, "simulated, the same cause");
+    assert.equal(alertFor(freeze(await preflight(8006, 7)), seen, 10_000), null, "refused in preflight, the same cause");
+    assert.ok(alertFor(freeze(freezeRefusal("InsufficientFundsForFee")), seen, 11_000), "no SOL for the fee");
+    const unpaid = { code: -32002, message: "Transaction simulation failed: Attempt to debit an account but found no record of a prior credit.", data: { err: "InsufficientFundsForFee" } };
+    assert.equal(alertFor(freeze(await refusal(unpaid)), seen, 11_100), null, "no SOL for the fee, said by a node");
+    assert.ok(alertFor(freeze(await refusal({ ...unpaid, data: { err: "BlockhashNotFound" } })), seen, 11_200), "another transaction error");
+    // One code from two methods: the read before a send, then the send.
+    const lagging = { code: -32005, message: "Node is behind by 42 slots" };
+    assert.ok(alertFor(freeze(await refusal(lagging, "getAccountInfo")), seen, 12_000), "the read and the send are two causes");
+    // A program's code in the text is kept, not taken for a figure.
+    // (0x1770 and 0x1771: decimal digits only, so masking them would make one.)
+    const bare = async (hex) => freeze(await refusal({ code: -32002, message: `Transaction simulation failed: Error processing Instruction 0: custom program error: 0x${hex}` }));
+    assert.ok(alertFor(await bare("1770"), seen, 13_000));
+    assert.ok(alertFor(await bare("1771"), seen, 14_000), "another program error, with no data");
+    // Not confirmed in its window: each retry is signed anew, and is one cause.
+    const unconfirmed = (signature) => send({
+      blockhash: async () => "11111111111111111111111111111111",
+      call: async (method) => (method === "sendTransaction" ? signature : { value: [null] }),
+    }, payer, [ix], [], { skipPreflight: true, pollMs: 1, confirmMs: 0 }).then(() => assert.fail("unconfirmed"), (e) => e);
+    const [u, v] = [await unconfirmed(b58encode(new Uint8Array(64).fill(4))), await unconfirmed(b58encode(new Uint8Array(64).fill(5)))];
+    assert.ok(u.message.endsWith("not confirmed"));
+    assert.ok(alertFor(freeze(u), seen, 15_000));
+    assert.equal(alertFor(freeze(v), seen, 16_000), null, "not confirmed, signed again");
+    // A send that failed before it reached a node carries the signature, not in its text.
+    assert.equal(errorCause(Object.assign(new Error("sendTransaction: fetch failed"), { signature: a.signature })), undefined);
+    // Any other error has no cause, and keeps the first 60 units.
+    assert.equal(errorCause(new Error("endpoint down")), undefined);
+    assert.equal(jsonText({ errorCause: errorCause(new Error("x")) }), "{}");
+  } finally {
+    globalThis.fetch = real;
+  }
 });
 
 test("a step that keeps failing raises an urgent alert after the threshold, rate-limited", () => {
