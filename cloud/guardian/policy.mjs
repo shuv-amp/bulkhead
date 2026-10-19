@@ -905,6 +905,21 @@ export function queueFailedVeto(pending, action) {
   return [...pending, action];
 }
 
+/**
+ * A simulated freeze's error that no retry or price changes: no SOL for the
+ * fee, a fee payer that does not exist, or the Vault refusing it (a key no
+ * longer a live guardian, say). Null for anything else (a node behind the
+ * blockhash, or no error). It carries `err` as `simulatedErr`, for
+ * errorCause: the same cause as the transaction failing on chain.
+ */
+export function freezeRefusal(err) {
+  if (!err) return null;
+  const code = err?.InstructionError?.[1]?.Custom;
+  const why = err === "InsufficientFundsForFee" || err === "AccountNotFound" || err?.InsufficientFundsForRent ? `the freeze cannot be paid for (${JSON.stringify(err)}): fund the guardian key`
+    : code != null ? `the Vault refuses this freeze (custom error ${code}; 8006 is NotGuardian), whatever the price` : null;
+  return why && Object.assign(new Error(why), { simulatedErr: err });
+}
+
 /** The Vault's custom error code in a failed send's error, or null. */
 export function programErrorCode(e) {
   const err = e?.rpcError?.data?.err ?? null;

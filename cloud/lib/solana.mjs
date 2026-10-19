@@ -300,6 +300,7 @@ export class Rpc {
       if (j.error) {
         const err = new Error(`${method}: ${JSON.stringify(j.error)}`);
         err.rpcError = j.error; // { code, message, data }: -32002 is a refused preflight
+        err.rpcMethod = method;
         if (waitMs != null) err.waitMs = waitMs; // busy: how long it asked to be left alone
         if (waitMs != null && attempt < this.retries) err.hurried = true; // left before its retry
         throw err;

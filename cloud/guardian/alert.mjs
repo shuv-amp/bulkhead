@@ -55,6 +55,41 @@ function lastUnits(s, n) {
   return s.slice(-n).replace(/^[\uDC00-\uDFFF]/, "");
 }
 
+/**
+ * What made `e` fail, for a log line's `errorCause`, which alertFor keys its
+ * repeats on in place of the message's first 60 units. Those held no cause:
+ * every refusal an RPC sends starts `sendTransaction: {"code":-32002,
+ * "message":"Transaction simul`, so a second cause was muted; and a signed
+ * transaction's failure starts `transaction <signature>`, new on every
+ * retry, so a freeze failing on chain alerted on every poll.
+ * - A transaction's error, however it came (a node's refused preflight, the
+ *   transaction failing on chain, the freeze's own simulation): the error,
+ *   and for an instruction's, only what it failed with. Its index moves with
+ *   the compute-budget instructions sent before it, which a simulation or a
+ *   send without a budget leaves out.
+ * - Any other RPC error: the method, the code and the text with each run of
+ *   digits as "#", in a word too (a node "behind by 42 slots" is behind by
+ *   43 a poll later; "retry in 734ms"), but a program's "0x1770" is kept.
+ * - A signed transaction's failure: its message without the signature.
+ * Cut at 160 units. Undefined for anything else.
+ */
+export function errorCause(e) {
+  return rawCause(e)?.slice(0, 160);
+}
+function rawCause(e) {
+  const err = e?.rpcError?.data?.err ?? e?.onChainErr ?? e?.simulatedErr;
+  if (err != null) {
+    const ie = err.InstructionError;
+    return Array.isArray(ie) ? `instruction error ${JSON.stringify(ie[1])}` : `transaction error ${JSON.stringify(err)}`;
+  }
+  const r = e?.rpcError;
+  if (r?.code != null) return `${e.rpcMethod ?? "?"} RPC ${r.code} ${String(r.message ?? "").replace(/(0x[0-9a-f]+)|\d+/gi, (m, hex) => hex ?? "#")}`;
+  const sig = e?.signature;
+  const message = String(e?.message ?? "");
+  if (typeof sig === "string" && sig && message.includes(sig)) return message.replaceAll(sig, "<signature>");
+  return undefined;
+}
+
 /** Actions sent on chain: each one is news. */
 const ACTIONS = new Set(["freeze", "cancel", "veto_change", "veto_exit", "floor_veto", "execute"]);
 
@@ -62,10 +97,12 @@ const ACTIONS = new Set(["freeze", "cancel", "veto_change", "veto_exit", "floor_
  * The alert for one log line, or null. `line` is the object the guardian
  * logs. A freeze that landed always alerts. Anything else repeats at most once
  * per `windowMs` for the same kind (`seen` remembers when each kind was last
- * sent); a kind is what an action acts on (a change, a proposal, a mint), so
- * two different vetoes are two alerts, while the cancels of one sweep are one.
- * A failed freeze, retried every poll, alerts at most once a `failedFreezeMs`
- * per cause. A line that skipped its action is not an alert.
+ * sent); a kind is what an action acts on (a change, a proposal, a mint) and
+ * why it failed (the line's `errorCause` when it has one, or else its
+ * message's first 60 units), so two different vetoes are two alerts, while
+ * the cancels of one sweep are one. A failed freeze, retried every poll,
+ * alerts at most once a `failedFreezeMs` per cause. A line that skipped its
+ * action is not an alert.
  */
 export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs = 60_000 } = {}) {
   const action = line.action;
@@ -78,7 +115,7 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
   if (!urgent) return null;
   const parts = about(line);
   const subject = parts.map((p) => p.shown).join("/");
-  const kind = `${level}:${action ?? ""}:${subject}:${message.slice(0, 60)}`;
+  const kind = `${level}:${action ?? ""}:${subject}:${line.errorCause ?? message.slice(0, 60)}`;
   const landedFreeze = action === "freeze" && line.signature;
   const window = action === "freeze" ? failedFreezeMs : windowMs;
   if (!landedFreeze && nowMs - (seen.get(kind) ?? -Infinity) < window) return null;

@@ -81,10 +81,10 @@ import { basename, dirname } from "node:path";
 import { Rpc, FailoverRpc, hostOf, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue, freezeRefusal } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, startSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
-import { alerter, stallWatch, scanAll, actionLine, jsonText } from "./alert.mjs";
+import { alerter, stallWatch, scanAll, actionLine, jsonText, errorCause } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
 import { attestLocal } from "../lib/limits.mjs";
@@ -373,20 +373,6 @@ async function guardianSend(ixs) {
 }
 
 /**
- * A simulated freeze's error that no retry or price changes: no SOL for the
- * fee, a fee payer that does not exist, or the Vault refusing it (a key no
- * longer a live guardian, say). Null for anything else (a node behind the
- * blockhash, or no error).
- */
-function freezeRefusal(err) {
-  if (!err) return null;
-  if (err === "InsufficientFundsForFee" || err === "AccountNotFound" || err?.InsufficientFundsForRent) return new Error(`the freeze cannot be paid for (${JSON.stringify(err)}): fund the guardian key`);
-  const code = err?.InstructionError?.[1]?.Custom;
-  if (code != null) return new Error(`the Vault refuses this freeze (custom error ${code}; 8006 is NotGuardian), whatever the price`);
-  return null;
-}
-
-/**
  * The freeze: its own sending loop, as `stop.mjs` (docs/09, finding 82). No
  * preflight; every endpoint, every 400 ms; a fresh signature at twice the
  * price after each 6 s without confirmation, from at least
@@ -453,7 +439,7 @@ async function beatOne(id, read, ix, logged) {
       outcome = "sent";
     } catch (e) {
       const failures = b.failures + 1;
-      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, target: logged.target, failures });
+      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, errorCause: errorCause(e), target: logged.target, failures });
       outcome = "failed";
     }
   }
@@ -627,7 +613,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
       return true;
     }
-    log(actionLine(action, { level: "error", error: e.message, ticketId: action.ticketId }));
+    log(actionLine(action, { level: "error", error: e.message, errorCause: errorCause(e), ticketId: action.ticketId }));
     if (action.type === "cancel") {
       const next = afterCancelFailure(cancelRetry.get(action.ticketId), e, Date.now());
       cancelRetry.set(action.ticketId, next);
