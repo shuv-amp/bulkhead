@@ -514,12 +514,15 @@ test("a guardian whose primary does not answer at start moves to the checked bac
     assert.equal(code, null, out);
     assert.ok(Date.now() - t0 < 8_000, `took ${Date.now() - t0} ms`);
     const [from, to] = [new URL(primary).host, new URL(backup.url).host].map((h) => h.replaceAll(".", "\\."));
-    assert.match(out, new RegExp(`RPC endpoint ${from} is failing; now using ${to}`));
+    assert.match(out, new RegExp(`RPC endpoint ${from} \\(rpc\\) is failing; now using ${to} \\(rpcs\\[0\\]\\)`));
     assert.match(out, new RegExp(`RPC endpoint ${from} \\(rpc\\): no answer within 2 s`));
     // The failover's line says why, and its alert shows it (finding 128).
     const [failover] = out.split("\n").filter((l) => l.includes(" is failing; now using ")).map((l) => JSON.parse(l));
     assert.ok(failover.error, out);
     assert.ok(alertFor(failover, new Map(), 0).detail.endsWith(` | ${failover.error}`), failover.error);
+    // It names the entries it moved between, which key its repeats: a move
+    // to another backup is news (alert.test.mjs).
+    assert.deepEqual([failover.endpointFrom, failover.endpoint], [`${new URL(primary).host} (rpc)`, `${new URL(backup.url).host} (rpcs[0])`]);
   } finally {
     backup.server.close();
     silent.closeAllConnections();

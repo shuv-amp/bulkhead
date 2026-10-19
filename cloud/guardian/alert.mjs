@@ -97,12 +97,13 @@ const ACTIONS = new Set(["freeze", "cancel", "veto_change", "veto_exit", "floor_
  * The alert for one log line, or null. `line` is the object the guardian
  * logs. A freeze that landed always alerts. Anything else repeats at most once
  * per `windowMs` for the same kind (`seen` remembers when each kind was last
- * sent); a kind is what an action acts on (a change, a proposal, a mint) and
- * why it failed (the line's `errorCause` when it has one, or else its
- * message's first 60 units), so two different vetoes are two alerts, while
- * the cancels of one sweep are one. A failed freeze, retried every poll,
- * alerts at most once a `failedFreezeMs` per cause. A line that skipped its
- * action is not an alert.
+ * sent); a kind is what an action acts on (a change, a proposal, a mint,
+ * the endpoints a failover moved between) and why it failed (the line's
+ * `errorCause` when it has one, or else its message's first 60 units), so
+ * two different vetoes are two alerts, while the cancels of one sweep are
+ * one. A failed freeze, retried every poll, alerts at most once a
+ * `failedFreezeMs` per cause. A line that skipped its action is not an
+ * alert.
  */
 export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs = 60_000 } = {}) {
   const action = line.action;
@@ -152,15 +153,18 @@ export function alertFor(line, seen, nowMs, { windowMs = 600_000, failedFreezeMs
  * word that says it is already in a text (`needle`). alertFor keys its
  * repeats on the shown parts ("change 4" and "proposal 4" differ) and names
  * them in the detail, so the webhook never keys on a part it doesn't show.
- * A program or mint is said by its bare key, and a change or proposal in any
- * case ("Change 4"). `what` and `target` may hold a key, so they and the keys
- * match exactly: base58 case matters.
+ * A program, mint or endpoint is said bare, and a change or proposal in any
+ * case ("Change 4"). An endpoint is an entry's name (`host (rpc)`, `host
+ * (rpcs[0])`), never its URL, which may hold an API key. `what` and
+ * `target` may hold a key, so they and the keys match exactly: base58 case
+ * matters.
  */
 function about(line) {
   return [
     [line.what, ""], [line.target, "on "],
     [line.changeId, "change ", false, true], [line.proposalId, "proposal ", false, true],
     [line.program, "program ", true], [line.mint, "mint ", true],
+    [line.endpointFrom, "from ", true], [line.endpoint, "endpoint ", true],
   ].filter(([v]) => v != null && v !== "") // says() never ends on an empty word
     .map(([v, label, bare = false, fold = false]) => ({ shown: `${label}${v}`, needle: bare ? String(v) : `${label}${v}`, fold }));
 }

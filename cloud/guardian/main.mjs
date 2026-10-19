@@ -135,7 +135,11 @@ const genesisSeen = []; // by endpoint: the genesis hash it gave
 let clusterChecked = false; // the start's check is over: later news is logged
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(rpcUrls, {
-    onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, error: e?.message?.slice(0, 160) }),
+    // By entry, as a URL may be listed twice; both key its alert (finding 129).
+    onSwitch: (from, to, e, fromAt, toAt) => {
+      const [endpointFrom, endpoint] = [endpointName(fromAt), endpointName(toAt)];
+      log({ level: "error", msg: `RPC endpoint ${endpointFrom} is failing; now using ${endpoint}`, error: e?.message?.slice(0, 160), endpointFrom, endpoint });
+    },
     genesis: GENESIS[cfg.cluster] ?? null,
     onCluster: (url, got, at) => {
       genesisSeen[at] = got;
