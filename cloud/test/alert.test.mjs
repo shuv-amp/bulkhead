@@ -194,6 +194,23 @@ test("a failover to another endpoint is news even when its host falls past the k
   assert.ok(alertFor(line(`${q} (rpcs[4])`, b), seen, 6), "from another entry on a long host");
 });
 
+test("a backup's wrong cluster is news for each entry, even past the key's 60 units", () => {
+  // main.mjs logs `RPC endpoint <entry> serves another cluster than ...` once
+  // per endpoint, when its genesis hash is first learned after the start. For
+  // a host of 40 units or more, the entry's index falls past unit 60, so a
+  // second entry on that host was one kind with the first and never heard.
+  // The line names its entry in a field, as the failover line does (finding
+  // 129). This pins alertFor's side at such a host; restart.test.mjs pins
+  // that main.mjs's real line carries the field.
+  const q = "a-long-endpoint-name.solana-mainnet.quiknode.pro";
+  const line = (entry) => ({ level: "error", msg: `RPC endpoint ${entry} serves another cluster than mainnet (genesis X): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config`, endpoint: entry });
+  const seen = new Map();
+  const first = alertFor(line(`${q} (rpcs[0])`), seen, 0);
+  assert.equal(first.detail, line(`${q} (rpcs[0])`).msg, "the message names the entry already");
+  assert.ok(alertFor(line(`${q} (rpcs[1])`), seen, 1), "another entry on the same host alerts");
+  assert.equal(alertFor(line(`${q} (rpcs[1])`), seen, 2), null, "the same entry repeats once a window");
+});
+
 test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {
   const slack = "https://hooks.slack.com/services/T/B/x";
   const discord = "https://discord.com/api/webhooks/1/x";

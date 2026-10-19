@@ -144,8 +144,9 @@ const rpc = cfg.rpcs?.length
     onCluster: (url, got, at) => {
       genesisSeen[at] = got;
       if (!clusterChecked) return;
-      if (got !== GENESIS[cfg.cluster]) log({ level: "error", msg: `RPC endpoint ${endpointName(at)} serves another cluster than ${cfg.cluster} (genesis ${got}): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config` });
-      else log({ msg: `RPC endpoint ${endpointName(at)} answers on ${cfg.cluster}: it may be used from now on` });
+      const endpoint = endpointName(at);
+      if (got !== GENESIS[cfg.cluster]) log({ level: "error", msg: `RPC endpoint ${endpoint} serves another cluster than ${cfg.cluster} (genesis ${got}): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config`, endpoint });
+      else log({ msg: `RPC endpoint ${endpoint} answers on ${cfg.cluster}: it may be used from now on` });
     },
   })
   : new Rpc(cfg.rpc);
