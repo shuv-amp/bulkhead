@@ -1,6 +1,7 @@
 // Guardian alerts (cloud/guardian/alert.mjs): what reaches a person, and that
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText, MESSAGE_MAX, MESSAGE_TAIL, errorCause } from "../guardian/alert.mjs";
 import { Rpc, b58encode } from "../lib/solana.mjs";
@@ -128,6 +129,47 @@ test("a long RPC error is cut in the detail, so what follows it reaches Discord"
   const P = "Prog1111111111111111111111111111111111111111", y = "y".repeat(800);
   assert.equal(detail(`${y}x${P} ${m(T - 45)}`, { program: P }), `${y.slice(0, H)}…${P} ${m(T - 45)} | program ${P}`);
   assert.equal(detail(`${y} ${P} ${m(T - 46)}`, { program: P }), `${y.slice(0, H)}… ${P} ${m(T - 46)}`);
+});
+
+test("a line with a message and an RPC's error alerts with both (finding 128)", () => {
+  // main.mjs logs what went wrong in `msg` and the RPC's words in `error`
+  // (a failover, a refused compute budget, a skipped replay). The alert
+  // showed the message alone: an endpoint "is failing", but not why.
+  const msg = "the freeze ran and failed in its compute budget; sending it without one: check the budget settings";
+  const error = 'sendTransaction: {"code":-32002,"message":"Transaction simulation failed: Error processing Instruction 2: Computational budget exceeded"}';
+  const a = alertFor({ level: "error", msg, error }, new Map(), 0);
+  assert.equal(a.detail, `${msg} | ${error}`);
+  // It repeats, and is urgent, on the message, as before: an error's
+  // figures change between polls, and its words are the RPC's.
+  const seen = new Map(), failover = { level: "error", msg: "RPC endpoint a.invalid is failing; now using b.invalid" };
+  assert.ok(alertFor({ ...failover, error: "fetch failed" }, seen, 0));
+  assert.equal(alertFor({ ...failover, error: "getSlot RPC -32005 node is behind by 42 slots" }, seen, 1), null);
+  assert.equal(alertFor({ level: "warn", msg: "freeze attempt 1 did not confirm; signing again", error: "log truncated" }, new Map(), 0), null);
+  assert.ok(alertFor({ level: "warn", msg: "log truncated", error: "x" }, new Map(), 0));
+  // The two are cut as one, so a long error keeps its end and the parts
+  // after it; a part said in either is not named again.
+  assert.equal(alertFor({ ...failover, error: "change 4 x", changeId: 4 }, new Map(), 0).detail, `${failover.msg} | change 4 x`);
+  const long = `${error.slice(0, -2)}, logs: ${"l".repeat(5_000)} result: null}`;
+  const d = alertFor({ level: "error", msg: `change 4 ${msg}`, error: long, changeId: 4, ticketId: 9 }, new Map(), 0).detail;
+  const [H, T] = [MESSAGE_MAX - MESSAGE_TAIL - 1, MESSAGE_TAIL];
+  assert.equal(d, `${`change 4 ${msg} | ${long}`.slice(0, H)}…${long.slice(-T)} | ticket 9`);
+  // A line with only one of them is as before.
+  assert.equal(alertFor({ level: "error", error }, new Map(), 0).detail, error);
+  assert.equal(alertFor({ level: "error", msg }, new Map(), 0).detail, msg);
+  assert.equal(alertFor({ level: "error", msg, error: "" }, new Map(), 0).detail, msg, "an empty error is not shown");
+  assert.equal(alertFor({ level: "error", msg: "", error }, new Map(), 0).detail, error, "nor an empty message");
+  const blank = new Map();
+  assert.ok(alertFor({ level: "error", msg: "", error: "A" }, blank, 0));
+  assert.ok(alertFor({ level: "error", msg: "", error: "B" }, blank, 1), "keyed on the error it shows");
+  // The guardian names an RPC's words `error` when it logs them in a
+  // field of their own: a failover's used to be `cause`, a refused
+  // budget's `refused`. This scan sees only a field whose value is a bare
+  // `.message`, maybe through `String(`; a template or `String(e)` escapes
+  // it. A test reaches only the failover's line (restart.test.mjs).
+  const main = readFileSync(new URL("../guardian/main.mjs", import.meta.url), "utf8");
+  const keys = [...main.matchAll(/\b(\w+): (?:String\()?\w+\??\.message\b/g)].map((m) => m[1]);
+  assert.ok(keys.length >= 6, String(keys.length));
+  assert.deepEqual([...new Set(keys)], ["error"]);
 });
 
 test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {

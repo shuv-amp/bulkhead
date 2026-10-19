@@ -135,7 +135,7 @@ const genesisSeen = []; // by endpoint: the genesis hash it gave
 let clusterChecked = false; // the start's check is over: later news is logged
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(rpcUrls, {
-    onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, cause: e?.message?.slice(0, 160) }),
+    onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, error: e?.message?.slice(0, 160) }),
     genesis: GENESIS[cfg.cluster] ?? null,
     onCluster: (url, got, at) => {
       genesisSeen[at] = got;
@@ -369,7 +369,7 @@ async function sendOptions() {
  */
 async function guardianSend(ixs) {
   return sendWithFallback(rpc, guardian, ixs, [], await sendOptions(), (e) =>
-    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", refused: e.message.slice(0, 300) }));
+    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", error: e.message.slice(0, 300) }));
 }
 
 /**
