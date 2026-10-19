@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, floorCheck, checkFloors, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
+import { afterHeartbeat, assess, guardianSetCheck, breach, decode, decisionTime, floorAlerts, floorCheck, checkFloors, guardianStanding, heartbeatEveryAfterAccount, heartbeatEverySeconds, judgeReplayedWindow, newState, observeProtocolFreeze, openIncident, observeFreezeEnd, incidentHold, pendingCancels, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, queueFailedVeto, readChangeVeto, readPendingChange, rememberTicket, changeApproval, floorApproval, checkPolicy, retirePendingFreeze, scaleBy, vetoRetryDisposition, consumeApproval, parseApproval, checkProposedChange, afterCancelFailure, programErrorCode, freezeRefusal, CANCEL_RETRY_MS, DEFAULT_POLICY, HEARTBEAT_RECHECK_MS } from "../guardian/policy.mjs";
 import { u64le, i64le, concat, key, b58encode as b58encodeForTest } from "../lib/solana.mjs";
 
 const USDC = 1_000_000n;
@@ -867,4 +867,22 @@ test("a stale ticket scan after a close does not count the ticket again; ids go 
   // 72h later, another close prunes it.
   assess(s, { kind: "ticket_closed", ticketId: 8n }, { now: now + 3 * 86_400 + 61 }, DEFAULT_POLICY, false);
   assert.equal(s.tickets.has(7n), false);
+});
+
+test("a simulated freeze ends its retries only on the refusals it names", () => {
+  // A non-null result ends sendEscalating's loop at its next check.
+  for (const err of [null, undefined, "BlockhashNotFound", { InstructionError: [0, "ProgramFailedToComplete"] }]) {
+    assert.equal(freezeRefusal(err), null, JSON.stringify(err));
+  }
+  for (const err of ["InsufficientFundsForFee", "AccountNotFound", { InsufficientFundsForRent: { account_index: 0 } }]) {
+    const e = freezeRefusal(err);
+    assert.ok(e.message.includes(`cannot be paid for (${JSON.stringify(err)})`), e.message);
+    assert.equal(e.simulatedErr, err);
+  }
+  // Custom 0 is a code too.
+  for (const code of [8006, 0]) {
+    const vault = { InstructionError: [0, { Custom: code }] };
+    assert.match(freezeRefusal(vault).message, new RegExp(`the Vault refuses this freeze \\(custom error ${code};`));
+    assert.equal(freezeRefusal(vault).simulatedErr, vault);
+  }
 });

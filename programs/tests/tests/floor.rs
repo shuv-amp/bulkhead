@@ -1137,7 +1137,8 @@ fn every_floor_account_substitution_is_refused() {
     let mut keys: Vec<&Keypair> = vec![&p.owner, &q.owner, &p.team, &q.team, &stranger];
     keys.extend(p.g.iter());
     keys.extend(q.g.iter());
-    let mut s = Sweep::new(&env, err::INVALID_INSTRUCTION, decoys, &keys);
+    let mut s = Sweep::new(&env, env.floor, err::INVALID_INSTRUCTION, decoys, &keys);
+    s.forgery("A's config, forged", f.config);
     // Floor names the loader by its fixed id in every loader call (loader.rs),
     // so the runtime, not Floor, refuses any other account there.
     let loader = |at| backstop(at, &[InstructionError::MissingAccount], "loader-v3: invoked by its fixed id; anything else leaves the callee missing");
@@ -1245,6 +1246,22 @@ fn every_floor_account_substitution_is_refused() {
     s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[loader(3)]);
 
     println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds; {} refused at a backstop slot, not by Floor", s.attempts, s.runs, s.unsignable, s.backstopped);
+    // Every run that loads A's config is offered its copy (registration and
+    // the release to none are of other programs).
+    let loads_a = [
+        "heartbeat", "propose upgrade", "veto", "cancel", "execute upgrade", "close orphaned buffer",
+        "pin snapshot", "abort (stop)", "restore snapshot", "stage abort", "approve",
+        "execute approved fix", "propose a longer delay", "replace recovery", "eject", "execute release",
+    ];
+    let forged: Vec<(String, String)> = loads_a.iter().map(|r| (r.to_string(), "A's config, forged".to_string())).collect();
+    assert_eq!(s.forged, forged);
+    assert_eq!(s.unused_forgeries(), Vec::<String>::new());
+    // The one other config at a swept slot, the third program's, is copied
+    // by the sweep itself.
+    assert_eq!(s.copied, vec![("execute release to none".to_string(), f3.config)]);
+    // The stop names the config twice (as the spill, finding 88): swapped at
+    // both, a config only its owner check refuses meets that check.
+    assert_eq!(s.together, vec![("abort (stop)".to_string(), f.config)]);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
 

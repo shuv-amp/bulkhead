@@ -417,22 +417,22 @@ async function fakeRpc(answers) {
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
-// Starts the guardian on `rpc` and `rpcs` for cluster devnet; resolves with
-// its exit code and output once it exits, or once `until` matches its output
-// (then it is killed, code null).
-async function startGuardian(rpc, rpcs, until) {
+// Starts the guardian on `rpc` and `rpcs` for cluster devnet, with `more`
+// config keys; resolves with its exit code and output once it exits, or once
+// `until` matches its output or `killMs` passes (then it is killed, code null).
+async function startGuardian(rpc, rpcs, until, more = {}, killMs = 20_000) {
   const dir = mkdtempSync(`${tmpdir()}/bh-cluster-`);
   const keyPath = `${dir}/guardian.json`;
   Keypair.generate().save(keyPath);
   const cfgPath = `${dir}/g.json`;
   writeFileSync(cfgPath, JSON.stringify({
     rpc, rpcs, cluster: "devnet", vaultProgram: "11111111111111111111111111111111", protocolProgram: "11111111111111111111111111111111",
-    mints: [], guardianKey: keyPath, stateFile: `${dir}/state.json`,
+    mints: [], guardianKey: keyPath, stateFile: `${dir}/state.json`, ...more,
   }));
   const main = fileURLToPath(new URL("../guardian/main.mjs", import.meta.url));
   const child = spawn(process.execPath, [main, cfgPath], { stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
-  const timer = setTimeout(() => child.kill(), 20_000);
+  const timer = setTimeout(() => child.kill(), killMs);
   for (const s of [child.stdout, child.stderr]) s.on("data", (c) => { out += c; if (until?.test(out)) child.kill(); });
   const code = await new Promise((r) => child.on("exit", r));
   clearTimeout(timer);
@@ -464,6 +464,52 @@ test("a guardian whose backup endpoint does not answer starts, and says its clus
     assert.doesNotMatch(out, /guardian stopped/);
   } finally {
     primary.server.close();
+  }
+});
+
+test("a backup silent at start that later answers from another cluster is named in a field, which keys its alert", async () => {
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.devnet, getAccountInfo: { context: { slot: 1 }, value: null }, getSlot: 1 });
+  // No hash at start's check; another cluster's at the first freshness check.
+  let asked = 0;
+  const backup = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => { b += c; });
+    req.on("end", () => {
+      const { id, method } = JSON.parse(b);
+      const result = method === "getGenesisHash" && asked++ > 0 ? GENESIS.testnet : null;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+    });
+  });
+  await new Promise((r) => backup.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${backup.address().port}`;
+    // The first freshness check is 10 s into the loop: a slow start keeps it.
+    const { code, out } = await startGuardian(primary.url, [url], /serves another cluster than devnet.*\n/, { freshnessCheckS: 10 }, 60_000);
+    assert.equal(code, null, out);
+    // Whole lines only: the kill may come in the middle of the next one.
+    const lines = out.split("\n").slice(0, -1).filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+    const silent = lines.find((l) => l.msg.includes("no answer to getGenesisHash"));
+    const wrong = lines.find((l) => l.msg.includes("serves another cluster than devnet"));
+    assert.ok(silent && wrong, out);
+    // Learned at that check, not by a call moving to the backup before it.
+    assert.ok(Date.parse(wrong.t) - Date.parse(silent.t) >= 9_000, `${silent.t} ${wrong.t}`);
+    // The message names the entry at unit 13, past unit 60 for a host of
+    // 40 units or more (alert.test.mjs; this host is shorter); the field
+    // keys it whatever the host.
+    const name = `${new URL(url).host} (rpcs[0])`;
+    assert.equal(wrong.endpoint, name);
+    assert.ok(wrong.msg.startsWith(`RPC endpoint ${name} serves another cluster than devnet (genesis ${GENESIS.testnet})`), wrong.msg);
+    // The field, not only the message, keys the real line's alert: it repeats
+    // once a window, and the same message with another entry's field alerts.
+    const seen = new Map();
+    assert.ok(alertFor(wrong, seen, 0));
+    assert.equal(alertFor(wrong, seen, 1), null);
+    assert.ok(alertFor({ ...wrong, endpoint: `${new URL(url).host} (rpcs[1])` }, seen, 2));
+  } finally {
+    primary.server.close();
+    backup.closeAllConnections();
+    backup.close();
   }
 });
 
@@ -514,8 +560,15 @@ test("a guardian whose primary does not answer at start moves to the checked bac
     assert.equal(code, null, out);
     assert.ok(Date.now() - t0 < 8_000, `took ${Date.now() - t0} ms`);
     const [from, to] = [new URL(primary).host, new URL(backup.url).host].map((h) => h.replaceAll(".", "\\."));
-    assert.match(out, new RegExp(`RPC endpoint ${from} is failing; now using ${to}`));
+    assert.match(out, new RegExp(`RPC endpoint ${from} \\(rpc\\) is failing; now using ${to} \\(rpcs\\[0\\]\\)`));
     assert.match(out, new RegExp(`RPC endpoint ${from} \\(rpc\\): no answer within 2 s`));
+    // The failover's line says why, and its alert shows it (finding 128).
+    const [failover] = out.split("\n").filter((l) => l.includes(" is failing; now using ")).map((l) => JSON.parse(l));
+    assert.ok(failover.error, out);
+    assert.ok(alertFor(failover, new Map(), 0).detail.endsWith(` | ${failover.error}`), failover.error);
+    // It names the entries it moved between, which key its repeats: a move
+    // to another backup is news (alert.test.mjs).
+    assert.deepEqual([failover.endpointFrom, failover.endpoint], [`${new URL(primary).host} (rpc)`, `${new URL(backup.url).host} (rpcs[0])`]);
   } finally {
     backup.server.close();
     silent.closeAllConnections();

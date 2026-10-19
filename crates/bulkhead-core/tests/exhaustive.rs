@@ -6,9 +6,13 @@
 //! circuits (see src/proofs.rs and docs/09-VERIFICATION.md §5). Enumerating
 //! every input in a domain is as rigorous as bounded model checking on that
 //! domain; the domains are stated on each test. Full-width behaviour is covered
-//! by the property tests, the differential runner and docs/03 §10.
+//! by the property tests, the differential runner and docs/03 §10. Two tests
+//! are not arithmetic: `g2_and_fail_closed_without_prices` checks the grant
+//! when no mint is priced, and `g3_backed_amount_is_exact_on_small_ledgers`
+//! pins the backed amount at an edge random worlds seldom reach (Kani not
+//! tried for it).
 
-use bulkhead_core::ledger::{Ledger, Mint, Pricing};
+use bulkhead_core::ledger::{Ledger, Mint, PricedAsset, Pricing};
 use bulkhead_core::limiter::{
     available_now, capacity_from_ref, cost_ms, request, rescale_windows, Bucket, Decision,
     LimiterParams, LimiterState,
@@ -122,6 +126,95 @@ fn g2_and_fail_closed_without_prices() {
             }
         }
     }
+}
+
+/// Two priced mints. Every other position in -6..=12 and every own position
+/// in -6..=12 (0 is no position), for each mint every (low, high) price in
+/// (1, 1), (2, 2), (3, 3) and (1, 3) and every haircut 5_000 or 10_000 with
+/// liability weight 10_000 or 15_000, every request in 0..=40: the backed
+/// amount is exactly the largest `b <= request` after which the owner owes
+/// nothing, or health (collateral floored at its low price and haircut,
+/// debts ceiled at their high price and weight) is `>= 0` (G3); 0 if there
+/// is none. In 764,280 of the 3,789,056 cases some `b` is valid and one unit
+/// more leaves health at exactly -1, an edge the property test's random
+/// worlds seldom reach (it missed a bound of `>= -1`). Not covered here: a
+/// full ledger, unpriced or unallowlisted mints, a price or weight of 0
+/// (with `hi` = 0 the no-collateral shortcut grants less than the rule;
+/// docs/09 §2, fuzzing), and other exponents or decimals (`value_v` alone:
+/// `value_rounding_is_exact`).
+#[test]
+fn g3_backed_amount_is_exact_on_small_ledgers() {
+    // (low, high) price and (haircut, liability weight) of one mint.
+    type Terms = ((u32, u32), (u32, u32));
+    // expo = decimals - VALUE_DECIMALS, so a value is units * price * bps / 10^4.
+    let priced = |((lo, hi), (h, w)): Terms| {
+        Pricing::Priced(PricedAsset {
+            lo: lo.into(),
+            hi: hi.into(),
+            expo: -18,
+            decimals: 0,
+            haircut_bps: h,
+            liability_bps: w,
+        })
+    };
+    let worth = |n: i128, ((lo, hi), (h, w)): Terms| -> i128 {
+        if n >= 0 {
+            n * i128::from(lo) * i128::from(h) / 10_000
+        } else {
+            -((-n * i128::from(hi) * i128::from(w) + 9_999) / 10_000)
+        }
+    };
+    let terms: Vec<Terms> = [(1, 1), (2, 2), (3, 3), (1, 3)]
+        .into_iter()
+        .flat_map(|p| {
+            [
+                (5_000, 10_000),
+                (5_000, 15_000),
+                (10_000, 10_000),
+                (10_000, 15_000),
+            ]
+            .map(|hw| (p, hw))
+        })
+        .collect();
+    let (mut checked, mut at_minus_one) = (0u64, 0u64);
+    for other in -6..=12i128 {
+        for own in -6..=12i128 {
+            let mut positions = vec![];
+            if other != 0 {
+                positions.push((mint(1), other));
+            }
+            if own != 0 {
+                positions.push((mint(2), own));
+            }
+            let l = Ledger::from_positions(&positions).unwrap();
+            for &t1 in &terms {
+                for &t2 in &terms {
+                    let lookup = |m: &Mint| priced(if *m == mint(1) { t1 } else { t2 });
+                    let health = |b: i128| worth(other, t1) + worth(own - b, t2);
+                    let valid = |b: i128| (other >= 0 && own - b >= 0) || health(b) >= 0;
+                    // The largest valid b <= a, if any, carried from a - 1.
+                    let mut best: Option<i128> = None;
+                    for a in 0..=40i128 {
+                        if valid(a) {
+                            best = Some(a);
+                        }
+                        let b = l.backed_amount(&mint(2), a as u64, &lookup);
+                        assert_eq!(
+                            b as i128,
+                            best.unwrap_or(0),
+                            "other={other} own={own} {t1:?} {t2:?} a={a}"
+                        );
+                        checked += 1;
+                        if best.is_some_and(|m| m < a && health(m + 1) == -1) {
+                            at_minus_one += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 19 * 19 * 16 * 16 * 41);
+    assert_eq!(at_minus_one, 764_280);
 }
 
 /// Every pair of buckets with capacity and window in 1..=3, every sequence of

@@ -322,6 +322,105 @@ fn a_price_for_the_wrong_feed_is_refused() {
     assert_eq!(w.env.fails(&[ix], &[&borrower]), verr::BAD_PRICE_ACCOUNT);
 }
 
+/// An asset record prices a release only if it is this protocol's record
+/// for that mint at its own address (custody.rs, price_table). Each forged
+/// record below fails one of the three terms and passes the other two, so
+/// each term is pinned on its own. No instruction writes such a record: the
+/// test writes the accounts directly. A quote with the real record is the
+/// control.
+#[test]
+fn a_price_needs_the_protocols_own_asset_record_for_that_mint() {
+    let mut w = World::new();
+    let whale = w.user();
+    let to = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let quote = |w: &World, asset: Address| {
+        w.m.quote_ix(&w.env, &w.usdc, &to, &whale.pubkey(), 1_000 * USDC, &[(asset, w.usdc.price)])
+    };
+    let q = quote(&w, w.usdc.asset);
+    assert_eq!(outcome(&w.env.ok(&[q], &[])).backed, 1_000 * USDC, "control: the real record");
+    let real = w.env.svm.get_account(&w.usdc.asset).unwrap();
+    // Asset data: 8-byte discriminator, then protocol, then mint.
+    for (range, term) in [(8..40, "another protocol's record"), (40..72, "another mint's record")] {
+        let mut forged = real.clone();
+        forged.data[range].copy_from_slice(Address::new_unique().as_ref());
+        w.env.svm.set_account(w.usdc.asset, forged).unwrap();
+        let q = quote(&w, w.usdc.asset);
+        assert_eq!(w.env.fails(&[q], &[]), verr::BAD_PRICE_ACCOUNT, "{term}");
+    }
+    w.env.svm.set_account(w.usdc.asset, real.clone()).unwrap();
+    // The real record's bytes at another address the Vault owns.
+    let elsewhere = Address::new_unique();
+    w.env.svm.set_account(elsewhere, real).unwrap();
+    let q = quote(&w, elsewhere);
+    assert_eq!(w.env.fails(&[q], &[]), verr::BAD_PRICE_ACCOUNT, "the record at another address");
+}
+
+/// The protocol and vault records are read only at their own PDAs
+/// (lib.rs, load_protocol and load_vault re-derive them). A copy of either
+/// at another address the Vault owns is refused, by its own code. The
+/// copied vault still names this protocol, so load_vault's other check
+/// (the protocol it belongs to) passes and only the address check refuses.
+/// No instruction makes such a copy: the test writes the account directly.
+#[test]
+fn protocol_and_vault_records_are_read_only_at_their_own_addresses() {
+    let mut w = World::new();
+    let whale = w.user();
+    let to = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let q = w.m.quote_ix(&w.env, &w.usdc, &to, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+    assert_eq!(outcome(&w.env.ok(&[q], &[])).backed, 1_000 * USDC, "control: the real records");
+    for (real, code, what) in [
+        (w.m.protocol, verr::WRONG_ADDRESS, "the protocol record"),
+        (w.usdc.vault, verr::WRONG_VAULT, "the vault record"),
+    ] {
+        let copy = Address::new_unique();
+        let acct = w.env.svm.get_account(&real).unwrap();
+        w.env.svm.set_account(copy, acct).unwrap();
+        let mut q = w.m.quote_ix(&w.env, &w.usdc, &to, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+        for m in q.accounts.iter_mut().filter(|m| m.pubkey == real) {
+            m.pubkey = copy;
+        }
+        assert_eq!(w.env.fails(&[q], &[]), code, "{what} at another address");
+    }
+}
+
+/// An owner's backing record is read only if it names this protocol and
+/// that owner, and sits at its own PDA (custody.rs, read_backing). As for
+/// asset records above, each forged record fails one of the three terms
+/// and passes the other two, and the test writes the accounts directly.
+#[test]
+fn a_backing_record_is_read_only_for_its_own_protocol_owner_and_address() {
+    let mut w = World::new();
+    let whale = w.user();
+    let to = w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let backing = w.m.backing(&whale.pubkey());
+    let quote = |w: &World, at: Address| {
+        let mut q = w.m.quote_ix(&w.env, &w.usdc, &to, &whale.pubkey(), 1_000 * USDC, &w.usdc_prices(true));
+        for m in q.accounts.iter_mut().filter(|m| m.pubkey == backing) {
+            m.pubkey = at;
+        }
+        q
+    };
+    let q = quote(&w, backing);
+    assert_eq!(outcome(&w.env.ok(&[q], &[])).backed, 1_000 * USDC, "control: the real record");
+    let real = w.env.svm.get_account(&backing).unwrap();
+    // Backing data: 8-byte discriminator, then protocol, then owner.
+    for (range, term) in [(8..40, "another protocol's record"), (40..72, "another owner's record")] {
+        let mut forged = real.clone();
+        forged.data[range].copy_from_slice(Address::new_unique().as_ref());
+        w.env.svm.set_account(backing, forged).unwrap();
+        let q = quote(&w, backing);
+        assert_eq!(w.env.fails(&[q], &[]), verr::WRONG_ADDRESS, "{term}");
+    }
+    w.env.svm.set_account(backing, real.clone()).unwrap();
+    let elsewhere = Address::new_unique();
+    w.env.svm.set_account(elsewhere, real).unwrap();
+    let q = quote(&w, elsewhere);
+    assert_eq!(w.env.fails(&[q], &[]), verr::WRONG_ADDRESS, "the record at another address");
+}
+
 // ---------------------------------------------------------------------------
 // S1: a compromised admin. Golden G-1 on-chain, then freeze and cancel.
 // ---------------------------------------------------------------------------
@@ -2768,6 +2867,10 @@ fn every_account_substitution_is_refused() {
     );
     let (_, t1) = w.m.next_ticket(&w.env);
     s.twin("the USDC vault and ticket t1", with_ticket(t1), verr::WRONG_VAULT);
+    // A ticket is checked by its owner and the addresses it records, not by
+    // its own address: only the owner check refuses a copy under another
+    // owner.
+    s.forgery("ticket t1, forged", t1);
     s.run(
         &mut w.env,
         "admin payout (queued)",
@@ -2817,6 +2920,7 @@ fn every_account_substitution_is_refused() {
     );
     let (_, t2) = w.m.next_ticket(&w.env);
     s.twin("the USDC vault and ticket t2", with_ticket(t2), verr::WRONG_VAULT);
+    s.forgery("ticket t2, forged", t2);
     w.env.ok(&[ix], &[&w.m.admin]);
     // Past the ticket's ETA, heartbeating on the way (a guardian silent
     // longer than its 7-day interval stops counting).
@@ -2944,6 +3048,10 @@ fn every_account_substitution_is_refused() {
     );
 
     // --- governance: propose, veto, cancel, execute -------------------------
+    // A change too (see ticket t1).
+    for n in 0..3 {
+        s.forgery(&format!("change {n}, forged"), w.m.change_address(n));
+    }
     let mut looser = Limits::default_limits();
     looser.short_bps = 300;
     let vault = w.usdc.vault;
@@ -3327,12 +3435,64 @@ fn every_account_substitution_is_refused() {
     // the runs whose vault check a ticket's check would otherwise hide.
     assert_eq!(s.unused_twins(), Vec::<String>::new());
     assert_eq!(sp.unused_twins(), Vec::<String>::new());
+    // Each run that loads a ticket or a change is offered its copy.
+    let forged: Vec<(String, String)> = [
+        ("extend ticket", "ticket t1"),
+        ("settle ticket", "ticket t2"),
+        ("cancel ticket", "ticket t1"),
+        ("veto change", "change 0"),
+        ("cancel change", "change 1"),
+        ("execute change", "change 2"),
+    ]
+    .iter()
+    .map(|(run, what)| (run.to_string(), format!("{what}, forged")))
+    .collect();
+    assert_eq!(s.forged, forged);
+    assert_eq!(s.unused_forgeries(), Vec::<String>::new());
+    // Every other account of the Vault's at a swept slot is copied by the
+    // sweep itself, Harbor's calls included: in the first world the
+    // protocol, the USDC vault, its asset record and the whale's backing;
+    // in the seal's, the protocol, an asset an upsert rewrites and the
+    // three vaults the seal reads. A run that adds or drops one changes
+    // the runs offered a copy (56 and 11).
+    let copied = |c: &[(String, Address)]| {
+        c.iter()
+            .map(|(_, a)| *a)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let main = [
+        w.m.protocol,
+        w.usdc.vault,
+        w.usdc.asset,
+        w.m.backing(&whale.pubkey()),
+    ];
+    assert_eq!(copied(&s.copied), std::collections::HashSet::from(main));
+    let seal = [
+        p.m.protocol,
+        p.usdc.asset,
+        p.usdc.vault,
+        p.sol.vault,
+        third_vault,
+    ];
+    assert_eq!(copied(&sp.copied), std::collections::HashSet::from(seal));
+    assert!(s.copied.contains(&("heartbeat".into(), w.m.protocol)));
+    assert!(s
+        .copied
+        .contains(&("withdraw (backed)".into(), w.usdc.asset)));
+    assert_eq!((s.copied.len(), sp.copied.len()), (56, 11));
     for (run, set) in [
         ("settle ticket", "the USDC vault and ticket t2"),
         ("cancel ticket", "the USDC vault and ticket t1"),
     ] {
         assert!(s.twinned.contains(&(run.into(), set.into())), "{run}: {set} not swapped");
     }
+    // No key that signs nowhere stands at two checked slots of a Vault
+    // transaction without a backstop: registration by the caller PDA names
+    // it to Harbor (slot 1) and to the Vault (slot 6), and Harbor's seeds
+    // check refuses any swap of slot 1 first. A run that adds such a key
+    // fails here until its case is looked at and pinned.
+    assert_eq!(s.together, vec![]);
+    assert_eq!(sp.together, vec![]);
     let mut all = s.unexpected;
     all.extend(sp.unexpected);
     assert!(

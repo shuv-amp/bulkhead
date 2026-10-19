@@ -1,8 +1,12 @@
 // Guardian alerts (cloud/guardian/alert.mjs): what reaches a person, and that
 // sending never blocks or breaks the guardian.
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText } from "../guardian/alert.mjs";
+import { alertFor, alerter, webhookBody, stallWatch, actionLine, ALERT_FORMATS, formatFor, jsonText, MESSAGE_MAX, MESSAGE_TAIL, errorCause } from "../guardian/alert.mjs";
+import { Rpc, b58encode } from "../lib/solana.mjs";
+import { Keypair, send } from "../lib/signer.mjs";
+import { freezeRefusal } from "../guardian/policy.mjs";
 
 test("actions, errors and urgent warnings alert; routine lines do not", () => {
   const seen = new Map();
@@ -86,6 +90,125 @@ test("webhook bodies show an RPC's error text as typed, not as mentions, links o
   assert.equal(webhookBody(half, "discord").content, "⚠️ Bulkhead guardian: <t> & co\n```\nx\uFFFD | ticket 7\n```");
   assert.equal(webhookBody({ ...a, detail: "" }, "slack").text, "⚠️ Bulkhead guardian: &lt;t&gt; &amp; co");
   assert.equal(webhookBody({ ...a, detail: "" }, "discord").content, "⚠️ Bulkhead guardian: <t> & co");
+});
+
+test("a long RPC error is cut in the detail, so what follows it reaches Discord", () => {
+  // A failed send quotes the RPC's JSON error, simulation logs included
+  // (solana.mjs), and main.mjs logs it uncut. Discord's body is cut to 2000
+  // units, so the ids after the error were lost. Every part at its longest:
+  // keys of 44, ids of 2^64 - 1, a reason as long as the guardian's longest
+  // (main.mjs, stalled). A failed action has no tx.
+  const K = "K".repeat(44), max = 2n ** 64n - 1n;
+  const line = { level: "error", action: "veto_change", reason: "r".repeat(240), error: `{"code":-32002,"logs":"${"l".repeat(12_000)}"}`,
+    what: K, target: `${K}t`, changeId: max, proposalId: max, program: `${K}p`, mint: `${K}m`, ticketId: max };
+  const a = alertFor(line, new Map(), 0);
+  assert.equal(a.title, "Bulkhead guardian: veto_change failed");
+  const [H, T] = [MESSAGE_MAX - MESSAGE_TAIL - 1, MESSAGE_TAIL];
+  assert.ok(a.detail.includes(`${line.reason} | ${line.error.slice(0, H)}…${line.error.slice(-T)} | `), a.detail.slice(0, 300));
+  const tail = ` | change ${max} | proposal ${max} | program ${K}p | mint ${K}m | ticket ${max}`;
+  assert.ok(a.detail.endsWith(tail));
+  const { content } = webhookBody(a, "discord", K);
+  assert.ok(content.length <= 2000, String(content.length));
+  assert.ok(content.endsWith(`${tail}\n\`\`\``));
+  // At the cap, uncut. Past it, the start and the end, and a cut through a
+  // surrogate pair drops the half. A part said only in the middle left out
+  // is named; one said in the end is not named twice.
+  const detail = (msg, extra = {}) => alertFor({ level: "error", msg, ...extra }, new Map(), 0).detail;
+  const m = (n) => "m".repeat(n);
+  assert.equal(detail(m(MESSAGE_MAX)), m(MESSAGE_MAX));
+  assert.equal(detail(m(MESSAGE_MAX + 1)), `${m(H)}…${m(T)}`);
+  assert.equal(detail(`${m(H - 1)}😀${m(400)}`), `${m(H - 1)}…${m(T)}`);
+  assert.equal(detail(`${m(800)}😀${m(T - 1)}`), `${m(H)}…${m(T - 1)}`);
+  assert.equal(detail(`${m(H)} change 4 ${m(400)}`, { changeId: 4 }), `${m(H)}…${m(T)} | change 4`);
+  assert.equal(detail(`${m(MESSAGE_MAX)} change 4`, { changeId: 4 }), `${m(H)}…${m(T - 9)} change 4`);
+  // A word at a cut reads as cut, whether it goes on ("change 45") or not,
+  // so the part is named again; a part before or after it is not.
+  assert.equal(detail(`${m(H - 9)} change 45 ${m(400)}`, { changeId: 4 }), `${m(H - 9)} change 4…${m(T)} | change 4`);
+  assert.equal(detail(`${m(H - 9)} change 4 ${m(400)}`, { changeId: 4 }), `${m(H - 9)} change 4…${m(T)} | change 4`);
+  assert.equal(detail(`${m(H - 12)} change 4 mm ${m(400)}`, { changeId: 4 }), `${m(H - 12)} change 4 mm…${m(T)}`);
+  const P = "Prog1111111111111111111111111111111111111111", y = "y".repeat(800);
+  assert.equal(detail(`${y}x${P} ${m(T - 45)}`, { program: P }), `${y.slice(0, H)}…${P} ${m(T - 45)} | program ${P}`);
+  assert.equal(detail(`${y} ${P} ${m(T - 46)}`, { program: P }), `${y.slice(0, H)}… ${P} ${m(T - 46)}`);
+});
+
+test("a line with a message and an RPC's error alerts with both (finding 128)", () => {
+  // main.mjs logs what went wrong in `msg` and the RPC's words in `error`
+  // (a failover, a refused compute budget, a skipped replay). The alert
+  // showed the message alone: an endpoint "is failing", but not why.
+  const msg = "the freeze ran and failed in its compute budget; sending it without one: check the budget settings";
+  const error = 'sendTransaction: {"code":-32002,"message":"Transaction simulation failed: Error processing Instruction 2: Computational budget exceeded"}';
+  const a = alertFor({ level: "error", msg, error }, new Map(), 0);
+  assert.equal(a.detail, `${msg} | ${error}`);
+  // It repeats, and is urgent, on the message, as before: an error's
+  // figures change between polls, and its words are the RPC's.
+  const seen = new Map(), failover = { level: "error", msg: "RPC endpoint a.invalid is failing; now using b.invalid" };
+  assert.ok(alertFor({ ...failover, error: "fetch failed" }, seen, 0));
+  assert.equal(alertFor({ ...failover, error: "getSlot RPC -32005 node is behind by 42 slots" }, seen, 1), null);
+  assert.equal(alertFor({ level: "warn", msg: "freeze attempt 1 did not confirm; signing again", error: "log truncated" }, new Map(), 0), null);
+  assert.ok(alertFor({ level: "warn", msg: "log truncated", error: "x" }, new Map(), 0));
+  // The two are cut as one, so a long error keeps its end and the parts
+  // after it; a part said in either is not named again.
+  assert.equal(alertFor({ ...failover, error: "change 4 x", changeId: 4 }, new Map(), 0).detail, `${failover.msg} | change 4 x`);
+  const long = `${error.slice(0, -2)}, logs: ${"l".repeat(5_000)} result: null}`;
+  const d = alertFor({ level: "error", msg: `change 4 ${msg}`, error: long, changeId: 4, ticketId: 9 }, new Map(), 0).detail;
+  const [H, T] = [MESSAGE_MAX - MESSAGE_TAIL - 1, MESSAGE_TAIL];
+  assert.equal(d, `${`change 4 ${msg} | ${long}`.slice(0, H)}…${long.slice(-T)} | ticket 9`);
+  // A line with only one of them is as before.
+  assert.equal(alertFor({ level: "error", error }, new Map(), 0).detail, error);
+  assert.equal(alertFor({ level: "error", msg }, new Map(), 0).detail, msg);
+  assert.equal(alertFor({ level: "error", msg, error: "" }, new Map(), 0).detail, msg, "an empty error is not shown");
+  assert.equal(alertFor({ level: "error", msg: "", error }, new Map(), 0).detail, error, "nor an empty message");
+  const blank = new Map();
+  assert.ok(alertFor({ level: "error", msg: "", error: "A" }, blank, 0));
+  assert.ok(alertFor({ level: "error", msg: "", error: "B" }, blank, 1), "keyed on the error it shows");
+  // The guardian names an RPC's words `error` when it logs them in a
+  // field of their own: a failover's used to be `cause`, a refused
+  // budget's `refused`. This scan sees only a field whose value is a bare
+  // `.message`, maybe through `String(`; a template or `String(e)` escapes
+  // it. A test reaches only the failover's line (restart.test.mjs).
+  const main = readFileSync(new URL("../guardian/main.mjs", import.meta.url), "utf8");
+  const keys = [...main.matchAll(/\b(\w+): (?:String\()?\w+\??\.message\b/g)].map((m) => m[1]);
+  assert.ok(keys.length >= 6, String(keys.length));
+  assert.deepEqual([...new Set(keys)], ["error"]);
+});
+
+test("a failover to another endpoint is news even when its host falls past the key's 60 units (finding 129)", () => {
+  // main.mjs logs `RPC endpoint <from> is failing; now using <to>`. Once
+  // <from> is 24 units long, <to> starts past the message's first 60 units,
+  // which keyed the line, so a move a -> b and then a -> c within the window
+  // was one kind: the operator was not told the guardian now reads from c.
+  // Each is named by its entry, so one host listed twice is two (c, d), and
+  // the line names both in fields, as <from> too can run past unit 60 (q).
+  const [a, b, c, d] = ["solana-mainnet.g.alchemy.com (rpc)", "mainnet.helius-rpc.com (rpcs[0])", "mainnet.helius-rpc.org (rpcs[1])", "mainnet.helius-rpc.org (rpcs[2])"];
+  const q = "a-long-endpoint-name.solana-mainnet.quiknode.pro";
+  const line = (from, to) => ({ level: "error", msg: `RPC endpoint ${from} is failing; now using ${to}`, error: "fetch failed", endpointFrom: from, endpoint: to });
+  const seen = new Map();
+  assert.ok(alertFor(line(a, b), seen, 0));
+  assert.equal(alertFor(line(a, b), seen, 1), null, "the same move repeats once a window");
+  const toC = alertFor(line(a, c), seen, 2);
+  assert.ok(toC, "a move to another endpoint alerts");
+  assert.equal(toC.detail, `${line(a, c).msg} | fetch failed`, "the message names the endpoint already");
+  assert.ok(alertFor(line(a, d), seen, 3), "and to another entry on the same host");
+  assert.ok(alertFor(line(c, b), seen, 4), "as does a move from another");
+  assert.ok(alertFor(line(`${q} (rpcs[3])`, b), seen, 5));
+  assert.ok(alertFor(line(`${q} (rpcs[4])`, b), seen, 6), "from another entry on a long host");
+});
+
+test("a backup's wrong cluster is news for each entry, even past the key's 60 units", () => {
+  // main.mjs logs `RPC endpoint <entry> serves another cluster than ...` once
+  // per endpoint, when its genesis hash is first learned after the start. For
+  // a host of 40 units or more, the entry's index falls past unit 60, so a
+  // second entry on that host was one kind with the first and never heard.
+  // The line names its entry in a field, as the failover line does (finding
+  // 129). This pins alertFor's side at such a host; restart.test.mjs pins
+  // that main.mjs's real line carries the field.
+  const q = "a-long-endpoint-name.solana-mainnet.quiknode.pro";
+  const line = (entry) => ({ level: "error", msg: `RPC endpoint ${entry} serves another cluster than mainnet (genesis X): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config`, endpoint: entry });
+  const seen = new Map();
+  const first = alertFor(line(`${q} (rpcs[0])`), seen, 0);
+  assert.equal(first.detail, line(`${q} (rpcs[0])`).msg, "the message names the entry already");
+  assert.ok(alertFor(line(`${q} (rpcs[1])`), seen, 1), "another entry on the same host alerts");
+  assert.equal(alertFor(line(`${q} (rpcs[1])`), seen, 2), null, "the same entry repeats once a window");
 });
 
 test("a format that is not one of ALERT_FORMATS, or none, follows the webhook's host", async () => {
@@ -193,6 +316,88 @@ test("review fixes: distinct vetoes alert, skipped lines do not, failing freezes
   assert.ok(alertFor(failed, seen, 60_000));
   assert.ok(alertFor({ action: "freeze", signature: "e" }, seen, 60_001));
   assert.ok(alertFor({ action: "freeze", signature: "f" }, seen, 60_002));
+});
+
+test("a failed action's alert repeats per cause: an RPC's refusal, a transaction's failure", async () => {
+  // The errors as cloud/lib makes them, logged as main.mjs logs a failed action.
+  const real = globalThis.fetch;
+  let answer;
+  globalThis.fetch = async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: answer }), { status: 200 });
+  const refusal = (error, method = "sendTransaction") => {
+    answer = error;
+    return new Rpc("http://a.invalid", { retries: 0 }).call(method, ["x"]).then(() => assert.fail("refused"), (e) => e);
+  };
+  const payer = Keypair.generate();
+  const ix = { programId: payer.publicKey, accounts: [], data: Uint8Array.of(9) };
+  // Sent without a preflight, as a freeze is, it lands and fails: the Vault's
+  // instruction after the two compute-budget ones.
+  const landed = (signature, custom) => send({
+    blockhash: async () => "11111111111111111111111111111111",
+    call: async (method) => (method === "sendTransaction" ? signature : { value: [{ err: { InstructionError: [2, { Custom: custom }] } }] }),
+  }, payer, [ix], [], { skipPreflight: true, pollMs: 1, computeUnits: 50_000, microLamports: 1 }).then(() => assert.fail("failed"), (e) => e);
+  try {
+    // A local Agave 4.3 validator's preflight refusal, its logs cut short.
+    const preflight = (custom, lamports) => refusal({
+      code: -32002,
+      message: `Transaction simulation failed: Error processing Instruction 0: custom program error: 0x${custom.toString(16)}`,
+      data: { err: { InstructionError: [0, { Custom: custom }] }, logs: [`Transfer: insufficient lamports ${lamports}, need 1000000000000000000`], unitsConsumed: 150 },
+    });
+    const freeze = (e) => actionLine({ type: "freeze", reason: "unbacked outflow ≥ limit" }, { level: "error", error: e.message, errorCause: errorCause(e) });
+    const [one, other] = [await preflight(1, 5), await preflight(6002, 5)];
+    assert.equal(one.message.slice(0, 60), other.message.slice(0, 60), "every refusal starts alike");
+    const seen = new Map();
+    assert.ok(alertFor(freeze(one), seen, 0));
+    assert.ok(alertFor(freeze(other), seen, 1_000), "another cause within the minute");
+    assert.equal(alertFor(freeze(await preflight(1, 4)), seen, 2_000), null, "the same cause, a figure in its logs moved");
+    // A refusal with no transaction error is its code and text, figures aside.
+    const behind = async (n) => freeze(await refusal({ code: -32005, message: `Node is behind by ${n} slots`, data: { numSlotsBehind: n } }));
+    assert.ok(alertFor(await behind(42), seen, 3_000));
+    assert.equal(alertFor(await behind(43), seen, 4_000), null);
+    assert.ok(alertFor(freeze(await refusal({ code: -32004, message: "Node is behind by 42 slots" })), seen, 4_050), "the same text, another code");
+    const busy = async (ms) => freeze(await refusal({ code: -32000, message: `rate limited, retry in ${ms}ms` }));
+    assert.ok(alertFor(await busy(734), seen, 4_100));
+    assert.equal(alertFor(await busy(912), seen, 4_200), null, "digits in a word are a figure too");
+    assert.equal(errorCause(await refusal({ code: -32000, message: "x".repeat(500) })).length, 160, "a cause is cut");
+    assert.ok(alertFor(freeze(await refusal({ code: -32004, message: "Block not available for slot 9" })), seen, 5_000));
+    // A freeze that failed on chain: each retry is signed anew, and is one cause.
+    const [a, b] = [await landed(b58encode(new Uint8Array(64).fill(1)), 8006), await landed(b58encode(new Uint8Array(64).fill(2)), 8006)];
+    assert.ok(a.message.startsWith(`transaction ${a.signature} failed`));
+    assert.ok(alertFor(freeze(a), seen, 6_000));
+    assert.equal(alertFor(freeze(b), seen, 7_000), null, "the same failure, signed again");
+    assert.ok(alertFor(freeze(await landed(b58encode(new Uint8Array(64).fill(3)), 2)), seen, 8_000), "another failure");
+    // The same refusal by the freeze's own simulation (no budget instructions)
+    // and by a node's preflight: one cause however it came.
+    assert.equal(alertFor(freeze(freezeRefusal({ InstructionError: [0, { Custom: 8006 }] })), seen, 9_000), null, "simulated, the same cause");
+    assert.equal(alertFor(freeze(await preflight(8006, 7)), seen, 10_000), null, "refused in preflight, the same cause");
+    assert.ok(alertFor(freeze(freezeRefusal("InsufficientFundsForFee")), seen, 11_000), "no SOL for the fee");
+    const unpaid = { code: -32002, message: "Transaction simulation failed: Attempt to debit an account but found no record of a prior credit.", data: { err: "InsufficientFundsForFee" } };
+    assert.equal(alertFor(freeze(await refusal(unpaid)), seen, 11_100), null, "no SOL for the fee, said by a node");
+    assert.ok(alertFor(freeze(await refusal({ ...unpaid, data: { err: "BlockhashNotFound" } })), seen, 11_200), "another transaction error");
+    // One code from two methods: the read before a send, then the send.
+    const lagging = { code: -32005, message: "Node is behind by 42 slots" };
+    assert.ok(alertFor(freeze(await refusal(lagging, "getAccountInfo")), seen, 12_000), "the read and the send are two causes");
+    // A program's code in the text is kept, not taken for a figure.
+    // (0x1770 and 0x1771: decimal digits only, so masking them would make one.)
+    const bare = async (hex) => freeze(await refusal({ code: -32002, message: `Transaction simulation failed: Error processing Instruction 0: custom program error: 0x${hex}` }));
+    assert.ok(alertFor(await bare("1770"), seen, 13_000));
+    assert.ok(alertFor(await bare("1771"), seen, 14_000), "another program error, with no data");
+    // Not confirmed in its window: each retry is signed anew, and is one cause.
+    const unconfirmed = (signature) => send({
+      blockhash: async () => "11111111111111111111111111111111",
+      call: async (method) => (method === "sendTransaction" ? signature : { value: [null] }),
+    }, payer, [ix], [], { skipPreflight: true, pollMs: 1, confirmMs: 0 }).then(() => assert.fail("unconfirmed"), (e) => e);
+    const [u, v] = [await unconfirmed(b58encode(new Uint8Array(64).fill(4))), await unconfirmed(b58encode(new Uint8Array(64).fill(5)))];
+    assert.ok(u.message.endsWith("not confirmed"));
+    assert.ok(alertFor(freeze(u), seen, 15_000));
+    assert.equal(alertFor(freeze(v), seen, 16_000), null, "not confirmed, signed again");
+    // A send that failed before it reached a node carries the signature, not in its text.
+    assert.equal(errorCause(Object.assign(new Error("sendTransaction: fetch failed"), { signature: a.signature })), undefined);
+    // Any other error has no cause, and keeps the first 60 units.
+    assert.equal(errorCause(new Error("endpoint down")), undefined);
+    assert.equal(jsonText({ errorCause: errorCause(new Error("x")) }), "{}");
+  } finally {
+    globalThis.fetch = real;
+  }
 });
 
 test("a step that keeps failing raises an urgent alert after the threshold, rate-limited", () => {

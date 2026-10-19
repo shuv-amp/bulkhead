@@ -81,10 +81,10 @@ import { basename, dirname } from "node:path";
 import { Rpc, FailoverRpc, hostOf, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
+import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue, freezeRefusal } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, startSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
-import { alerter, stallWatch, scanAll, actionLine, jsonText } from "./alert.mjs";
+import { alerter, stallWatch, scanAll, actionLine, jsonText, errorCause } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
 import { attestLocal } from "../lib/limits.mjs";
@@ -135,13 +135,18 @@ const genesisSeen = []; // by endpoint: the genesis hash it gave
 let clusterChecked = false; // the start's check is over: later news is logged
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(rpcUrls, {
-    onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, cause: e?.message?.slice(0, 160) }),
+    // By entry, as a URL may be listed twice; both key its alert (finding 129).
+    onSwitch: (from, to, e, fromAt, toAt) => {
+      const [endpointFrom, endpoint] = [endpointName(fromAt), endpointName(toAt)];
+      log({ level: "error", msg: `RPC endpoint ${endpointFrom} is failing; now using ${endpoint}`, error: e?.message?.slice(0, 160), endpointFrom, endpoint });
+    },
     genesis: GENESIS[cfg.cluster] ?? null,
     onCluster: (url, got, at) => {
       genesisSeen[at] = got;
       if (!clusterChecked) return;
-      if (got !== GENESIS[cfg.cluster]) log({ level: "error", msg: `RPC endpoint ${endpointName(at)} serves another cluster than ${cfg.cluster} (genesis ${got}): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config` });
-      else log({ msg: `RPC endpoint ${endpointName(at)} answers on ${cfg.cluster}: it may be used from now on` });
+      const endpoint = endpointName(at);
+      if (got !== GENESIS[cfg.cluster]) log({ level: "error", msg: `RPC endpoint ${endpoint} serves another cluster than ${cfg.cluster} (genesis ${got}): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config`, endpoint });
+      else log({ msg: `RPC endpoint ${endpoint} answers on ${cfg.cluster}: it may be used from now on` });
     },
   })
   : new Rpc(cfg.rpc);
@@ -369,21 +374,7 @@ async function sendOptions() {
  */
 async function guardianSend(ixs) {
   return sendWithFallback(rpc, guardian, ixs, [], await sendOptions(), (e) =>
-    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", refused: e.message.slice(0, 300) }));
-}
-
-/**
- * A simulated freeze's error that no retry or price changes: no SOL for the
- * fee, a fee payer that does not exist, or the Vault refusing it (a key no
- * longer a live guardian, say). Null for anything else (a node behind the
- * blockhash, or no error).
- */
-function freezeRefusal(err) {
-  if (!err) return null;
-  if (err === "InsufficientFundsForFee" || err === "AccountNotFound" || err?.InsufficientFundsForRent) return new Error(`the freeze cannot be paid for (${JSON.stringify(err)}): fund the guardian key`);
-  const code = err?.InstructionError?.[1]?.Custom;
-  if (code != null) return new Error(`the Vault refuses this freeze (custom error ${code}; 8006 is NotGuardian), whatever the price`);
-  return null;
+    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", error: e.message.slice(0, 300) }));
 }
 
 /**
@@ -453,7 +444,7 @@ async function beatOne(id, read, ix, logged) {
       outcome = "sent";
     } catch (e) {
       const failures = b.failures + 1;
-      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, target: logged.target, failures });
+      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, errorCause: errorCause(e), target: logged.target, failures });
       outcome = "failed";
     }
   }
@@ -627,7 +618,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
       return true;
     }
-    log(actionLine(action, { level: "error", error: e.message, ticketId: action.ticketId }));
+    log(actionLine(action, { level: "error", error: e.message, errorCause: errorCause(e), ticketId: action.ticketId }));
     if (action.type === "cancel") {
       const next = afterCancelFailure(cancelRetry.get(action.ticketId), e, Date.now());
       cancelRetry.set(action.ticketId, next);
