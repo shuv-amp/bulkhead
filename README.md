@@ -165,7 +165,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 | Check | Result (latest run of each) |
 |---|---|
-| **Programs on the real runtime** <br><sub>LiteSVM, mainnet feature set, mainnet token program</sub> | **179/179**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (7,075 swaps refused, 16 Oct) |
+| **Programs on the real runtime** <br><sub>LiteSVM, mainnet feature set, mainnet token program</sub> | **179/179**: every scenario (S1 Drift, S4 bank run, S7, S8, S9, S10 Floor), the negative tests, measured compute, and an account-substitution sweep of every instruction (8,072 swaps refused, 19 Oct) |
 | **Bounded proofs** <br><sub>Kani, and exhaustive checks</sub> | **19/19 harnesses verified** on 16 Oct (16 for every value of their types), 240 s of verification ([`09 §5`](docs/09-VERIFICATION.md#5-bounded-proofs-kani-and-exhaustive-checks)). 7 exhaustive tests over ~588M inputs |
 | **Differential** <br><sub>an independent Python reference vs the Rust core</sub> | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | **Program vs model** | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
@@ -179,7 +179,7 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 
 ## Live on devnet
 
-Deployed 28 Sep 2026. All three programs have been upgraded in place since then (same ids, market and seal), most recently on 15 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #85, `main` at `3eec968` (Harbor: the same bytes since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. CI repeats this check every week on `main`'s build, so its `devnet` job, and with it the required `ci` check, fails for Floor and Vault until finding 107 is deployed.
+Deployed 28 Sep 2026. All three programs have been upgraded in place since then (same ids, market and seal), most recently on 15 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #85, `main` at `3eec968` (Harbor: the same bytes since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. CI repeats this check every week on `main`'s build, so its `devnet` job, and with it the required `ci` check, fails for Floor and Vault until findings 107, 115 and 116 are deployed (115 and 116 change Floor only).
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
