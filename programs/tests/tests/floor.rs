@@ -10,6 +10,7 @@ mod common;
 use bulkhead_core::floor::{ABORT_ELF, ABORT_MESSAGE, FLOOR_ABORT_CODE};
 use common::*;
 use solana_keypair::Keypair;
+use solana_loader_v3_interface::instruction as lv3;
 use solana_signer::Signer;
 
 const UPGRADE: u8 = 1;
@@ -440,9 +441,24 @@ fn registration_rejects_weak_settings() {
             f.register(&pay, &team.pubkey(), &owner, &[a], 1, 7 * DAY, 3 * DAY),
             err::INVALID_GUARDIANS,
         ),
+        // Heartbeats every 1 to 30 days.
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, DAY - 1, 3 * DAY),
+            err::INVALID_INTERVAL,
+        ),
+        (
+            f.register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, 30 * DAY + 1, 3 * DAY),
+            err::INVALID_INTERVAL,
+        ),
     ];
     for (ix, code) in cases {
         assert_eq!(env.fails(&[ix], &[&team]), code);
+    }
+    // Each heartbeat bound itself is accepted.
+    for interval in [DAY, 30 * DAY] {
+        let (program, _) = env.deploy(&honest_v1(), &team, 1024);
+        let ix = Floor::new(env.floor, program).register(&pay, &team.pubkey(), &owner, &[a, b, c, d], 2, interval, 3 * DAY);
+        env.ok(&[ix], &[&team]);
     }
 }
 
@@ -821,7 +837,7 @@ fn orphaned_buffers_return_their_rent_to_the_owner() {
     // Nor the program itself: only a buffer can pass, so `Close` of the
     // programdata stays unreachable.
     for not_a_buffer in [f.programdata, f.program] {
-        assert!(env.send(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]).is_err());
+        assert_eq!(env.fails(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]), err::WRONG_BUFFER);
     }
     // A buffer someone still holds is not Floor's to close.
     let theirs = env.write_buffer(&honest_fix(), &p.owner);
@@ -1091,10 +1107,12 @@ fn the_floor_recovery_key_can_only_replace_the_owner_or_itself() {
 /// Account substitution over Floor's instructions (common/sweep.rs): program
 /// A is the target, program B (registered with its own owner and guardians)
 /// supplies look-alike accounts, and a stranger owns one more buffer. Every
-/// swap must fail except where Floor leaves a position free on purpose.
+/// swap must fail, with a Floor code, except where Floor leaves a position
+/// free on purpose (or, at the loader's slot, the runtime refuses first).
 #[test]
 fn every_floor_account_substitution_is_refused() {
-    use common::sweep::{any, role, Sweep};
+    use common::sweep::{any, backstop, role, Sweep};
+    use solana_instruction_error::InstructionError;
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let q = protect(&mut env, &honest_fix());
@@ -1119,7 +1137,11 @@ fn every_floor_account_substitution_is_refused() {
     let mut keys: Vec<&Keypair> = vec![&p.owner, &q.owner, &p.team, &q.team, &stranger];
     keys.extend(p.g.iter());
     keys.extend(q.g.iter());
-    let mut s = Sweep::new(&env, decoys, &keys);
+    let mut s = Sweep::new(&env, env.floor, err::INVALID_INSTRUCTION, decoys, &keys);
+    s.forgery("A's config, forged", f.config);
+    // Floor names the loader by its fixed id in every loader call (loader.rs),
+    // so the runtime, not Floor, refuses any other account there.
+    let loader = |at| backstop(at, &[InstructionError::MissingAccount], "loader-v3: invoked by its fixed id; anything else leaves the callee missing");
     let guardians = gs.clone();
     let heartbeat_all = |env: &mut Env| {
         for g in &p.g {
@@ -1138,10 +1160,10 @@ fn every_floor_account_substitution_is_refused() {
     env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
     env.advance(3 * DAY);
     heartbeat_all(&mut env);
-    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &p.owner.pubkey()), &[], &[]);
+    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &p.owner.pubkey()), &[], &[loader(8)]);
     env.next_slot();
     // The upgrade left the old pin orphaned: the owner takes its rent back.
-    s.run(&mut env, "close orphaned buffer", f.close_buffer(&p.owner.pubkey(), &p.snapshot), &[], &[]);
+    s.run(&mut env, "close orphaned buffer", f.close_buffer(&p.owner.pubkey(), &p.snapshot), &[], &[loader(4)]);
 
     // The snapshot no longer matches: pin one of the new code; stage a fresh abort buffer.
     let snap2 = env.write_buffer(&honest_fix(), &stranger);
@@ -1152,10 +1174,12 @@ fn every_floor_account_substitution_is_refused() {
     // Stop, then restore the snapshot with a quorum.
     s.run(&mut env, "abort (stop)", f.abort(&gs[0], &p.abort_buffer, Some(&snap2)), &[], &[
         role(1, guardians.clone(), "any live guardian"),
+        loader(9),
     ]);
     env.next_slot();
     s.run(&mut env, "restore snapshot", f.restore_snapshot(&snap2, &p.owner.pubkey(), &gs[0..2]), &[], &[
         role(9, guardians.clone(), "any quorum"),
+        loader(8),
         role(10, guardians.clone(), "any quorum"),
     ]);
     env.next_slot();
@@ -1177,7 +1201,7 @@ fn every_floor_account_substitution_is_refused() {
         role(1, guardians.clone(), "any quorum"),
         role(2, guardians.clone(), "any quorum"),
     ]);
-    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &p.owner.pubkey()), &[], &[]);
+    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &p.owner.pubkey()), &[], &[loader(8)]);
     env.next_slot();
 
     // A raised delay applies at once; a quorum of the others ejects one guardian.
@@ -1203,12 +1227,12 @@ fn every_floor_account_substitution_is_refused() {
     s.key(&team3);
     let gs3: Vec<_> = p.g.iter().map(|k| k.pubkey()).collect();
     let reg = f3.register(&payer, &team3.pubkey(), &p.owner.pubkey(), &gs3, 2, 7 * DAY, 3 * DAY);
-    s.run(&mut env, "register", reg, &[], &[any(0, "rent payer: any funded signer")]);
+    s.run(&mut env, "register", reg, &[], &[any(0, "rent payer: any funded signer"), loader(7)]);
     let new_key = Keypair::new();
     let new_auth = new_key.pubkey();
     env.ok(&[f.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &new_auth, &[], None)], &[&p.owner]);
     env.advance(7 * DAY);
-    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[]);
+    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[loader(3)]);
 
     // Releasing the other program to none: the owner signs (finding 95).
     env.ok(&[f3.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &zero, &[], None)], &[&p.owner]);
@@ -1219,9 +1243,25 @@ fn every_floor_account_substitution_is_refused() {
         .filter(|b| *b != [0; 32])
         .map(solana_address::Address::new_from_array)
         .collect();
-    s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[]);
+    s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[loader(3)]);
 
-    println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds", s.attempts, s.runs, s.unsignable);
+    println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds; {} refused at a backstop slot, not by Floor", s.attempts, s.runs, s.unsignable, s.backstopped);
+    // Every run that loads A's config is offered its copy (registration and
+    // the release to none are of other programs).
+    let loads_a = [
+        "heartbeat", "propose upgrade", "veto", "cancel", "execute upgrade", "close orphaned buffer",
+        "pin snapshot", "abort (stop)", "restore snapshot", "stage abort", "approve",
+        "execute approved fix", "propose a longer delay", "replace recovery", "eject", "execute release",
+    ];
+    let forged: Vec<(String, String)> = loads_a.iter().map(|r| (r.to_string(), "A's config, forged".to_string())).collect();
+    assert_eq!(s.forged, forged);
+    assert_eq!(s.unused_forgeries(), Vec::<String>::new());
+    // The one other config at a swept slot, the third program's, is copied
+    // by the sweep itself.
+    assert_eq!(s.copied, vec![("execute release to none".to_string(), f3.config)]);
+    // The stop names the config twice (as the spill, finding 88): swapped at
+    // both, a config only its owner check refuses meets that check.
+    assert_eq!(s.together, vec![("abort (stop)".to_string(), f.config)]);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
 
@@ -1534,12 +1574,7 @@ fn registration_refuses_a_cut_off_recovery_key() {
 /// A real pre-v3 (sBPF v0) mainnet binary, as most protected programs are
 /// today: SPL Memo 4.0.0, shipped inside the LiteSVM crate.
 fn real_v0_program() -> Vec<u8> {
-    let home = std::env::var("HOME").unwrap();
-    std::fs::read_dir(format!("{home}/.cargo/registry/src"))
-        .unwrap()
-        .filter_map(|d| std::fs::read(d.ok()?.path().join("litesvm-0.16.0/src/programs/elf/spl_memo-4.0.0.so")).ok())
-        .next()
-        .expect("litesvm 0.16.0 sources in the cargo registry")
+    std::fs::read(litesvm_elf_dir().join("spl_memo-4.0.0.so")).unwrap()
 }
 
 /// Finding 88: a copy of the live code cut before its trailing zeros matched
@@ -1568,6 +1603,101 @@ fn a_snapshot_shorter_than_its_elf_is_never_pinned() {
     env.next_slot();
     env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
     assert_eq!(env.programdata_bytes(&f.programdata), p.original);
+}
+
+/// Finding 115: the length rule skipped NOBITS sections, which hold no file
+/// bytes, but the loader's v0 checks still require every section's offset
+/// and size to lie inside the binary. A live binary whose last bytes are the
+/// zeros under a NOBITS section matched a copy cut before them, which the
+/// loader refuses: pinned by anyone, it took the quorum's restore away, as in
+/// finding 88.
+#[test]
+fn a_snapshot_short_of_a_nobits_section_is_never_pinned() {
+    let mut env = Env::new();
+    let mut elf = real_v0_program();
+    let shnum = u16::from_le_bytes([elf[0x3c], elf[0x3d]]);
+    let end = elf.len() as u64;
+    let shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().unwrap());
+    assert_eq!(shoff + 64 * shnum as u64, end, "the section table ends the file");
+    let mut nobits = [0u8; 64];
+    nobits[4] = 8; // SHT_NOBITS, over 64 zero bytes after the section table
+    nobits[24..32].copy_from_slice(&(end + 64).to_le_bytes());
+    nobits[32..40].copy_from_slice(&64u64.to_le_bytes());
+    elf.extend_from_slice(&nobits);
+    elf.extend_from_slice(&[0; 64]);
+    elf[0x3c..0x3e].copy_from_slice(&(shnum + 1).to_le_bytes());
+    let p = protect(&mut env, &elf);
+    let (f, gs) = (&p.f, p.guardians());
+    let attacker = Keypair::new();
+    env.fund(&attacker);
+    let cut = env.write_buffer(&elf[..elf.len() - 64], &attacker);
+    env.set_buffer_authority(&cut, &attacker, &f.authority);
+    assert_eq!(env.fails(&[f.pin_snapshot(&cut)], &[]), err::SNAPSHOT_MISMATCH);
+    env.next_slot();
+    assert_eq!(env.fails(&[f.abort(&gs[0], &p.abort_buffer, Some(&cut))], &[&p.g[0]]), err::SNAPSHOT_MISMATCH);
+    // The whole binary still pins, and the quorum restores it.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
+    assert_eq!(env.programdata_bytes(&f.programdata), p.original);
+}
+
+/// Finding 116: for sBPF v3 the loader's strict parser reads the program
+/// header table and the one or two segments it expects, and nothing else.
+/// The length rule also counted the section headers, every section and every
+/// program header, so v3 code with one of them past its end deployed but had
+/// no extent: no snapshot of it could be pinned, and a stop left the quorum
+/// nothing to restore. Each layout here now pins, stops and restores, also
+/// after anyone extends the programdata over the unread ranges.
+#[test]
+fn a_v3_program_is_pinned_whatever_its_unread_headers_say() {
+    let v1 = honest_v1(); // one PF_X segment, so the strict parser reads one header
+    let len = v1.len() as u64;
+    let past = (len + 4096).to_le_bytes();
+    // A section table past the end.
+    let mut table = v1.clone();
+    table[0x28..0x30].copy_from_slice(&past);
+    table[0x3a] = 64;
+    table[0x3c] = 1;
+    // A section table at the end with one NOBITS section past it.
+    let mut nobits = v1.clone();
+    let mut header = [0u8; 64];
+    header[4] = 8; // SHT_NOBITS
+    header[24..32].copy_from_slice(&past);
+    header[32..40].copy_from_slice(&64u64.to_le_bytes());
+    nobits.extend_from_slice(&header);
+    nobits[0x28..0x30].copy_from_slice(&len.to_le_bytes());
+    nobits[0x3a] = 64;
+    nobits[0x3c] = 1;
+    // A second program header, which the strict parser skips, past the end.
+    let mut second = v1.clone();
+    let mut header = [0u8; 56];
+    header[0] = 1; // PT_LOAD
+    header[8..16].copy_from_slice(&past);
+    header[32..40].copy_from_slice(&8u64.to_le_bytes());
+    second.splice(120..120, header);
+    second[0x38] = 2;
+    second[72..80].copy_from_slice(&176u64.to_le_bytes()); // the code, after both
+    for (name, elf) in [("section table", table), ("NOBITS section", nobits), ("second program header", second)] {
+        let mut env = Env::new();
+        let p = protect(&mut env, &elf);
+        let (f, gs) = (&p.f, p.guardians());
+        assert_eq!(read_config(&env, f).elf_is_v3, 1, "{name}");
+        // A stranger extends the programdata (no authority needed, finding
+        // 77), so each unread range above now ends inside it. The pin holds.
+        let stranger = Keypair::new();
+        env.fund(&stranger);
+        let extend = lv3::extend_program(&f.program, Some(&stranger.pubkey()), 10_240);
+        env.ok(&[extend], &[&stranger]);
+        env.next_slot();
+        env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+        assert_eq!(read_config(&env, f).snapshot_valid, 1, "{name}");
+        env.next_slot();
+        env.ok(&[f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[..2])], &[&p.g[0], &p.g[1]]);
+        let mut original = p.original.clone();
+        original.resize(p.original.len() + 10_240, 0);
+        assert_eq!(env.programdata_bytes(&f.programdata), original, "{name}");
+    }
 }
 
 /// Finding 88: the staged abort binary could never be replaced, so if a
@@ -1710,4 +1840,383 @@ fn the_config_layout_matches_what_off_chain_readers_decode() {
         assert_eq!(&d[586..786], &c.pending_payload[..200]);
         assert_eq!((k(852), d[884]), (c.recovery, c.pending_by_recovery));
     }
+}
+
+/// A copy of `real`'s account at a fresh address, under `owner`, with `edit`
+/// applied to its data. Never executable: only a loader may own an executable
+/// account.
+fn copy_under(
+    env: &mut Env,
+    real: &solana_address::Address,
+    owner: solana_address::Address,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> solana_address::Address {
+    let mut a = env.account(real);
+    a.owner = owner;
+    a.executable = false;
+    edit(&mut a.data);
+    let at = solana_address::Address::new_unique();
+    env.svm.set_account(at, a).unwrap();
+    at
+}
+
+/// Floor trusts a config only if Floor owns it and wrote it, and a buffer
+/// only if the loader owns it. A copy of either under another owner is
+/// refused, whatever its bytes say. `close_buffer` never writes the config
+/// it reads, so without the owner check a copy naming a stranger as the
+/// owner, with no abort buffer staged, would let that stranger close the real
+/// abort buffer, which is frozen to the real Floor authority, and take its
+/// rent. The real config would still name the closed buffer, so every stop
+/// would fail until a live quorum staged another. And anyone can create an
+/// account Floor owns (the system program assigns it without Floor), so a
+/// config Floor owns must also carry Floor's discriminator.
+#[test]
+fn floor_reads_only_a_config_it_wrote_and_a_buffer_the_loader_owns() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let thief = Keypair::new();
+    env.fund(&thief);
+    let forged = copy_under(&mut env, &f.config, solana_address::Address::new_unique(), |d| {
+        let mut c = bulkhead_floor::Config::load(d).unwrap();
+        c.owner = thief.pubkey().to_bytes();
+        c.abort_buffer = [0; 32];
+        c.store(d).unwrap();
+    });
+    let mut close = f.close_buffer(&thief.pubkey(), &p.abort_buffer);
+    close.accounts[0].pubkey = forged;
+    assert_eq!(env.fails(&[close], &[&thief]), err::NOT_A_FLOOR_CONFIG);
+
+    // A zero-filled account of a config's length, created for Floor by a
+    // stranger's own CreateAccount.
+    let blank = Keypair::new();
+    let len = env.account(&f.config).data.len();
+    let rent = env.svm.minimum_balance_for_rent_exemption(len);
+    let create = solana_system_interface::instruction::create_account(&thief.pubkey(), &blank.pubkey(), rent, len as u64, &env.floor);
+    env.ok(&[create], &[&thief, &blank]);
+    let mut beat = f.heartbeat(&p.g[0].pubkey());
+    beat.accounts[0].pubkey = blank.pubkey();
+    assert_eq!(env.fails(&[beat], &[&p.g[0]]), err::NOT_A_FLOOR_CONFIG);
+
+    // A byte-identical copy of the pinned snapshot, under its writer: the
+    // loader could never install it, so a stop naming it could not restore.
+    let fake_pin = copy_under(&mut env, &p.snapshot, thief.pubkey(), |_| {});
+    assert_eq!(env.fails(&[f.pin_snapshot(&fake_pin)], &[]), err::NOT_LOADER_V3);
+}
+
+/// Registration takes the upgrade authority from the programdata the program
+/// itself names (register.rs:63). Without that, a thief naming their own
+/// programdata, of which they hold the key, would take the config address of
+/// another team's program, and that team could never register it. The program
+/// must also be the loader's (:57): a program account the thief wrote, at an
+/// address of their own, could name the thief's programdata, and Floor would
+/// hold a config for a program the loader never deployed. The team's own
+/// config address is not at risk from that. The programdata half of :57 is
+/// covered only jointly with :63: a program the loader owns names its own
+/// programdata, which the loader owns too. And the programdata must still
+/// have its header (:69): the loader's Close leaves a closed programdata
+/// loader-owned until its transaction ends.
+#[test]
+fn registration_reads_only_the_programs_own_programdata() {
+    let mut env = Env::new();
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, programdata) = env.deploy(&honest_v1(), &team, 2048);
+    let thief = Keypair::new();
+    env.fund(&thief);
+    let (_, thiefs_programdata) = env.deploy(&honest_v1(), &thief, 2048);
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let pay = env.payer.pubkey();
+
+    let f = Floor::new(env.floor, program);
+    let mut theirs = f.register(&pay, &thief.pubkey(), &thief.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    theirs.accounts[4].pubkey = thiefs_programdata;
+    assert_eq!(env.fails(&[theirs], &[&thief]), err::PROGRAM_MISMATCH);
+
+    // A copy of the team's program account, under an owner that is not the
+    // loader, naming the thief's real programdata.
+    let fake_program = copy_under(&mut env, &program, thief.pubkey(), |d| {
+        d[4..36].copy_from_slice(thiefs_programdata.as_ref())
+    });
+    let g = Floor::new(env.floor, fake_program);
+    let mut forged = g.register(&pay, &thief.pubkey(), &thief.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    forged.accounts[4].pubkey = thiefs_programdata;
+    assert_eq!(env.fails(&[forged], &[&thief]), err::NOT_LOADER_V3);
+
+    // The team closes its programdata and registers, in one transaction.
+    // Until the transaction ends the closed programdata is still the
+    // loader's and the program still names it, so :57 and :63 pass; it has
+    // no header left, and :69 refuses. Both forms of the close (SIMD-0432:
+    // the program account reclaimed or tombstoned). The failed transaction
+    // undoes the close.
+    for tombstone in [false, true] {
+        let close = solana_loader_v3_interface::instruction::close_any(
+            &programdata,
+            &pay,
+            Some(&team.pubkey()),
+            Some(&program),
+            tombstone,
+        );
+        let reg = f.register(&pay, &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+        let e = env.send(&[close, reg], &[&team]).map(|_| ()).unwrap_err();
+        assert_eq!(
+            e.err,
+            solana_transaction_error::TransactionError::InstructionError(
+                1,
+                solana_instruction_error::InstructionError::Custom(err::PROGRAM_MISMATCH)
+            ),
+            "tombstone {tombstone}:\n{}",
+            e.meta.logs.join("\n")
+        );
+    }
+
+    // The team registers its program.
+    env.ok(&[f.register(&pay, &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY)], &[&team]);
+    assert_eq!(env.upgrade_authority(&programdata), Some(f.authority.to_bytes()));
+}
+
+/// A registration names the real system program, and is refused with Floor's
+/// own code if it does not. Without the check the CPI to the system program
+/// would still fail, with no code saying why.
+#[test]
+fn registration_names_the_system_program() {
+    let mut env = Env::new();
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 2048);
+    let f = Floor::new(env.floor, program);
+    let gs = [Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey(), Keypair::new().pubkey()];
+    let reg = f.register(&env.payer.pubkey(), &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    let mut no_system = reg.clone();
+    no_system.accounts[6].pubkey = solana_address::Address::new_unique();
+    assert_eq!(env.fails(&[no_system], &[&team]), err::WRONG_PROGRAM);
+    env.ok(&[reg], &[&team]);
+}
+
+/// A stop names its own program, the real sysvars and its own Floor
+/// authority, and each is refused with Floor's code. Without these checks
+/// the loader would still refuse the upgrade, with no code saying which
+/// account was wrong.
+#[test]
+fn a_stop_names_its_own_program_sysvars_and_authority() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let (f, g0) = (&p.f, p.g[0].pubkey());
+    // Accounts: 2 programdata, 3 program, 6 rent, 7 clock, 8 authority.
+    let stop = || f.abort(&g0, &p.abort_buffer, Some(&p.snapshot));
+    // Each of the pair on its own (loader.rs:140 checks both).
+    for at in [2, 3] {
+        let mut other_program = stop();
+        other_program.accounts[at].pubkey = [q.f.programdata, q.f.program][at - 2];
+        assert_eq!(env.fails(&[other_program], &[&p.g[0]]), err::PROGRAM_MISMATCH);
+    }
+    let mut other_authority = stop();
+    other_authority.accounts[8].pubkey = q.f.authority;
+    assert_eq!(env.fails(&[other_authority], &[&p.g[0]]), err::WRONG_AUTHORITY_ADDRESS);
+    for (at, other) in [(6, CLOCK), (7, RENT)] {
+        let mut wrong_sysvar = stop();
+        wrong_sysvar.accounts[at].pubkey = other;
+        assert_eq!(env.fails(&[wrong_sysvar], &[&p.g[0]]), err::WRONG_SYSVAR);
+    }
+    env.ok(&[stop()], &[&p.g[0]]);
+    stopped_with_floor_code(&mut env, &f.program);
+    assert_eq!(env.call(&q.f.program).map(|_| ()), Ok(()), "the other program still runs");
+}
+
+/// A snapshot restore and an upgrade name their own programdata, program and
+/// Floor authority, and a close and a release their own Floor authority, as a
+/// stop does, each refused with Floor's code. Without these checks the loader
+/// would still refuse the CPI, with no code saying which account was wrong
+/// (the sweep sees only that it fails).
+#[test]
+fn each_loader_call_names_its_own_program_and_authority() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let (f, gs) = (&p.f, p.guardians());
+    let owner = p.owner.pubkey();
+    // Each account at `at` replaced on its own by the other program's, which
+    // passes every other check.
+    let refused = |env: &mut Env, ix: &solana_instruction::Instruction, swaps: &[(usize, solana_address::Address, u32)], signers: &[&Keypair]| {
+        for &(at, other, code) in swaps {
+            let mut wrong = ix.clone();
+            wrong.accounts[at].pubkey = other;
+            let e = match env.send(&[wrong], signers) {
+                Ok(m) => panic!("account {at} accepted:\n{}", m.logs.join("\n")),
+                Err(e) => e,
+            };
+            assert_eq!(custom_code(&e), Some(code), "account {at}: {:?}\n{}", e.err, e.meta.logs.join("\n"));
+        }
+    };
+    // Accounts 1 programdata, 2 program, 7 authority.
+    let upgrade_swaps = [
+        (1, q.f.programdata, err::PROGRAM_MISMATCH),
+        (2, q.f.program, err::PROGRAM_MISMATCH),
+        (7, q.f.authority, err::WRONG_AUTHORITY_ADDRESS),
+    ];
+
+    // The quorum's restore of the snapshot after a stop.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    let restore = f.restore_snapshot(&p.snapshot, &owner, &gs[0..2]);
+    refused(&mut env, &restore, &upgrade_swaps, &[&p.g[0], &p.g[1]]);
+    env.ok(&[restore], &[&p.g[0], &p.g[1]]);
+    env.next_slot();
+
+    // A close of a cancelled proposal's buffer (authority is account 3; its
+    // programdata is checked in `each_instruction_names_its_own_accounts_and_state`).
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    env.ok(&[f.cancel(&owner)], &[&p.owner]);
+    let close = f.close_buffer(&owner, &v2);
+    refused(&mut env, &close, &[(3, q.f.authority, err::WRONG_AUTHORITY_ADDRESS)], &[&p.owner]);
+    env.ok(&[close], &[&p.owner]);
+
+    // An upgrade once its delay is over.
+    let v3 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v3, &p.owner, &f.authority);
+    env.ok(&[f.propose(&owner, UPGRADE, &v3, &[], Some(&v3))], &[&p.owner]);
+    env.advance(3 * DAY);
+    let upgrade = f.execute_code(&v3, &owner);
+    refused(&mut env, &upgrade, &upgrade_swaps, &[]);
+    env.ok(&[upgrade], &[]);
+    env.next_slot();
+
+    // A release (authority is account 2; its programdata is checked in
+    // `a_proposal_has_a_known_kind_and_a_release_its_own_programdata`).
+    let new_key = Keypair::new();
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &new_key.pubkey(), &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    let release = f.execute_release(&owner, Some(&new_key.pubkey()), &[]);
+    refused(&mut env, &release, &[(2, q.f.authority, err::WRONG_AUTHORITY_ADDRESS)], &[&new_key]);
+    env.ok(&[release], &[&new_key]);
+    assert_eq!(env.upgrade_authority(&f.programdata), Some(new_key.pubkey().to_bytes()));
+    assert_eq!(env.upgrade_authority(&q.f.programdata), Some(q.f.authority.to_bytes()));
+}
+
+/// A quorum restore needs a stop, and a stop needs a staged abort buffer,
+/// each refused with its own code. Without the first, a restore while live
+/// is still refused (no snapshot is valid while live). Without the second, a
+/// stop naming a used-up buffer is still refused (it is not the staged one),
+/// but one naming the all-zero address, which equals the empty slot, gets as
+/// far as the loader.
+#[test]
+fn a_restore_needs_a_stop_and_a_stop_needs_an_abort_buffer() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let (f, gs) = (&p.f, p.guardians());
+    let restore = f.restore_snapshot(&p.snapshot, &p.owner.pubkey(), &gs[0..2]);
+    assert_eq!(env.fails(std::slice::from_ref(&restore), &[&p.g[0], &p.g[1]]), err::NOT_ABORTED);
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    env.ok(&[restore], &[&p.g[0], &p.g[1]]);
+    env.next_slot();
+    // The stop used the abort buffer up, and nobody has staged another.
+    assert_eq!(read_config(&env, f).abort_buffer, [0; 32]);
+    let empty_slot = solana_address::Address::default();
+    for buffer in [empty_slot, p.abort_buffer] {
+        assert_eq!(env.fails(&[f.abort(&gs[0], &buffer, None)], &[&p.g[0]]), err::NO_ABORT_BUFFER);
+    }
+}
+
+/// A proposal is of a kind Floor knows, and a release names its own
+/// programdata. Without the first check an unknown kind would hold the
+/// proposal slot until cancelled; without the second the loader would
+/// still refuse the release, with no code saying why.
+#[test]
+fn a_proposal_has_a_known_kind_and_a_release_its_own_programdata() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let f = &p.f;
+    let owner = p.owner.pubkey();
+    let zero = solana_address::Address::default();
+    assert_eq!(env.fails(&[f.propose(&owner, 99, &zero, &[], None)], &[&p.owner]), err::WRONG_PROPOSAL_KIND);
+    assert_eq!(read_config(&env, f).pending_kind, 0);
+
+    let new_key = Keypair::new();
+    env.ok(&[f.propose(&owner, RELEASE_AUTHORITY, &new_key.pubkey(), &[], None)], &[&p.owner]);
+    env.advance(3 * DAY);
+    let release = f.execute_release(&owner, Some(&new_key.pubkey()), &[p.abort_buffer, p.snapshot]);
+    let mut other = release.clone();
+    other.accounts[1].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[other], &[&new_key]), err::PROGRAM_MISMATCH);
+    assert_eq!(env.upgrade_authority(&q.f.programdata), Some(q.f.authority.to_bytes()));
+    env.ok(&[release], &[&new_key]);
+    assert_eq!(env.upgrade_authority(&f.programdata), Some(new_key.pubkey().to_bytes()));
+}
+
+/// Refusals the substitution sweep or the random differential already see
+/// fail, here asserted by their own code: Floor's PDAs at registration, each
+/// instruction's own programdata, and what needs the program live or stopped.
+#[test]
+fn each_instruction_names_its_own_accounts_and_state() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let q = protect(&mut env, &honest_fix());
+    let (f, gs) = (&p.f, p.guardians());
+    let owner = p.owner.pubkey();
+    let elsewhere = solana_address::Address::new_unique();
+
+    // Registration: Floor's config and authority PDAs (accounts 1 and 2).
+    let team = Keypair::new();
+    env.fund(&team);
+    let (program, _) = env.deploy(&honest_v1(), &team, 2048);
+    let reg = Floor::new(env.floor, program).register(&env.payer.pubkey(), &team.pubkey(), &team.pubkey(), &gs, 2, 7 * DAY, 3 * DAY);
+    for (at, code) in [(1, err::WRONG_CONFIG_ADDRESS), (2, err::WRONG_AUTHORITY_ADDRESS)] {
+        let mut ix = reg.clone();
+        ix.accounts[at].pubkey = elsewhere;
+        assert_eq!(env.fails(&[ix], &[&team]), code);
+    }
+
+    // Another program's programdata, each checked against what the named
+    // programdata would pass: a replacement abort buffer (account 2), a pin
+    // of the other program's code (1), and a close (5) of a copy of this
+    // program's live code, which a stop may name (finding 85).
+    let frozen = |env: &mut Env, elf: &[u8]| {
+        let b = env.write_buffer(elf, &p.owner);
+        env.set_buffer_authority(&b, &p.owner, &f.authority);
+        b
+    };
+    let (new_abort, copy_of_q, copy_of_live) = (frozen(&mut env, &ABORT_ELF), frozen(&mut env, &honest_fix()), frozen(&mut env, &honest_v1()));
+    let mut stage = f.stage_abort_by(&new_abort, &gs[0..2]);
+    stage.accounts[2].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[stage], &[&p.g[0], &p.g[1]]), err::PROGRAM_MISMATCH);
+    let mut pin = f.pin_snapshot(&copy_of_q);
+    pin.accounts[1].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[pin], &[]), err::PROGRAM_MISMATCH);
+    let mut close = f.close_buffer(&owner, &copy_of_live);
+    close.accounts[5].pubkey = q.f.programdata;
+    assert_eq!(env.fails(&[close], &[&p.owner]), err::PROGRAM_MISMATCH);
+    let c = read_config(&env, f);
+    assert_eq!((c.abort_buffer, c.snapshot_buffer), (p.abort_buffer.to_bytes(), p.snapshot.to_bytes()));
+    assert!(env.account(&copy_of_live).lamports > 0);
+
+    // Live: no restore proposal, and only a restore is approved: not a
+    // pending upgrade, even by its own id.
+    let fix = frozen(&mut env, &honest_fix());
+    assert_eq!(env.fails(&[f.propose(&owner, RESTORE, &fix, &[], Some(&fix))], &[&p.owner]), err::NOT_ABORTED);
+    env.ok(&[f.propose(&owner, UPGRADE, &fix, &[], Some(&fix))], &[&p.owner]);
+    let pid = read_config(&env, f).pending_id;
+    assert_eq!(env.fails(&[f.approve(pid, &gs[0..2])], &[&p.g[0], &p.g[1]]), err::WRONG_PROPOSAL_KIND);
+    assert_eq!(read_config(&env, f).pending_approvals, 0);
+    env.ok(&[f.cancel(&owner)], &[&p.owner]);
+
+    // Stopped: no upgrade proposal, no new pin, and no second stop, even
+    // through an abort buffer anyone may stage while stopped.
+    env.ok(&[f.abort(&gs[0], &p.abort_buffer, Some(&p.snapshot))], &[&p.g[0]]);
+    env.next_slot();
+    assert_eq!(env.fails(&[f.propose(&owner, UPGRADE, &fix, &[], Some(&fix))], &[&p.owner]), err::NOT_LIVE);
+    // A copy of what now runs, the abort binary, would replace the pin.
+    let copy_of_abort = frozen(&mut env, &ABORT_ELF);
+    assert_eq!(env.fails(&[f.pin_snapshot(&copy_of_abort)], &[]), err::NOT_LIVE);
+    let abort2 = frozen(&mut env, &ABORT_ELF);
+    env.ok(&[f.stage_abort(&abort2)], &[]);
+    let aborted_at = read_config(&env, f).aborted_at;
+    env.advance(DAY);
+    assert_eq!(env.fails(&[f.abort(&gs[1], &abort2, Some(&p.snapshot))], &[&p.g[1]]), err::NOT_LIVE);
+    let c = read_config(&env, f);
+    assert_eq!((c.aborted_at, c.snapshot_buffer, c.snapshot_valid), (aborted_at, p.snapshot.to_bytes(), 1));
 }

@@ -28,8 +28,8 @@
 // cross-checked for a primary that answers but is stale (FailoverRpc.crossCheck).
 //
 // Production (docs/07 §6; docs/09, finding 83): `cluster` ("mainnet-beta",
-// "devnet", "testnet" or "localnet") is checked against the RPC's genesis
-// hash, and "mainnet-beta" requires `rpcs` and `alert`. `liveness`
+// "devnet", "testnet" or "localnet") is checked against each RPC endpoint's
+// genesis hash, and "mainnet-beta" requires `rpcs` and `alert`. `liveness`
 // ({ url, everyS: 60 }) is pinged every pass's minute: a dead-man's switch
 // for when this process or its host dies. `minBalanceSol` (default 0.05):
 // below it, an urgent alert. `startupMaxSignatures` (default 50,000): the
@@ -78,13 +78,13 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { Rpc, FailoverRpc, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, hostOf, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue } from "./policy.mjs";
-import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
+import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue, freezeRefusal } from "./policy.mjs";
+import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, startSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
-import { alerter, stallWatch, scanAll, actionLine } from "./alert.mjs";
+import { alerter, stallWatch, scanAll, actionLine, jsonText, errorCause } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
 import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
 import { attestLocal } from "../lib/limits.mjs";
@@ -96,12 +96,12 @@ const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
 // looping on a refused key never reached the webhook (docs/09, finding 71).
 // Alerts are never on the guardian's critical path.
 let protocolLabel = "";
-const sendAlert = alerter({ ...(cfg.alert ?? {}), protocol: () => protocolLabel }, {
-  onError: (e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
+const sendAlert = alerter({ url: cfg.alert?.url, format: cfg.alert?.format, protocol: () => protocolLabel }, {
+  onError: (e) => console.log(jsonText({ t: new Date().toISOString(), level: "warn", msg: `alert not delivered: ${e.message}` })),
 });
 const log = (o) => {
   const line = { t: new Date().toISOString(), ...o };
-  console.log(JSON.stringify(line, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+  console.log(jsonText(line));
   sendAlert(line);
 };
 // A guardian that stops must say so and exit, so its supervisor starts a fresh
@@ -127,11 +127,27 @@ const configWarnings = await must(() => checkConfig(cfg));
 const policy = await must(() => checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) }));
 // With backup endpoints, reads and sends move to the next endpoint when one
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
-// only in the log: RPC URLs often carry an API key.
-const hostOf = (url) => { try { return new URL(url).host; } catch { return "(endpoint)"; } };
+// only in the log (hostOf).
+// With `cluster`, a backup is used only once its genesis hash matches (finding 114).
+const rpcUrls = [cfg.rpc, ...(cfg.rpcs ?? [])];
+const endpointName = (i) => `${hostOf(rpcUrls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
+const genesisSeen = []; // by endpoint: the genesis hash it gave
+let clusterChecked = false; // the start's check is over: later news is logged
 const rpc = cfg.rpcs?.length
-  ? new FailoverRpc([cfg.rpc, ...cfg.rpcs], {
-    onSwitch: (from, to, e) => log({ level: "error", msg: `RPC endpoint ${hostOf(from)} is failing; now using ${hostOf(to)}`, cause: e?.message?.slice(0, 160) }),
+  ? new FailoverRpc(rpcUrls, {
+    // By entry, as a URL may be listed twice; both key its alert (finding 129).
+    onSwitch: (from, to, e, fromAt, toAt) => {
+      const [endpointFrom, endpoint] = [endpointName(fromAt), endpointName(toAt)];
+      log({ level: "error", msg: `RPC endpoint ${endpointFrom} is failing; now using ${endpoint}`, error: e?.message?.slice(0, 160), endpointFrom, endpoint });
+    },
+    genesis: GENESIS[cfg.cluster] ?? null,
+    onCluster: (url, got, at) => {
+      genesisSeen[at] = got;
+      if (!clusterChecked) return;
+      const endpoint = endpointName(at);
+      if (got !== GENESIS[cfg.cluster]) log({ level: "error", msg: `RPC endpoint ${endpoint} serves another cluster than ${cfg.cluster} (genesis ${got}): nothing is read from it, but copies of guardian transactions still go to it; remove it from the config`, endpoint });
+      else log({ msg: `RPC endpoint ${endpoint} answers on ${cfg.cluster}: it may be used from now on` });
+    },
   })
   : new Rpc(cfg.rpc);
 // Extra endpoints every guardian transaction is also sent to (optional).
@@ -221,7 +237,7 @@ function saveIncident() {
     // Said once per cause, not on every poll.
     if (saveError !== e.message) {
       saveError = e.message;
-      console.log(JSON.stringify({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state to ${stateFile}: ${e.message}` }));
+      console.log(jsonText({ t: new Date().toISOString(), level: "error", msg: `could not save the incident state to ${stateFile}: ${e.message}` }));
     }
   }
 }
@@ -252,6 +268,8 @@ let lastFloorCheck = 0;
 const ingestBudgetMs = cfg.ingestBudgetMs ?? 3_000;
 const lagAlertS = cfg.lagAlertS ?? 60;
 const freshnessEveryMs = (cfg.freshnessCheckS ?? 60) * 1000;
+/** At start, how long the other endpoints may take to answer the cluster check once one has (finding 114). */
+const CLUSTER_GRACE_MS = 2_000;
 let nextChangeScanAt = 0;
 let sweptFreezeUntil = 0;
 
@@ -356,21 +374,7 @@ async function sendOptions() {
  */
 async function guardianSend(ixs) {
   return sendWithFallback(rpc, guardian, ixs, [], await sendOptions(), (e) =>
-    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", refused: e.message.slice(0, 300) }));
-}
-
-/**
- * A simulated freeze's error that no retry or price changes: no SOL for the
- * fee, a fee payer that does not exist, or the Vault refusing it (a key no
- * longer a live guardian, say). Null for anything else (a node behind the
- * blockhash, or no error).
- */
-function freezeRefusal(err) {
-  if (!err) return null;
-  if (err === "InsufficientFundsForFee" || err === "AccountNotFound" || err?.InsufficientFundsForRent) return new Error(`the freeze cannot be paid for (${JSON.stringify(err)}): fund the guardian key`);
-  const code = err?.InstructionError?.[1]?.Custom;
-  if (code != null) return new Error(`the Vault refuses this freeze (custom error ${code}; 8006 is NotGuardian), whatever the price`);
-  return null;
+    log({ level: "error", msg: "a node refused this transaction with its compute budget and accepted it without; check the budget settings", error: e.message.slice(0, 300) }));
 }
 
 /**
@@ -440,7 +444,7 @@ async function beatOne(id, read, ix, logged) {
       outcome = "sent";
     } catch (e) {
       const failures = b.failures + 1;
-      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, target: logged.target, failures });
+      log({ level: failures >= HEARTBEAT_ALERT_AFTER ? "error" : "warn", msg: `${logged.action} failed: ${e.message}`, errorCause: errorCause(e), target: logged.target, failures });
       outcome = "failed";
     }
   }
@@ -614,7 +618,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
       return true;
     }
-    log(actionLine(action, { level: "error", error: e.message, ticketId: action.ticketId }));
+    log(actionLine(action, { level: "error", error: e.message, errorCause: errorCause(e), ticketId: action.ticketId }));
     if (action.type === "cancel") {
       const next = afterCancelFailure(cancelRetry.get(action.ticketId), e, Date.now());
       cancelRetry.set(action.ticketId, next);
@@ -1240,8 +1244,10 @@ async function step(name, run) {
   }
 }
 
-// Watched Floor configs read at least once by this process (followFloor).
+// Watched Floor configs read at least once by this process (followFloor), and
+// the slot it started at (main): a replay covers only what landed up to it.
 const floorFollowed = new Set();
+let floorLiveAfterSlot = null;
 
 /**
  * Floor's events (a proposal, an execution, a replaced recovery key) are
@@ -1251,10 +1257,12 @@ const floorFollowed = new Set();
  * own, and only that program's Floor events are read from it.
  *
  * Its cursor is kept in the state file. A restart reads on from it, back to
- * at most the Vault startup's day, as a replay (nothing is sent: the account
- * scans veto what is still pending), so an execution while this guardian was
- * down still spends its approval. Each restart used to start at the newest
- * signature, and those executions were never seen (docs/09, finding 71).
+ * at most the Vault startup's day, as a replay of what landed up to the slot
+ * this process started at (nothing is sent: the account scans veto what is
+ * still pending), and what is newer live, so an execution while this
+ * guardian was down still spends its approval. Each restart used to start at
+ * the newest signature, and those executions were never seen (docs/09,
+ * finding 71).
  * Without a cursor (a first start), it anchors at the newest signature; the
  * account scans cover what came before.
  */
@@ -1263,6 +1271,7 @@ async function followFloor() {
     page: (address, q) => rpc.call("getSignaturesForAddress", [address, q]),
     cursors: floorCursors,
     followed: floorFollowed,
+    liveAfterSlot: floorLiveAfterSlot,
     oldestWanted: () => wallNow() - DAY_S,
     knows: knowsSignature,
     // Live, bounded like the protocol's ingest (finding 76): what is left is
@@ -1296,12 +1305,35 @@ function rebuildIncident() {
 /**
  * A config naming its cluster is checked against the node's genesis hash: a
  * mainnet guardian pointed at a devnet RPC (or the reverse) watched nothing
- * real and looked healthy (docs/09, finding 83).
+ * real and looked healthy (docs/09, finding 83). Every endpoint is asked, not
+ * only the one that answers first (finding 114). One found on another
+ * cluster refuses the start. One that does not answer in time is used only
+ * once it answers on the right cluster (FailoverRpc asks it before its first
+ * use and before each freshness check), and if it answers from another
+ * cluster later, that is logged.
  */
 async function checkCluster() {
   if (!cfg.cluster || cfg.cluster === "localnet") return;
-  const got = await rpc.call("getGenesisHash", []);
-  if (got !== GENESIS[cfg.cluster]) throw new Error(`config.cluster is ${cfg.cluster}, but the RPC serves another cluster (genesis ${got})`);
+  if (!(rpc instanceof FailoverRpc)) {
+    const got = await rpc.call("getGenesisHash", []);
+    if (got !== GENESIS[cfg.cluster]) throw new Error(`config.cluster is ${cfg.cluster}, but the RPC serves another cluster (genesis ${got})`);
+    return;
+  }
+  const causes = [];
+  const asks = rpc.endpoints.map((_, i) => rpc.admit(i).catch((e) => { causes[i] = e.message; }));
+  // Once one endpoint is on the right cluster, the rest get CLUSTER_GRACE_MS:
+  // a silent backup does not hold up a restart by its timeout.
+  const anyOk = Promise.any(asks.map((p, i) => p.then(() => (rpc.cluster[i] === "ok" ? true : Promise.reject()))));
+  await Promise.race([Promise.all(asks), anyOk.then(() => new Promise((r) => setTimeout(r, CLUSTER_GRACE_MS)), () => Promise.all(asks))]);
+  // None answered: ask once more as any call does (a busy endpoint's wait is
+  // waited out once); its error stops the start.
+  if (!rpc.cluster.includes("ok") && !rpc.cluster.includes("wrong")) await rpc.call("getGenesisHash", []);
+  const wrong = rpcUrls.flatMap((_, i) => (rpc.cluster[i] === "wrong" ? [`${endpointName(i)} serves another cluster (genesis ${genesisSeen[i]})`] : []));
+  if (wrong.length) throw new Error(`config.cluster is ${cfg.cluster}, but RPC endpoint ${wrong.join("; ")}`);
+  if (rpc.cluster[rpc.active] !== "ok") rpc.switchTo(rpc.cluster.indexOf("ok"), new Error("no answer to getGenesisHash at start"));
+  const silent = rpcUrls.flatMap((_, i) => (rpc.cluster[i] === "unknown" ? [`${endpointName(i)}: ${(causes[i] ?? `no answer within ${CLUSTER_GRACE_MS / 1000} s`).slice(0, 160)}`] : []));
+  if (silent.length) log({ level: "error", msg: `RPC endpoint ${silent.join("; ")}: no answer to getGenesisHash, so not used until it answers on ${cfg.cluster} (asked again before each freshness check)` });
+  clusterChecked = true;
 }
 
 /**
@@ -1337,6 +1369,9 @@ async function main() {
   for (const w of configWarnings) log({ level: "warn", msg: w });
   if (stateProblem) log({ level: "error", msg: stateProblem });
   await must(checkCluster);
+  // Fatal, like the cluster check: with no start slot, a restart would replay
+  // all that lands until its first good poll.
+  if (floorWatch.length) floorLiveAfterSlot = await must(() => startSlot(rpc));
   await checkBalance().catch((e) => log({ level: "warn", msg: `could not read the guardian key's balance: ${e.message}` }));
   if (state.incidentSince != null) log({ msg: "incident hold resumed from saved state", incidentSince: state.incidentSince, stateFile });
   const unpinned = unpinnedChangeApprovals(policy);

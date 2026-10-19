@@ -32,9 +32,15 @@ pub const T0: i64 = 1_790_000_000; // a fixed start time (Sep 2026)
 /// Floor error codes (programs/floor/src/error.rs), checked by the tests.
 pub mod err {
     pub const INVALID_INSTRUCTION: u32 = 7000;
+    pub const NOT_A_FLOOR_CONFIG: u32 = 7001;
+    pub const WRONG_CONFIG_ADDRESS: u32 = 7002;
+    pub const WRONG_AUTHORITY_ADDRESS: u32 = 7003;
+    pub const NOT_LOADER_V3: u32 = 7005;
+    pub const PROGRAM_MISMATCH: u32 = 7006;
     pub const NOT_CURRENT_AUTHORITY: u32 = 7007;
     pub const INVALID_GUARDIANS: u32 = 7008;
     pub const INVALID_THRESHOLD: u32 = 7009;
+    pub const INVALID_INTERVAL: u32 = 7010;
     pub const INVALID_DELAY: u32 = 7011;
     pub const MISSING_SIGNATURE: u32 = 7012;
     pub const NOT_OWNER: u32 = 7013;
@@ -51,10 +57,13 @@ pub mod err {
     pub const NO_VALID_SNAPSHOT: u32 = 7024;
     pub const PROPOSAL_PENDING: u32 = 7025;
     pub const NO_PROPOSAL: u32 = 7026;
+    pub const WRONG_PROPOSAL_KIND: u32 = 7027;
     pub const NOT_EXECUTABLE: u32 = 7028;
     pub const VETOED: u32 = 7029;
     pub const EXPIRED: u32 = 7030;
     pub const CANNOT_EJECT: u32 = 7031;
+    pub const WRONG_SYSVAR: u32 = 7032;
+    pub const WRONG_PROGRAM: u32 = 7033;
     pub const ABORT_DOES_NOT_FIT: u32 = 7035;
     pub const BUFFER_IN_USE: u32 = 7036;
     pub const WRONG_ACCOUNT: u32 = 7037;
@@ -132,6 +141,17 @@ pub struct Env {
     pub floor: Address,
     pub slot: u64,
     pub time: i64,
+}
+
+/// The mainnet binaries LiteSVM 0.16.0 ships, in the cargo registry
+/// (`$CARGO_HOME`, by default `~/.cargo`).
+pub fn litesvm_elf_dir() -> std::path::PathBuf {
+    let home = std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap()));
+    std::fs::read_dir(format!("{home}/registry/src"))
+        .unwrap()
+        .map(|d| d.unwrap().path().join("litesvm-0.16.0/src/programs/elf"))
+        .find(|d| d.is_dir())
+        .expect("litesvm 0.16.0 sources in the cargo registry")
 }
 
 pub fn floor_so() -> Vec<u8> {

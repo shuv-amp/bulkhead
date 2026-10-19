@@ -21,12 +21,18 @@
 //     each slot, at a rising price, is how the stop wins a slot;
 //   - stops when Floor's config says the program is stopped, and then checks
 //     that a call to the program fails with Floor's code ("FLOR").
+// With `cluster` in the config, only an endpoint whose genesis hash matches
+// it is read from: a stop that read another cluster's copy said "stopped"
+// while the real program ran on (docs/09, finding 117).
 // Exit 0: stopped (by us or someone else). 1: gave up (time limit). 2: this
-// key cannot stop it (not a live guardian, no abort buffer, no config).
+// key cannot stop it (not a live guardian, no abort buffer, no config, no
+// endpoint on the config's cluster).
 import { readFileSync } from "node:fs";
-import { Rpc, FailoverRpc, key, b58encode, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, hostOf, key, b58encode, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
+import { GENESIS } from "./policy.mjs";
+import { jsonText } from "./alert.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (name, dflt) => {
@@ -52,12 +58,36 @@ if (!cfg.floorProgram) {
   console.error("the config has no floorProgram");
   process.exit(2);
 }
+if (cfg.cluster !== undefined && cfg.cluster !== "localnet" && !Object.hasOwn(GENESIS, cfg.cluster)) {
+  console.error(`config.cluster must be one of ${[...Object.keys(GENESIS), "localnet"].join(", ")}`);
+  process.exit(2);
+}
+const genesis = GENESIS[cfg.cluster] ?? null;
+const log = (o) => console.log(jsonText({ t: new Date().toISOString(), ...o }));
+if (cfg.cluster === undefined) log({ level: "warn", msg: "config.cluster is not set: the RPC's cluster is not checked" });
 // Reads go to the next endpoint when one cannot answer, as the guardian's do:
 // the primary alone used to decide, and one refused read ended the stop
-// before anything was sent (docs/09, finding 85).
+// before anything was sent (docs/09, finding 85). An endpoint on another
+// cluster is never read from (finding 117).
+const urls = [cfg.rpc, ...(cfg.rpcs ?? [])];
+const endpointName = (i) => `${hostOf(urls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
 const rpc = cfg.rpcs?.length
-  ? new FailoverRpc([cfg.rpc, ...cfg.rpcs], { onSwitch: (from, to, e) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", msg: `RPC ${new URL(from).host} failing; now using ${new URL(to).host}`, cause: e?.message?.slice(0, 120) })) })
+  ? new FailoverRpc(urls, {
+    onSwitch: (from, to, e, fromAt, toAt) => log({ level: "warn", msg: `RPC ${endpointName(fromAt)} left; now using ${endpointName(toAt)}`, cause: e?.message?.slice(0, 120) }),
+    genesis,
+    onCluster: (url, got, at) => {
+      if (got === genesis) return;
+      log({ level: "error", msg: `RPC endpoint ${endpointName(at)} serves another cluster than ${cfg.cluster} (genesis ${got}): not read from${at > 0 ? ", but copies of the stop still go to it" : ""}; remove it from the config` });
+      if (rpc.cluster.every((c) => c === "wrong")) {
+        log({ level: "error", msg: `no RPC endpoint serves ${cfg.cluster}: nothing was read or sent` });
+        process.exit(2);
+      }
+    },
+  })
   : new Rpc(cfg.rpc);
+// Every endpoint is asked at once, without waiting: one on another cluster
+// is reported even while the primary answers everything.
+if (genesis != null && rpc instanceof FailoverRpc) for (let i = 0; i < urls.length; i++) rpc.admit(i).catch(() => {});
 const backups = (cfg.rpcs ?? []).map((u) => new Rpc(u));
 const guardian = Keypair.load(cfg.guardianKey);
 const fc = await new FloorClient(cfg.floorProgram, protectedProgram).init();
@@ -68,8 +98,41 @@ const NOT_LIVE = 7016;
 const NO_ABORT_BUFFER = 7019;
 const SNAPSHOT_MISMATCH = 7023;
 
-const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
 const started = Date.now();
+
+/**
+ * One endpoint: its genesis hash is asked once before anything else. With
+ * backups, FailoverRpc reads from each only once it has answered (finding 117).
+ * A node that answers with no hash, or has no such method, will not give one
+ * on a retry: the stop ends at once. Any other error is asked again.
+ */
+async function checkCluster() {
+  if (genesis == null || rpc instanceof FailoverRpc) return;
+  for (;;) {
+    let got;
+    try {
+      got = await rpc.call("getGenesisHash", []);
+      if (typeof got !== "string") throw Object.assign(new Error("getGenesisHash: no hash"), { refused: true });
+    } catch (e) {
+      if (e.refused || e.rpcError?.code === -32601) {
+        log({ level: "error", msg: "the RPC will not give its genesis hash, so its cluster cannot be checked: nothing was read or sent; use an endpoint that answers getGenesisHash", error: String(e.message).slice(0, 160) });
+        process.exit(2);
+      }
+      if ((Date.now() - started) / 1000 > maxSeconds) {
+        log({ level: "error", msg: "gave up: the RPC's cluster could not be checked within the time limit", error: String(e.message).slice(0, 160) });
+        process.exit(1);
+      }
+      log({ level: "warn", msg: "could not check the RPC's cluster; trying again", error: String(e.message).slice(0, 160) });
+      await new Promise((r) => setTimeout(r, 400));
+      continue;
+    }
+    if (got === genesis) return;
+    log({ level: "error", msg: `config.cluster is ${cfg.cluster}, but the RPC serves another cluster (genesis ${got}): nothing was read or sent` });
+    process.exit(2);
+  }
+}
+
+await checkCluster();
 const slotAtStart = await rpc.call("getSlot", [{ commitment: "processed" }]).catch(() => null);
 
 async function readConfig() {

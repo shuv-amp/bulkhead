@@ -28,7 +28,7 @@ Severity is for a mainnet deployment: **High** = more value can leave than the p
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
-| A1 | **High** | Capacity follows a lagging reference, not the live balance: a parked-then-withdrawn deposit, or an honest bank run, multiplies the unbacked drain | **Fixed on-chain, 29 Sep** (`min(reference, live balance)`); reopened 8 Oct by capital held for one transaction (`09`, finding 65), fixed with the low-water balance (`min(reference, live balance, low)`); not on devnet yet |
+| A1 | **High** | Capacity follows a lagging reference, not the live balance: a parked-then-withdrawn deposit, or an honest bank run, multiplies the unbacked drain | **Fixed on-chain, 29 Sep** (`min(reference, live balance)`); reopened 8 Oct by capital held for one transaction (`09`, finding 65), fixed with the low-water balance (`min(reference, live balance, low)`), on devnet since 8 Oct (PR #35) |
 | A1b | **High** | An attacker who parks their own capital drains while it is still in the vault: the live balance is inflated too, so `min` alone does not help | Absolute caps bound it (existing feature); calibration now sets them |
 | A2 | **Medium** | The guardian bot only watches a 1-hour window: a paced attacker drips the daily bucket out forever without a freeze | **Fixed** (24-hour rule), residual stated; late-freeze gaps fixed 29 Sep |
 | A3 | **Medium** | A stolen admin key can abdicate `SetAdmin` / `SetGuardians` instantly and forever | **Fixed on-chain, 29 Sep** (guardian quorum; loosening only) |

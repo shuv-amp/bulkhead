@@ -39,22 +39,24 @@ fn reference(b: &[u8], forbidden: [&[u8; 32]; 2]) -> Result<(usize, u8, i64, usi
     Ok((count, threshold, interval, used))
 }
 
-// Raw bytes: [flags][forbidden 1: 32][forbidden 2: 32][the set...]. Flag bit 0
-// shapes the set into one that can be accepted (count, threshold, interval in
-// range), keeping any bytes after it, as the programs always parse with more
-// data following; a short input is padded with bytes that differ by position,
-// so the padding makes no repeated keys. Flag bit 1 makes the second forbidden
-// key the set's key number `flags >> 2` (mod the count), so a forbidden key in
-// any position is reached.
+// Raw bytes: [flags][forbidden 1: 32][forbidden 2: 32][the set...]; the set
+// may be empty, which must be `Truncated`. Flag bit 0 shapes a non-empty set
+// into one that can be accepted (count, threshold, interval in range), keeping
+// any bytes after it, as the programs always parse with more data following; a
+// short input is padded with bytes that differ by position, so the padding
+// makes no repeated keys. Flag bit 1 makes the second forbidden key the set's
+// key number `flags >> 2` (mod the count byte, clamped to 1-8; skipped if the
+// set is too short to hold that key), so a forbidden key in any position is
+// reached.
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 66 {
+    if data.len() < 65 {
         return;
     }
     let flags = data[0];
     let f1: [u8; 32] = data[1..33].try_into().unwrap();
     let mut f2: [u8; 32] = data[33..65].try_into().unwrap();
     let mut b = data[65..].to_vec();
-    if flags & 1 == 1 {
+    if flags & 1 == 1 && !b.is_empty() {
         let count = 4 + b[0] % 5;
         b[0] = count;
         let n = count as usize;

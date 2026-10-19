@@ -117,7 +117,7 @@ Solana DeFi has no equivalent. Our census: 37 of 54 tracked multisigs have a 0-h
 | Practice | Where it is state of the art | Bulkhead |
 |---|---|---|
 | Differential testing against a reference | Firedancer vs Agave (`solfuzz`, `solana-conformance` test vectors); SpecTrum (spec-guided differential fuzzing of Ethereum clients, 2026); SP-Differ (BIP-352) | Python reference vs Rust core on millions of cases; **programs vs the core model** on the real runtime (12,000 random steps); JavaScript vs Python and Rust for the status page (40,000 cases and every available-now view in 1,500 limiter sessions; 10,000 more states vs Python). Findings in `09 §4`. |
-| Property-based testing with coverage checks | Standard | 26 property tests with coverage floors that scale with depth, 18 targeted unit tests written from mutation results, 6 exhaustive tests over ~584M inputs |
+| Property-based testing with coverage checks | Standard | 26 property tests with coverage floors that scale with depth, 26 targeted unit tests written from mutation results, 7 exhaustive tests over ~588M inputs |
 | **Bounded model checking** | **Kani** (AWS; used on the Rust standard library and s2n-quic; ASE '26 paper) | **Adopted:** proof harnesses in `crates/bulkhead-core/src/proofs.rs` for logic; arithmetic that SAT solvers cannot finish is enumerated exhaustively instead (`09 §5`) |
 | **Mutation testing** | `cargo-mutants` | **Adopted:** measures whether our tests catch injected bugs (results in `09`) |
 | Formal verification of Solana programs | **Certora Solana Prover** (open source; CVLR). Squads v4 was formally verified with it; Certora lists Kamino and Jito among users. | **Next:** CVLR rules for I1, I8, I11, I12 on the built programs (before any audit) |

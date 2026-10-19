@@ -13,13 +13,13 @@ Bulkhead was submitted to the Colosseum Crypto World's Fair (Solana track) on 12
 | Claim | Check |
 |---|---|
 | The live devnet market: sealed, guardians live, 9,900,000 USDC left after S1, nothing pending | `node cloud/status/snapshot.mjs …` (README, "Verify it yourself"), about 2 s, nothing to build |
-| The three devnet programs run the code of PR #85 (this tree's Floor and Vault add finding 107, not deployed yet) | `scripts/verify-devnet.sh` at PR #85's commit (`3eec968`); hashes and the upgrade authority in `SECURITY.md`; repeated weekly in CI on `main`'s build, which differs until 107 is deployed |
+| The three devnet programs run the code of PR #85 (this tree's Floor and Vault add finding 107, and Floor findings 115 and 116, not deployed yet) | `scripts/verify-devnet.sh` at PR #85's commit (`3eec968`); hashes and the upgrade authority in `SECURITY.md`; repeated weekly in CI on `main`'s build, which differs until 107, 115 and 116 are deployed |
 | S1 on devnet: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the rest | Signatures in `08` ("Devnet signatures") |
 | Floor S10 on devnet: one guardian stops, two restore byte-identical | Signatures in `08`; `scripts/floor-devnet.sh` |
 | Floor on a real 1 MB mainnet program's bytes | `scripts/floor-demo.sh <program-id>` (`06 §7`) |
 | The attacker-vs-guardian run, end to end | `E2E=1 scripts/check-programs.sh` |
 | Every test, proof and differential result | `09`; `scripts/check.sh`, `scripts/check-programs.sh`, `scripts/prove.sh` |
-| Every bug the process found in our own code | `09 §4` (95 findings at submission; 96–107 recorded 13–16 Oct: 96–99, 101 and 103 fixed and on devnet since 15 Oct, 105 fixed (CI tooling), 106 fixed (Vault tests), 107 fixed (AUD-2, the guardian margin; not yet on devnet), 100, 102 and 104 stated); `16` |
+| Every bug the process found in our own code | `09 §4` (95 findings at submission; 96–131 recorded 13–19 Oct: 96–99, 101 and 103 fixed and on devnet since 15 Oct, 105 fixed (CI tooling), 106, 108, 112, 113 and 120 fixed (Vault tests), 107 fixed (AUD-2, the guardian margin; not yet on devnet), 109 fixed (fuzz targets), 110 and 111 fixed (Floor tests), 114 fixed (guardian startup checks; not yet on devnet), 115 and 116 fixed (Floor's snapshot length rule; not yet on devnet; 116's class below sBPF v3 stated), 117–119, 121–126 and 128–131 fixed (the guardian, its alerts and the emergency stop; not yet on devnet), 127 fixed (Floor and Vault tests), 100, 102 and 104 stated); `16` |
 | Every number's source and label (measured, reported, model, assumption) | `01`, `13` |
 
 ## 3. Go-to-market

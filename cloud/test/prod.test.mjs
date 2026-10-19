@@ -16,6 +16,8 @@ const policy = (over) => checkPolicy({ ...DEFAULT_POLICY, ...over });
 test("a policy typo, a percent for a fraction or a string for seconds stops the start (finding 83)", () => {
   assert.doesNotThrow(() => policy({}));
   assert.throws(() => policy({ freezeFractionOfWorst1H: 0.5 }), /not a policy setting/);
+  // Parsed from JSON, as the config is: each name is the object's own key.
+  for (const k of ["constructor", "__proto__", "toString"]) assert.throws(() => policy(JSON.parse(`{"${k}": 1}`)), /not a policy setting/, k);
   assert.throws(() => policy({ freezeFractionOfWorst1h: 50 }), /fraction/);
   assert.throws(() => policy({ freezeFractionOfWorst24h: 0 }), /fraction in \(0, 1\]/);
   assert.doesNotThrow(() => policy({ freezeFractionOfWorst72h: 0 }), "0 turns the 72h rule off");
@@ -32,15 +34,47 @@ test("a policy typo, a percent for a fraction or a string for seconds stops the 
 test("a mainnet config needs backups and alerts; unknown settings are refused (finding 83)", () => {
   assert.deepEqual(checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" } }), []);
   assert.throws(() => checkConfig({ ...base, rpcs: "https://b.example" }), /list of http/);
+  // Spread into DEFAULT_POLICY at start, these add no keys: the guardian
+  // ran on the defaults alone, with no word that the policy was dropped.
+  for (const p of [true, 5, [], null, ""]) assert.throws(() => checkConfig({ ...base, policy: p }), /config.policy must be/, JSON.stringify(p));
+  assert.deepEqual(checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" }, policy: {} }), []);
   assert.throws(() => checkConfig({ ...base, polMs: 400 }), /not a guardian setting/);
   assert.throws(() => checkConfig({ ...base, pollMs: 5 }), /pollMs/);
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet" }), /must be one of/);
+  // Only the names themselves: `in` also took ["mainnet-beta"], which then
+  // skipped every mainnet rule below while matching mainnet's genesis hash,
+  // and names Object.prototype gives every object, such as "constructor".
+  for (const c of [["mainnet-beta"], "constructor", "__proto__", "toString"]) assert.throws(() => checkConfig({ ...base, cluster: c }), /must be one of/, JSON.stringify(c));
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet-beta", alert: { url: "https://hook.example" } }), /backup endpoint/);
   assert.throws(() => checkConfig({ ...base, cluster: "mainnet-beta", rpcs: ["https://b.example"] }), /config.alert/);
   const w = checkConfig({ ...base, cluster: "mainnet-beta", rpcs: ["https://b.example"], alert: { url: "https://hook.example" } });
   assert.match(w.join(" "), /liveness/);
   assert.deepEqual(checkConfig({ ...base, cluster: "mainnet-beta", rpcs: ["https://b.example"], alert: { url: "https://hook.example" }, liveness: { url: "https://hc.example/x" } }), []);
   assert.match(checkConfig(base).join(" "), /cluster is not set.*|no config.alert/);
+  const live = (everyS) => checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example" }, liveness: { url: "https://hc.example/x", everyS } });
+  for (const v of [10, 86_400]) assert.deepEqual(live(v), [], String(v));
+  for (const [v, shown] of [["600", '"600"'], [[600], "[600]"], [9, "9"], [86_401, "86401"], [Infinity, "Infinity"]]) {
+    assert.throws(() => live(v), { message: `config.liveness.everyS: ${shown} is not a whole number from 10 to 86400` }, shown);
+  }
+  // Counts, seconds and milliseconds are whole numbers, as in checkPolicy and
+  // docs/07; only minBalanceSol takes a fraction.
+  for (const [k, lo, hi] of [["pollMs", 100, 10_000], ["stallAlertS", 10, 86_400], ["lagAlertS", 5, 86_400], ["ingestBudgetMs", 200, 60_000], ["ingestConcurrency", 1, 64], ["freshnessCheckS", 10, 3_600], ["startupMaxSignatures", 1_000, 10_000_000]]) {
+    assert.throws(() => checkConfig({ ...base, [k]: lo + 0.5 }), { message: `config.${k}: ${lo + 0.5} is not a whole number from ${lo} to ${hi}` }, k);
+  }
+  assert.throws(() => live(60.5), /liveness\.everyS: 60\.5 is not a whole number/);
+  assert.match(checkConfig({ ...base, minBalanceSol: 0.25 }).join(" "), /cluster is not set/, "a fraction of a SOL is fine");
+  assert.throws(() => checkConfig({ ...base, minBalanceSol: 1_000.5 }), { message: "config.minBalanceSol: 1000.5 is not a number from 0 to 1000" });
+  for (const l of [{ everyS: 60 }, { url: "hc.example/x" }, true, null, "https://hc.example/x", ["https://hc.example/x"]]) assert.throws(() => checkConfig({ ...base, liveness: l }), /config\.liveness must be an object with an http\(s\) url/, JSON.stringify(l));
+  // Typos inside alert and liveness: each used to fall back to a default, and
+  // a misspelt format posts a JSON body a Slack or Discord webhook won't show.
+  const hooked = (alert, liveness) => checkConfig({ ...base, cluster: "localnet", alert: { url: "https://hook.example", ...alert }, liveness: { url: "https://hc.example/x", ...liveness } });
+  for (const format of ["json", "slack", "discord"]) assert.deepEqual(hooked({ format }, { everyS: 60 }), [], format);
+  for (const format of ["slak", "Slack", "", ["slack"], null, "constructor"]) assert.throws(() => hooked({ format }), { message: `config.alert.format: ${JSON.stringify(format)} is not one of json, slack, discord` }, JSON.stringify(format));
+  assert.throws(() => hooked({ fromat: "slack" }), { message: "config.alert.fromat is not a setting of config.alert (url, format)" });
+  assert.throws(() => hooked({ retryDelaysMs: [1] }), /config\.alert\.retryDelaysMs is not a setting/);
+  assert.throws(() => hooked({}, { every_s: 600 }), { message: "config.liveness.every_s is not a setting of config.liveness (url, everyS)" });
+  assert.throws(() => hooked({}, { format: "slack" }), /config\.liveness\.format is not a setting/, "each object has its own names");
+  assert.throws(() => checkConfig({ ...base, alert: { URL: "https://hook.example" } }), /config\.alert\.URL is not a setting/, "a misspelt url is named, not taken as missing");
 });
 
 test("a webhook that fails is tried again, and an alert never delivered is not muted (finding 83)", async () => {
