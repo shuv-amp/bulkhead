@@ -1256,6 +1256,9 @@ fn every_floor_account_substitution_is_refused() {
     let forged: Vec<(String, String)> = loads_a.iter().map(|r| (r.to_string(), "A's config, forged".to_string())).collect();
     assert_eq!(s.forged, forged);
     assert_eq!(s.unused_forgeries(), Vec::<String>::new());
+    // The stop names the config twice (as the spill, finding 88): swapped at
+    // both, a config only its owner check refuses meets that check.
+    assert_eq!(s.together, vec![("abort (stop)".to_string(), f.config)]);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
 

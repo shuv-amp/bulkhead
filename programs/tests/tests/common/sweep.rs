@@ -8,18 +8,20 @@
 //! (`forgery`), and, for a signer, every other known key; then, per key that
 //! signs at any slot (a free one included) and stands at a checked slot, the
 //! key unsigned at every checked slot (a free slot where it signed gets the
-//! payer; not for the fee payer). Every swap must fail, except at positions
-//! the program deliberately leaves free (each listed with its reason), and
-//! fail with the swept program's own error code: a refusal that only a CPI
-//! or the runtime makes would hide that program's check being deleted. A
-//! slot where another program or the runtime refuses by design is listed as
-//! a backstop, with the errors it refuses with and who refuses; a backstop
-//! whose errors never occur fails the sweep. The sweep cannot tell there
-//! whether the program's own check exists. Nor can it tell which of the
-//! program's checks refused: one deleted where a later check returns a code
-//! of the same program passes, so such checks need their own tests. A set of
-//! accounts that other checks tie to each other (a vault, its token account,
-//! its lifeboat) is also swapped whole for its twin in another protocol
+//! payer; not for the fee payer); and a key no slot signs for, at two or
+//! more checked slots, none a backstop, swapped at all of them (its free
+//! slots too) together. Every swap must fail, except at positions the
+//! program deliberately leaves free (each listed with its reason), and fail
+//! with the swept program's own error code: a refusal that only a CPI or the
+//! runtime makes would hide that program's check being deleted. A slot where
+//! another program or the runtime refuses by design is listed as a backstop,
+//! with the errors it refuses with and who refuses; a backstop whose errors
+//! never occur fails the sweep. The sweep cannot tell there whether the
+//! program's own check exists. Nor can it tell which of the program's checks
+//! refused: one deleted where a later check returns a code of the same
+//! program passes, so such checks need their own tests. A set of accounts
+//! that other checks tie to each other (a vault, its token account, its
+//! lifeboat) is also swapped whole for its twin in another protocol
 //! (`twin`), which must be refused with the code of the check that ties the
 //! set to this protocol: one at a time, the other checks refuse first, with
 //! the same code.
@@ -102,6 +104,12 @@ pub fn backstop(at: usize, refusals: &[InstructionError], why: &'static str) -> 
     }
 }
 
+/// Whether `ok` lists `a` among the addresses that may stand at slot `at`.
+fn allows(ok: &[Allow], at: usize, a: &Address) -> bool {
+    ok.iter()
+        .any(|x| x.at == at && x.who.as_ref().is_some_and(|w| w.contains(a)))
+}
+
 /// A set of accounts swapped whole for their twins in another protocol.
 #[derive(Clone)]
 struct Twin {
@@ -149,6 +157,9 @@ pub struct Sweep {
     /// (run name, forgery) for every run that names a forgery's real
     /// account at a slot swapped for decoys and was offered the copy.
     pub forged: Vec<(String, String)>,
+    /// (run name, account) for every account no slot signs for sent swapped
+    /// at all its checked slots together.
+    pub together: Vec<(String, Address)>,
 }
 
 impl Sweep {
@@ -231,6 +242,7 @@ impl Sweep {
             twins: vec![],
             twinned: vec![],
             forged: vec![],
+            together: vec![],
         }
     }
 
@@ -273,6 +285,24 @@ impl Sweep {
             .filter(|f| !self.forged.iter().any(|(_, what)| *what == f.what))
             .map(|f| f.what.clone())
             .collect()
+    }
+
+    /// What an account that signs nowhere is swapped for: a fresh address,
+    /// then each other account of `ix` and each decoy, once.
+    fn candidates(&self, ix: &Instruction, orig: &Address) -> Vec<(String, Address)> {
+        let mut c = vec![("a fresh address".to_string(), Address::new_unique())];
+        let mut seen = HashSet::new();
+        let inner = ix
+            .accounts
+            .iter()
+            .enumerate()
+            .map(|(j, a)| (format!("account {j}"), a.pubkey));
+        for (what, d) in inner.chain(self.decoys.iter().cloned()) {
+            if d != *orig && seen.insert(d) {
+                c.push((what, d));
+            }
+        }
+        c
     }
 
     /// A set of accounts to swap whole for their twins, refused with
@@ -428,11 +458,6 @@ impl Sweep {
             if free.contains(&i) {
                 continue;
             }
-            let same_role: Vec<Address> = ok
-                .iter()
-                .filter(|a| a.at == i)
-                .flat_map(|a| a.who.clone().unwrap_or_default())
-                .collect();
             let mut tries: Vec<(String, AccountMeta, Option<Keypair>)> = vec![];
             if orig.is_signer {
                 let k = Keypair::new();
@@ -457,36 +482,19 @@ impl Sweep {
                     }
                 }
             } else {
-                tries.push((
-                    "a fresh address".into(),
-                    AccountMeta {
-                        pubkey: Address::new_unique(),
-                        ..orig.clone()
-                    },
-                    None,
-                ));
-                let mut seen = HashSet::new();
-                let inner: Vec<(String, Address)> = ix
-                    .accounts
-                    .iter()
-                    .enumerate()
-                    .map(|(j, a)| (format!("account {j}"), a.pubkey))
-                    .collect();
-                for (what, d) in inner.iter().chain(self.decoys.iter()) {
-                    if *d != orig.pubkey && seen.insert(*d) {
-                        tries.push((
-                            what.clone(),
-                            AccountMeta {
-                                pubkey: *d,
-                                ..orig.clone()
-                            },
-                            None,
-                        ));
-                    }
+                for (what, d) in self.candidates(&ix, &orig.pubkey) {
+                    tries.push((
+                        what,
+                        AccountMeta {
+                            pubkey: d,
+                            ..orig.clone()
+                        },
+                        None,
+                    ));
                 }
             }
             for (what, meta, key) in tries {
-                if same_role.contains(&meta.pubkey) && meta.is_signer == orig.is_signer {
+                if allows(ok, i, &meta.pubkey) && meta.is_signer == orig.is_signer {
                     continue;
                 }
                 let mut tampered = ix.clone();
@@ -564,6 +572,58 @@ impl Sweep {
                 Outcome::Unsignable
             ) {
                 self.unsigned.push((name.into(), orig.pubkey));
+            }
+        }
+        // A key no slot signs for that stands at two or more checked slots,
+        // swapped at all of them together: one at a time, a check that the
+        // slots are equal refuses every swap first, so it would hide the
+        // missing owner or PDA check of the account at both (Floor's abort
+        // checks its spill is its config). Its free slots, which take any
+        // account, do not count, but are swapped too, so the key is the same
+        // throughout. Not for a key with a backstop at one of its slots:
+        // every such swap changes that slot, so its refusal would excuse
+        // the swap whichever check is missing.
+        let mut done = HashSet::new();
+        for orig in &ix.accounts {
+            if !done.insert(orig.pubkey) {
+                continue;
+            }
+            // Every slot of the key, and those of them that are checked.
+            let at: Vec<usize> = (0..ix.accounts.len())
+                .filter(|&j| ix.accounts[j].pubkey == orig.pubkey)
+                .collect();
+            let slots: Vec<usize> = at.iter().copied().filter(|j| !free.contains(j)).collect();
+            if slots.len() < 2
+                || at.iter().any(|&j| ix.accounts[j].is_signer)
+                || slots.iter().any(|&j| !refusals_at[j].is_empty())
+            {
+                continue;
+            }
+            let mut sent = false;
+            for (what, d) in self.candidates(&ix, &orig.pubkey) {
+                if slots.iter().all(|&j| allows(ok, j, &d)) {
+                    continue;
+                }
+                let mut tampered = ix.clone();
+                for a in tampered
+                    .accounts
+                    .iter_mut()
+                    .filter(|a| a.pubkey == orig.pubkey)
+                {
+                    a.pubkey = d;
+                }
+                let report = format!(
+                    "{name}: account {} ({}) replaced by {what} at {at:?}",
+                    slots[0],
+                    short(&orig.pubkey)
+                );
+                sent |= !matches!(
+                    self.attempt(env, &base, tampered, None, &[], report),
+                    Outcome::Unsignable
+                );
+            }
+            if sent {
+                self.together.push((name.into(), orig.pubkey));
             }
         }
         // Each twin set whose anchor the transaction names, swapped whole:
