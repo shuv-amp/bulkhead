@@ -365,7 +365,43 @@ test("a guardian whose key file is refused alerts the webhook before it exits (f
   }
 });
 
-// A JSON-RPC server answering each method from `answers` (null otherwise).
+test("a guardian whose config is refused for a misspelt alert format still alerts a Slack hook in Slack's format", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/bh-start-`);
+  const bodies = [];
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => { b += c; });
+    req.on("end", () => { bodies.push([req.url, b]); res.end("ok"); });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const cfgPath = `${dir}/g.json`;
+    writeFileSync(cfgPath, JSON.stringify({
+      rpc: "http://127.0.0.1:9", vaultProgram: "11111111111111111111111111111111", protocolProgram: "11111111111111111111111111111111",
+      mints: [], guardianKey: `${dir}/none.json`, alert: { url: "https://hooks.slack.com/services/T/B/x", format: "slak" },
+    }));
+    // The guardian's fetch of the Slack URL goes to this server instead
+    // (--require: a preload every Node 20 takes).
+    writeFileSync(`${dir}/redirect.cjs`, `const f = globalThis.fetch; globalThis.fetch = (u, o) => f(String(u).replace("https://hooks.slack.com", "http://127.0.0.1:${server.address().port}"), o);`);
+    const main = fileURLToPath(new URL("../guardian/main.mjs", import.meta.url));
+    // A guardian that started instead would retry its dead RPC for ever.
+    const child = spawn(process.execPath, ["--require", `${dir}/redirect.cjs`, main, cfgPath], { stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+    let stderr = "";
+    child.stderr.on("data", (c) => { stderr += c; });
+    const code = await new Promise((r) => { child.on("exit", r); child.on("error", r); });
+    assert.equal(code, 1, stderr);
+    assert.equal(bodies.length, 1, "one alert reached the webhook");
+    assert.equal(bodies[0][0], "/services/T/B/x");
+    const body = JSON.parse(bodies[0][1]);
+    assert.deepEqual(Object.keys(body), ["text", "unfurl_links", "unfurl_media"]);
+    assert.match(body.text, /guardian stopped: config\.alert\.format: "slak" is not one of json, slack, discord/);
+  } finally {
+    server.close();
+  }
+});
+
+// A JSON-RPC server answering each method from `answers` (null otherwise);
+// an answer `{ error }` is sent as that JSON-RPC error.
 async function fakeRpc(answers) {
   const server = createServer((req, res) => {
     let b = "";
@@ -373,7 +409,8 @@ async function fakeRpc(answers) {
     req.on("end", () => {
       const { id, method } = JSON.parse(b);
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ jsonrpc: "2.0", id, result: answers[method] ?? null }));
+      const answer = answers[method];
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, ...(answer?.error ? { error: answer.error } : { result: answer ?? null }) }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -427,6 +464,22 @@ test("a guardian whose backup endpoint does not answer starts, and says its clus
     assert.doesNotMatch(out, /guardian stopped/);
   } finally {
     primary.server.close();
+  }
+});
+
+test("a guardian's log line stays well-formed JSON when its cut of an RPC error halves a surrogate pair", async () => {
+  // The backup's error is cut to 160 UTF-16 units; the emoji's first half is unit 159.
+  const pre = 'getGenesisHash: {"code":-32005,"message":"';
+  const primary = await fakeRpc({ getGenesisHash: GENESIS.devnet });
+  const backup = await fakeRpc({ getGenesisHash: { error: { code: -32005, message: `${"x".repeat(159 - pre.length)}😀` } } });
+  try {
+    const { code, out } = await startGuardian(primary.url, [backup.url], /no record of executed changes yet/);
+    assert.equal(code, null, out);
+    assert.match(out, /\(rpcs\[0\]\): getGenesisHash: \{\\"code\\":-32005,\\"message\\":\\"x+\uFFFD: no answer to getGenesisHash/);
+    assert.doesNotMatch(out, /\\u[dD][89a-fA-F]/);
+  } finally {
+    primary.server.close();
+    backup.server.close();
   }
 });
 

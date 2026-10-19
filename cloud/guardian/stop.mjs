@@ -28,10 +28,11 @@
 // key cannot stop it (not a live guardian, no abort buffer, no config, no
 // endpoint on the config's cluster).
 import { readFileSync } from "node:fs";
-import { Rpc, FailoverRpc, key, b58encode, decodeFloor } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, hostOf, key, b58encode, decodeFloor } from "../lib/solana.mjs";
 import { Keypair, send, priorityPrice } from "../lib/signer.mjs";
 import { FloorClient } from "../lib/bulkhead.mjs";
 import { GENESIS } from "./policy.mjs";
+import { jsonText } from "./alert.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (name, dflt) => {
@@ -62,17 +63,17 @@ if (cfg.cluster !== undefined && cfg.cluster !== "localnet" && !Object.hasOwn(GE
   process.exit(2);
 }
 const genesis = GENESIS[cfg.cluster] ?? null;
-const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
+const log = (o) => console.log(jsonText({ t: new Date().toISOString(), ...o }));
 if (cfg.cluster === undefined) log({ level: "warn", msg: "config.cluster is not set: the RPC's cluster is not checked" });
 // Reads go to the next endpoint when one cannot answer, as the guardian's do:
 // the primary alone used to decide, and one refused read ended the stop
 // before anything was sent (docs/09, finding 85). An endpoint on another
 // cluster is never read from (finding 117).
 const urls = [cfg.rpc, ...(cfg.rpcs ?? [])];
-const endpointName = (i) => `${new URL(urls[i]).host} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
+const endpointName = (i) => `${hostOf(urls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(urls, {
-    onSwitch: (from, to, e) => log({ level: "warn", msg: `RPC ${new URL(from).host} left; now using ${new URL(to).host}`, cause: e?.message?.slice(0, 120) }),
+    onSwitch: (from, to, e, fromAt, toAt) => log({ level: "warn", msg: `RPC ${endpointName(fromAt)} left; now using ${endpointName(toAt)}`, cause: e?.message?.slice(0, 120) }),
     genesis,
     onCluster: (url, got, at) => {
       if (got === genesis) return;

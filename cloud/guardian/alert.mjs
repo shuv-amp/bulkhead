@@ -4,7 +4,8 @@
 // too late.
 //
 // Config: "alert": { "url": "https://hooks.slack.com/...", "format": "slack" }
-// (format "slack" | "discord" | "json"). The URL is a secret: it is never
+// (format "slack" | "discord" | "json"; without one, the URL's own, see
+// formatFor). The URL is a secret: it is never
 // logged. An alert never delays the guardian: it is sent in the background,
 // with a timeout, and a failure is only logged.
 
@@ -199,12 +200,69 @@ export async function scanAll(scans, onError = () => {}) {
 /** The bodies webhookBody writes, by `alert.format` (checkConfig refuses others). */
 export const ALERT_FORMATS = ["json", "slack", "discord"];
 
-/** The webhook body for `format`. */
+/**
+ * The body format the alerter posts: `format` when it is one of
+ * ALERT_FORMATS; else the webhook's own: a Slack incoming webhook
+ * (hooks.slack.com/services/...) Slack's, a Discord webhook (discord.com or
+ * discordapp.com or a subdomain of either,
+ * /api[/vN]/webhooks/<id>/<token>[/]) Discord's; else a format refused only
+ * for its case or spacing ("Slack") as meant; else JSON. Slack workflow
+ * triggers take the JSON body's keys, so they keep it. The fatal alert of a
+ * config checkConfig refused (a misspelt format, or a misspelt key beside the
+ * url) is sent with that config, and Slack and Discord drop a JSON body, so
+ * the alert saying the guardian did not start was lost.
+ */
+export function formatFor(url, format) {
+  if (ALERT_FORMATS.includes(format)) return format;
+  let host = "";
+  let path = "";
+  try {
+    ({ hostname: host, pathname: path } = new URL(url));
+  } catch {}
+  if (host === "hooks.slack.com" && path.startsWith("/services/")) return "slack";
+  if (/(^|\.)discord(app)?\.com$/.test(host) && /^\/api(\/v\d+)?\/webhooks\/[^/]+\/[^/]+\/?$/.test(path)) return "discord";
+  const meant = typeof format === "string" ? format.trim().toLowerCase() : "";
+  return ALERT_FORMATS.includes(meant) ? meant : "json";
+}
+
+const SLACK_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+const [OPEN, CLOSE] = ["\n```\n", "\n```"];
+
+/**
+ * The webhook body for `format`. The detail can hold an RPC's own error text
+ * (solana.mjs puts its JSON error in the message), so the chat bodies show it
+ * as typed: in a code block (none when it is empty), which keeps a masked
+ * link "[label](url)", a spoiler or a heading from rendering. Its backticks
+ * are swapped for ˋ so it cannot close the block, and half surrogate pairs
+ * (cut upstream) for U+FFFD. Slack's body also escapes &, < and >, without which
+ * "<!channel>" pings the channel and "<url|label>" is a link under any label,
+ * and unfurls no link (unfurl_links, unfurl_media).
+ * Discord's parses no mentions ("@everyone"), shows no link previews (flags 4,
+ * SUPPRESS_EMBEDS), and its cut to 2000 keeps the block closed and no half
+ * surrogate pair.
+ */
 export function webhookBody(alert, format = "json", protocol = "") {
-  const text = `${alert.severity === "critical" ? "🚨" : "⚠️"} ${alert.title}${protocol ? ` (protocol ${protocol})` : ""}\n${alert.detail}`;
-  if (format === "slack") return { text };
-  if (format === "discord") return { content: text.slice(0, 2000) };
+  const head = `${alert.severity === "critical" ? "🚨" : "⚠️"} ${alert.title}${protocol ? ` (protocol ${protocol})` : ""}`;
+  const detail = alert.detail.toWellFormed().replaceAll("`", "ˋ");
+  const block = (d) => (d ? `${OPEN}${d}${CLOSE}` : "");
+  if (format === "slack") return { text: `${head}${block(detail)}`.replace(/[&<>]/g, (c) => SLACK_ESCAPES[c]), unfurl_links: false, unfurl_media: false };
+  if (format === "discord") {
+    const cut = detail.slice(0, 2000 - head.length - OPEN.length - CLOSE.length).replace(/[\uD800-\uDBFF]$/, "");
+    return { content: `${head}${block(cut)}`, allowed_mentions: { parse: [] }, flags: 4 };
+  }
   return { ...alert, protocol };
+}
+
+/**
+ * The JSON text of a log line or a webhook body. An RPC's error text cut by
+ * UTF-16 units (`.slice(0, 160)`) can end in half a surrogate pair, which
+ * JSON.stringify writes as "\ud83d": strict parsers (Rust's serde_json)
+ * refuse the whole line or body. Each string value is made well-formed
+ * (U+FFFD for a half pair; keys are the guardian's own names) and a bigint
+ * is written as its digits.
+ */
+export function jsonText(v) {
+  return JSON.stringify(v, (_, x) => (typeof x === "string" ? x.toWellFormed() : typeof x === "bigint" ? x.toString() : x));
 }
 
 /**
@@ -218,16 +276,17 @@ export function webhookBody(alert, format = "json", protocol = "") {
  * is tried again after each of `retryDelaysMs`; one never delivered is
  * un-muted, so its next occurrence is tried again rather than suppressed for
  * the window. One failed post used to drop even a freeze's alert and mute it
- * for 10 minutes (docs/09, finding 83).
+ * for 10 minutes (docs/09, finding 83). The body's format is formatFor's.
  */
-export function alerter({ url, format = "json", protocol = "", windowMs, timeoutMs = 5_000, retryDelaysMs = [1_000, 3_000, 9_000] } = {}, { fetchFn = globalThis.fetch, onError = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export function alerter({ url, format, protocol = "", windowMs, timeoutMs = 5_000, retryDelaysMs = [1_000, 3_000, 9_000] } = {}, { fetchFn = globalThis.fetch, onError = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const seen = new Map();
   const inflight = new Set();
+  const bodyFormat = formatFor(url, format);
   function send(line) {
     if (!url) return;
     const alert = alertFor(line, seen, now(), { windowMs });
     if (!alert) return;
-    const body = JSON.stringify(webhookBody(alert, format, typeof protocol === "function" ? protocol() : protocol));
+    const body = jsonText(webhookBody(alert, bodyFormat, typeof protocol === "function" ? protocol() : protocol));
     const post = async () => {
       const r = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
       if (!r.ok) throw new Error(`webhook answered ${r.status}`);

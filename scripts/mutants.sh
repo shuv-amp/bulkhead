@@ -14,6 +14,21 @@ SCOPE=(--package bulkhead-core --exclude "crates/bulkhead-core/src/proofs.rs")
 # picks another config. No colours: CI sets CARGO_TERM_COLOR=always, which
 # cargo-mutants obeys. Its report goes to stderr, so stdout is cargo-mutants'
 # own (`--list --json`).
+# --exclusions-only: that check and nothing else (scripts/check.sh runs it).
+# The counts are the mutants of the version CI installs, so with another
+# version, or none, it says so and passes; CI's `mutants` job checks them.
+only=0
+if [[ "${1:-}" == "--exclusions-only" ]]; then
+  only=1; shift
+  (( $# == 0 )) || { echo "mutants.sh: --exclusions-only takes no other argument" >&2; exit 2; }
+  want=$(sed -n 's/.*cargo install --locked cargo-mutants@\([^ ]*\).*/\1/p' .github/workflows/ci.yml | sort -u)
+  [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "mutants.sh: ci.yml must install one cargo-mutants version, X.Y.Z" >&2; exit 2; }
+  have=$(cargo mutants --version 2>/dev/null | awk '{print $2}' || true)
+  if [[ "$have" != "$want" ]]; then
+    echo "mutant exclusions: not checked, they need cargo-mutants $want (CI's version)" >&2
+    exit 0
+  fi
+fi
 case " $* " in
   *" --no-config "* | *" --config "* | *" --config="*) ;;
   *)
@@ -23,6 +38,7 @@ case " $* " in
     python3 tools/mutant_exclusions.py target/mutants-all.txt target/mutants-kept.txt >&2
     ;;
 esac
+if (( only )); then exit 0; fi
 # Release profile (overflow checks stay on, Cargo.toml): the workspace's tests
 # take ~5 s instead of ~36 s in debug, so a timeout means a mutant that loops,
 # not a slow test. With debug builds on a loaded machine, 69 mutants once hit

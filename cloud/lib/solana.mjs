@@ -358,6 +358,14 @@ export const SLOT_LAG_SWITCH = 150;
 export const SIGNATURE_LAG_SWITCH_MS = 30_000;
 
 /**
+ * An endpoint's host, for logs: RPC URLs often carry an API key. A URL that
+ * does not parse, or has no host ("localhost:8899" reads as a scheme), gives
+ * "(endpoint)": the stop's own copy parsed it, and a typo in its primary
+ * made it read nothing through good backups (docs/09, finding 121).
+ */
+export const hostOf = (url) => { try { return new URL(url).host || "(endpoint)"; } catch { return "(endpoint)"; } };
+
+/**
  * Several endpoints behind one `Rpc` interface. Each call goes first to the
  * active endpoint; when it cannot answer (`endpointTrouble`), the next one
  * is tried after at most one quick retry instead of the single endpoint's
@@ -366,8 +374,9 @@ export const SIGNATURE_LAG_SWITCH_MS = 30_000;
  * call waits once, until the first busy endpoint's wait ends (30 s at
  * most, 36 s with jitter), and asks it again, so with every endpoint busy
  * calls still slow down as the servers asked. An answer is never retried elsewhere: a
- * refused simulation is the same on every node. `onSwitch(from, to, error)`
- * reports a change of endpoint.
+ * refused simulation is the same on every node. `onSwitch(from, to, error,
+ * fromAt, toAt)` reports a change of endpoint, with both URLs and indexes:
+ * a URL listed twice does not name its entry.
  *
  * With `genesis`, an endpoint is used only once its genesis hash has matched
  * it, asked before its first use and again before each cross-check until it
@@ -384,6 +393,7 @@ export class FailoverRpc extends Rpc {
     this.endpoints = urls.map((url) => new Rpc(url, { timeoutMs, retries, ...opts, hurry: true }));
     this.active = 0;
     this.switches = 0; // moves of `active`, so a call can tell its evidence is older
+    this.restartWaits();
     this.onSwitch = onSwitch;
     this.genesis = genesis;
     this.onCluster = onCluster;
@@ -414,12 +424,41 @@ export class FailoverRpc extends Rpc {
     }
     if (typeof got !== "string") throw new Error("getGenesisHash: no hash");
     this.cluster[at] = got === this.genesis ? "ok" : "wrong";
-    this.onCluster(this.endpoints[at].url, got, at);
+    this.report("onCluster", this.endpoints[at].url, got, at);
+  }
+  /**
+   * Per endpoint index, the signatures crossCheck found missing from lists
+   * asked of it while it was active: signature -> { at: first seen missing,
+   * from: the backup that had it, slot }. Kept while another endpoint is
+   * active, and pruned only when this one is again.
+   */
+  restartWaits() {
+    this.missing = [];
+  }
+  /**
+   * Calls a report hook (`onSwitch`, `onCluster`; synchronous). One that
+   * throws is passed over, with a line on stderr: it ran inside call()'s
+   * try, so the endpoint that had just answered read as failing, its answer
+   * was dropped, and the request, a transaction too, went on to the next
+   * endpoint (docs/09, finding 121).
+   */
+  report(hook, ...args) {
+    try {
+      this[hook](...args);
+    } catch (e) {
+      // A log line's own failure says nothing about the endpoint. Nor may
+      // the trace's: String() of some thrown values throws too.
+      try {
+        console.error(`FailoverRpc: ${hook} threw: ${String(e?.message || e).slice(0, 160)}`);
+      } catch {
+        // nothing more to say
+      }
+    }
   }
   /** Make endpoint `at` the one asked first, and say so (`onSwitch`). */
   switchTo(at, cause) {
     if (at === this.active) return;
-    this.onSwitch(this.endpoints[this.active].url, this.endpoints[at].url, cause);
+    this.report("onSwitch", this.endpoints[this.active].url, this.endpoints[at].url, cause, this.active, at);
     this.active = at;
     this.switches++;
     this.url = this.endpoints[at].url;
@@ -436,12 +475,15 @@ export class FailoverRpc extends Rpc {
    *     to the best;
    *   - a backup's newest signature that the active endpoint does not list
    *     among its newest `depth` for more than `sigLagMs`: switch to that backup.
+   * What each endpoint was found missing is kept per endpoint, and judged
+   * only while it is active: a call() failover neither hands the old
+   * primary's wait to the new one nor restarts the wait of an endpoint it
+   * returns to. A switch by this check starts every wait again.
    * Returns `{ switched, reason, slots }`. An endpoint that does not answer,
    * or is busy and asks for more than `HURRY_WAIT_MS`, is skipped here (the
    * failover handles that): the guardian's loop waits for this check.
    */
   async crossCheck(address, { slotLag = SLOT_LAG_SWITCH, sigLagMs = SIGNATURE_LAG_SWITCH_MS, depth = 100, nowMs = Date.now() } = {}) {
-    this.missing ??= new Map(); // signature -> { at: first seen missing, from: endpoint index }
     const quiet = (p) => p.then((v) => v, () => undefined);
     const slots = await Promise.all(this.endpoints.map((e, i) => quiet(this.admit(i).then((ok) => (ok ? e.call("getSlot", [{ commitment: "confirmed" }]) : undefined)))));
     const active = this.active;
@@ -450,7 +492,7 @@ export class FailoverRpc extends Rpc {
     if (slots[best] != null && slots[active] != null && slots[best] - slots[active] > slotLag) {
       const reason = `RPC endpoint is behind: ${slots[best] - slots[active]} slots behind the best of ${this.endpoints.length} endpoints`;
       this.switchTo(best, new Error(reason));
-      this.missing.clear();
+      this.restartWaits();
       return { switched: true, reason, slots };
     }
     if (this.endpoints.length < 2) return { switched: false, reason: null, slots };
@@ -460,10 +502,11 @@ export class FailoverRpc extends Rpc {
       ...this.endpoints.map((e, i) => (i === active || this.cluster[i] !== "ok" ? Promise.resolve(undefined) : quiet(e.call("getSignaturesForAddress", q(1))))),
     ]);
     if (!mine) return { switched: false, reason: null, slots };
+    const missing = (this.missing[active] ??= new Map());
     const listed = new Set(mine.map((x) => x.signature));
     theirs.forEach((list, i) => {
       const row = list?.[0];
-      if (i !== active && row?.signature && !listed.has(row.signature) && !this.missing.has(row.signature)) this.missing.set(row.signature, { at: nowMs, from: i, slot: row.slot ?? null });
+      if (i !== active && row?.signature && !listed.has(row.signature) && !missing.has(row.signature)) missing.set(row.signature, { at: nowMs, from: i, slot: row.slot ?? null });
     });
     // Judged on the list ingestion reads (`getSignaturesForAddress`), by slot:
     // a candidate older than the oldest of a full newest-`depth` list has
@@ -473,14 +516,16 @@ export class FailoverRpc extends Rpc {
     // address index lags while its status cache is current (docs/09,
     // findings 81 and 84).
     const oldestListed = mine.length >= depth ? mine.at(-1)?.slot : null;
-    for (const [sig, m] of this.missing) if (oldestListed != null && m.slot != null && m.slot < oldestListed) listed.add(sig);
-    for (const [sig, m] of this.missing) {
+    for (const [sig, m] of missing) if (oldestListed != null && m.slot != null && m.slot < oldestListed) listed.add(sig);
+    for (const [sig, m] of missing) {
       if (listed.has(sig) || nowMs - m.at > 600_000) {
-        this.missing.delete(sig);
-      } else if (nowMs - m.at > sigLagMs) {
+        missing.delete(sig);
+      } else if (nowMs - m.at > sigLagMs && this.active === active) {
+        // Only if `active` is still the endpoint these lists judged: a
+        // call() may have failed over while they were in flight.
         const reason = `RPC endpoint is missing recent transactions: a backup has had ${sig} for ${Math.round((nowMs - m.at) / 1000)}s and the primary does not return it`;
         this.switchTo(m.from, new Error(reason));
-        this.missing.clear();
+        this.restartWaits();
         return { switched: true, reason, slots };
       }
     }
