@@ -3455,6 +3455,13 @@ fn every_account_substitution_is_refused() {
     ] {
         assert!(s.twinned.contains(&(run.into(), set.into())), "{run}: {set} not swapped");
     }
+    // No key that signs nowhere stands at two checked slots of a Vault
+    // transaction without a backstop: registration by the caller PDA names
+    // it to Harbor (slot 1) and to the Vault (slot 6), and Harbor's seeds
+    // check refuses any swap of slot 1 first. A run that adds such a key
+    // fails here until its case is looked at and pinned.
+    assert_eq!(s.together, vec![]);
+    assert_eq!(sp.together, vec![]);
     let mut all = s.unexpected;
     all.extend(sp.unexpected);
     assert!(
