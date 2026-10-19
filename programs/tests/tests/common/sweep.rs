@@ -8,7 +8,20 @@
 //! included) and stands at a checked slot, the key unsigned at every
 //! checked slot (a free slot where it signed gets the payer; not for the
 //! fee payer). Every swap must fail, except at positions the program
-//! deliberately leaves free (each listed with its reason).
+//! deliberately leaves free (each listed with its reason), and fail with
+//! the swept program's own error code: a refusal that only a CPI or the
+//! runtime makes would hide that program's check being deleted. A slot
+//! where another program or the runtime refuses by design is listed as a
+//! backstop, with the errors it refuses with and who refuses; a backstop
+//! whose errors never occur fails the sweep. The sweep cannot tell there
+//! whether the program's own check exists. Nor can it tell which of the
+//! program's checks refused: one deleted where a later check returns a
+//! code of the same program passes, so such checks need their own tests.
+//! A set of accounts that other checks tie to each other (a vault, its
+//! token account, its lifeboat) is also swapped whole for its twin in
+//! another protocol (`twin`), which must be refused with the code of the
+//! check that ties the set to this protocol: one at a time, the other
+//! checks refuse first, with the same code.
 #![allow(dead_code)]
 
 use super::vault::*;
@@ -20,42 +33,104 @@ use solana_keypair::Keypair;
 use solana_message::Message;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
+use solana_instruction_error::InstructionError;
+use solana_transaction_error::TransactionError;
 use std::collections::HashSet;
+use std::ops::Range;
+
+/// What one tampered transaction came to.
+enum Outcome {
+    /// A required signer is not a key we hold.
+    Unsignable,
+    /// Sent; a success or a refusal not by the program is already reported.
+    Sent,
+    /// Refused with this error a backstop names.
+    Backstopped(InstructionError),
+}
+
+/// A program's error codes: each program numbers its own from its first,
+/// InvalidInstruction (Floor 7000, the Vault 8000), fewer than 1000 of
+/// them; the programs they call (token, system, loader) use codes below 100.
+fn codes(first: u32) -> Range<u32> {
+    first..first + 1000
+}
 
 fn short(a: &Address) -> String {
     a.to_string()[..8].to_string()
 }
 
-/// A substitution the program accepts on purpose.
+/// A substitution the program accepts on purpose, or (`backstop`) a slot
+/// where something else refuses swaps first.
+#[derive(Clone)]
 pub struct Allow {
     pub at: usize,
     /// None: any account. Some: these addresses (the same role).
+    /// (Some and empty for a backstop: nothing else may stand there.)
     pub who: Option<Vec<Address>>,
-    #[allow(dead_code)]
     pub why: &'static str,
+    /// A backstop's errors: the slot is swept as usual (every swap must
+    /// fail), but a refusal with one of these, from another program or the
+    /// runtime, stands for the program's own code. Empty otherwise.
+    pub refusals: Vec<InstructionError>,
 }
 pub fn any(at: usize, why: &'static str) -> Allow {
-    Allow { at, who: None, why }
+    Allow {
+        at,
+        who: None,
+        why,
+        refusals: vec![],
+    }
 }
 pub fn role(at: usize, who: Vec<Address>, why: &'static str) -> Allow {
     Allow {
         at,
         who: Some(who),
         why,
+        refusals: vec![],
+    }
+}
+/// Swaps at `at` are refused with one of `refusals` before the swept
+/// program can refuse them; `why` names who refuses.
+pub fn backstop(at: usize, refusals: &[InstructionError], why: &'static str) -> Allow {
+    assert!(!refusals.is_empty(), "a backstop names the errors it refuses with");
+    Allow {
+        at,
+        who: Some(vec![]),
+        why,
+        refusals: refusals.to_vec(),
     }
 }
 
+/// A set of accounts swapped whole for their twins in another protocol.
+#[derive(Clone)]
+struct Twin {
+    what: String,
+    /// (account, its twin); the first is the set's anchor (the vault).
+    pairs: Vec<(Address, Address)>,
+    /// The code of the check that ties the set to its protocol.
+    code: u32,
+}
+
 pub struct Sweep {
+    /// The swept program's error codes (`codes`).
+    own: Range<u32>,
     decoys: Vec<(String, Address)>,
     keys: Vec<Keypair>,
     pub unexpected: Vec<String>,
     pub attempts: usize,
     pub unsignable: usize,
+    /// Swaps refused at a backstop slot by something other than the
+    /// program's own code.
+    pub backstopped: usize,
     /// Transactions swept (each `run`).
     pub runs: usize,
     /// (run name, key) for every key sent unsigned at all its checked
     /// slots (the payer standing in at free slots where it signed).
     pub unsigned: Vec<(String, Address)>,
+    /// Sets of accounts swapped whole (`twin`).
+    twins: Vec<Twin>,
+    /// (run name, set) for every transaction sent with a twin set swapped in.
+    pub twinned: Vec<(String, String)>,
 }
 
 impl Sweep {
@@ -95,18 +170,28 @@ impl Sweep {
         keys.extend(m.g.iter().map(|k| k.insecure_clone()));
         keys.extend(other.g.iter().map(|k| k.insecure_clone()));
         Sweep {
+            own: codes(verr::INVALID_INSTRUCTION),
             decoys,
             keys,
             unexpected: vec![],
             attempts: 0,
             unsignable: 0,
+            backstopped: 0,
             runs: 0,
             unsigned: vec![],
+            twins: vec![],
+            twinned: vec![],
         }
     }
 
-    /// A sweep with only the basic decoys and these keys.
-    pub fn new(env: &Env, decoys: Vec<(String, Address)>, keys: &[&Keypair]) -> Sweep {
+    /// A sweep with only the basic decoys and these keys, of a program whose
+    /// error codes start at `first_code`.
+    pub fn new(
+        env: &Env,
+        first_code: u32,
+        decoys: Vec<(String, Address)>,
+        keys: &[&Keypair],
+    ) -> Sweep {
         let mut d = vec![
             ("system".into(), SYSTEM),
             ("token program".into(), token_program()),
@@ -123,13 +208,17 @@ impl Sweep {
         let mut k = vec![env.payer.insecure_clone()];
         k.extend(keys.iter().map(|x| x.insecure_clone()));
         Sweep {
+            own: codes(first_code),
             decoys: d,
             keys: k,
             unexpected: vec![],
             attempts: 0,
             unsignable: 0,
+            backstopped: 0,
             runs: 0,
             unsigned: vec![],
+            twins: vec![],
+            twinned: vec![],
         }
     }
 
@@ -145,9 +234,38 @@ impl Sweep {
         self.decoys.push((name.into(), a));
     }
 
+    /// A set of accounts to swap whole for their twins, refused with
+    /// `code`, in every run that names its first account (in its accounts
+    /// or its data).
+    pub fn twin(&mut self, name: &str, pairs: Vec<(Address, Address)>, code: u32) {
+        self.twins.push(Twin {
+            what: name.into(),
+            pairs,
+            code,
+        });
+    }
+
+    /// The twin sets no run has swapped in (stale: the runs they were for
+    /// moved or no longer name the anchor).
+    pub fn unused_twins(&self) -> Vec<String> {
+        let used: HashSet<&String> = self.twinned.iter().map(|(_, set)| set).collect();
+        let mut stale: Vec<String> = vec![];
+        for t in &self.twins {
+            if !used.contains(&t.what) && !stale.contains(&t.what) {
+                stale.push(t.what.clone());
+            }
+        }
+        stale
+    }
+
     /// Sends `ix` signed by whichever known keys it needs (plus `extra`);
     /// None when a required signer is not a key we hold.
-    fn send(&self, env: &mut Env, ix: Instruction, extra: Option<&Keypair>) -> Option<bool> {
+    fn send(
+        &self,
+        env: &mut Env,
+        ix: Instruction,
+        extra: Option<&Keypair>,
+    ) -> Option<Result<(), FailedTransactionMetadata>> {
         let msg = Message::new(&[ix], Some(&env.payer.pubkey()));
         let n = msg.header.num_required_signatures as usize;
         let mut signers: Vec<&Keypair> = vec![];
@@ -156,33 +274,52 @@ impl Sweep {
             signers.push(found);
         }
         let tx = Transaction::new(&signers, msg, env.svm.latest_blockhash());
-        let ok = env.svm.send_transaction(tx).is_ok();
+        let r = env.svm.send_transaction(tx).map(|_| ());
         env.svm.expire_blockhash();
-        Some(ok)
+        Some(r)
     }
 
-    /// Sends one tampered transaction from `base`; a success is reported.
-    /// False when it could not be signed.
+    /// Sends one tampered transaction from `base`; a success is reported,
+    /// and so is a refusal by anything but the program's own code or one of
+    /// `refusals` (with the log line of the program that failed first).
     fn attempt(
         &mut self,
         env: &mut Env,
         base: &LiteSVM,
         tampered: Instruction,
         key: Option<&Keypair>,
+        refusals: &[InstructionError],
         report: String,
-    ) -> bool {
+    ) -> Outcome {
         env.svm = base.clone();
         if let Some(k) = key {
             env.fund(k);
         }
         self.attempts += 1;
-        let sent = self.send(env, tampered, key);
-        match sent {
-            None => self.unsignable += 1,
-            Some(true) => self.unexpected.push(report),
-            Some(false) => {}
+        let Some(sent) = self.send(env, tampered, key) else {
+            self.unsignable += 1;
+            return Outcome::Unsignable;
+        };
+        let Err(failed) = sent else {
+            self.unexpected.push(report);
+            return Outcome::Sent;
+        };
+        if custom_code(&failed).is_some_and(|c| self.own.contains(&c)) {
+            return Outcome::Sent;
         }
-        sent.is_some()
+        if let TransactionError::InstructionError(_, e) = &failed.err {
+            if refusals.contains(e) {
+                self.backstopped += 1;
+                return Outcome::Backstopped(e.clone());
+            }
+        }
+        let by = failed.meta.logs.iter().find(|l| l.contains(" failed: "));
+        self.unexpected.push(format!(
+            "{report}: refused by {:?}, not the program's own code ({})",
+            failed.err,
+            by.map_or("no failure logged", |l| l.as_str())
+        ));
+        Outcome::Sent
     }
 
     /// `ok`: what the program deliberately accepts, as (position, the
@@ -201,6 +338,14 @@ impl Sweep {
             .filter(|a| a.who.is_none())
             .map(|a| a.at)
             .collect();
+        let backstops: Vec<&Allow> = ok.iter().filter(|a| !a.refusals.is_empty()).collect();
+        // Per slot, the errors its backstops name.
+        let mut refusals_at: Vec<Vec<InstructionError>> = vec![vec![]; ix.accounts.len()];
+        for a in &backstops {
+            refusals_at[a.at].extend(a.refusals.iter().cloned());
+        }
+        // (slot, error) of every backstop refusal a swap produced in this run.
+        let mut seen_refusals: Vec<(usize, InstructionError)> = vec![];
         for k in extra_keys {
             if !self.keys.iter().any(|x| x.pubkey() == k.pubkey()) {
                 self.keys.push(k.insecure_clone());
@@ -209,10 +354,10 @@ impl Sweep {
         let base = env.svm.clone();
         assert_eq!(
             self.send(env, ix.clone(), None),
-            Some(true),
+            Some(Ok(())),
             "{name}: the unmodified transaction must succeed"
         );
-        for i in 0..ix.accounts.len() {
+        for (i, orig) in ix.accounts.iter().enumerate() {
             if free.contains(&i) {
                 continue;
             }
@@ -221,7 +366,6 @@ impl Sweep {
                 .filter(|a| a.at == i)
                 .flat_map(|a| a.who.clone().unwrap_or_default())
                 .collect();
-            let orig = ix.accounts[i].clone();
             let mut tries: Vec<(String, AccountMeta, Option<Keypair>)> = vec![];
             if orig.is_signer {
                 let k = Keypair::new();
@@ -284,7 +428,13 @@ impl Sweep {
                     "{name}: account {i} ({}) replaced by {what}",
                     short(&orig.pubkey)
                 );
-                self.attempt(env, &base, tampered, key.as_ref(), report);
+                if let Outcome::Backstopped(e) =
+                    self.attempt(env, &base, tampered, key.as_ref(), &refusals_at[i], report)
+                {
+                    if !seen_refusals.contains(&(i, e.clone())) {
+                        seen_refusals.push((i, e));
+                    }
+                }
             }
         }
         // Signing is per key, not per slot: unsigning one slot changes
@@ -326,7 +476,7 @@ impl Sweep {
                 env.svm = base.clone();
                 assert_eq!(
                     self.send(env, control, None),
-                    Some(true),
+                    Some(Ok(())),
                     "{name}: the payer must be accepted at {stand_in:?}"
                 );
             }
@@ -334,12 +484,91 @@ impl Sweep {
             if !stand_in.is_empty() {
                 report += &format!(", the payer at {stand_in:?}");
             }
-            if self.attempt(env, &base, unsigned, None, report) {
+            // Excused only by a missing-signature refusal one of the key's
+            // backstop slots names (not counted as seen there: which slot
+            // refused is unknown, so only account swaps keep a backstop).
+            let refusals: Vec<InstructionError> = slots
+                .iter()
+                .flat_map(|&j| refusals_at[j].iter().cloned())
+                .filter(|e| *e == InstructionError::MissingRequiredSignature)
+                .collect();
+            if !matches!(
+                self.attempt(env, &base, unsigned, None, &refusals, report),
+                Outcome::Unsignable
+            ) {
                 self.unsigned.push((name.into(), orig.pubkey));
+            }
+        }
+        // Each twin set whose anchor the transaction names, swapped whole:
+        // every account of the set it names becomes its twin, and so does
+        // each address of the set in the instruction data (a change names
+        // its target vault); not at a free slot, which takes any account.
+        // A set whose other accounts the transaction lacks can come to the
+        // same transaction as a smaller set: it is sent once.
+        let mut sent: Vec<Instruction> = vec![];
+        for Twin { what, pairs, code } in self.twins.clone() {
+            let twin = |a: &Address| pairs.iter().find(|(from, _)| from == a).map(|(_, to)| *to);
+            let anchor = pairs[0].0;
+            let in_data = ix.data.windows(32).any(|w| w == anchor.as_ref());
+            if !in_data && !ix.accounts.iter().any(|a| a.pubkey == anchor) {
+                continue;
+            }
+            let mut tampered = ix.clone();
+            for (i, a) in tampered.accounts.iter_mut().enumerate() {
+                if let Some(to) = twin(&a.pubkey).filter(|_| !free.contains(&i)) {
+                    a.pubkey = to;
+                }
+            }
+            for (from, to) in &pairs {
+                let mut i = 0;
+                while i + 32 <= tampered.data.len() {
+                    if tampered.data[i..i + 32] == *from.as_ref() {
+                        tampered.data[i..i + 32].copy_from_slice(to.as_ref());
+                        i += 32;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            if sent.contains(&tampered) {
+                continue;
+            }
+            sent.push(tampered.clone());
+            env.svm = base.clone();
+            let r = self.send(env, tampered, None);
+            if r.is_some() {
+                self.twinned.push((name.into(), what.clone()));
+            }
+            match r {
+                Some(Err(f)) if custom_code(&f) == Some(code) => {}
+                Some(Err(f)) => {
+                    let by = f.meta.logs.iter().find(|l| l.contains(" failed: "));
+                    self.unexpected.push(format!(
+                        "{name}: {what} replaced by its twin: refused by {:?}, not code {code} ({})",
+                        f.err,
+                        by.map_or("no failure logged", |l| l.as_str())
+                    ));
+                }
+                r => self.unexpected.push(format!(
+                    "{name}: {what} replaced by its twin: {:?}, not refused",
+                    r.map(|r| r.map_err(|f| f.err))
+                )),
+            }
+        }
+        // A backstop error no swap produced is stale: the program now
+        // refuses there itself, or the slot moved.
+        for a in &backstops {
+            for e in &a.refusals {
+                if !seen_refusals.contains(&(a.at, e.clone())) {
+                    self.unexpected.push(format!(
+                        "{name}: backstop at account {} ({}) never refused with {e:?}",
+                        a.at, a.why
+                    ));
+                }
             }
         }
         // Continue from the state after the real transaction.
         env.svm = base;
-        assert_eq!(self.send(env, ix, None), Some(true));
+        assert_eq!(self.send(env, ix, None), Some(Ok(())));
     }
 }

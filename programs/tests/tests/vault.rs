@@ -465,7 +465,7 @@ fn a_ticket_settles_after_its_eta_to_its_stored_recipient_only() {
     // Someone else's account can't receive it.
     let other = w.account("usdc", &Keypair::new().pubkey());
     let wrong = w.m.settle_ix(&w.usdc, &ticket, &other, &w.env.payer.pubkey());
-    assert!(w.env.send(&[wrong], &[]).is_err());
+    assert_eq!(w.env.fails(&[wrong], &[]), verr::RECIPIENT_OWNER_MISMATCH);
     // Nor can it be settled through another vault of the same protocol.
     let via_sol = w.m.settle_ix(&w.sol, &ticket, &to, &w.env.payer.pubkey());
     assert_eq!(w.env.fails(&[via_sol], &[]), verr::WRONG_VAULT);
@@ -815,6 +815,44 @@ fn harbor_withdraw_needs_the_users_signature() {
     assert_eq!(w.env.balance(&acc), 1_000 * USDC, "signed, it pays");
 }
 
+/// A deposit, like a release, comes only from the protocol's own caller
+/// (custody.rs:88). Without that check, another protocol's integration, or
+/// anyone calling the Vault directly, could put tokens into this protocol's
+/// vault and open a backing record for them that the protocol never saw.
+/// One case per half of the check: another protocol's caller PDA, signed by
+/// its own Harbor, and this protocol's caller PDA unsigned, called directly.
+/// Then the same deposit through this protocol's Harbor goes through.
+#[test]
+fn only_the_protocol_itself_can_deposit() {
+    let mut w = World::new();
+    let u = w.user();
+    let from = w.account("usdc", &u.pubkey());
+    w.env.mint_to(&w.usdc.mint, &w.usdc.mint_authority, &from, 1_000 * USDC, &w.usdc.token_program);
+    let deposit = w.m.deposit_ix(&w.env, &w.usdc, &u.pubkey(), &from, 1_000 * USDC);
+
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let mut theirs = deposit.clone();
+    theirs.program_id = other.harbor;
+    theirs.accounts[1].pubkey = other.caller;
+    assert_eq!(w.env.fails(&[theirs], &[&u]), verr::WRONG_CALLER);
+
+    // Harbor's accounts are the Vault program, the caller PDA and the user;
+    // the Vault's deposit accounts follow, after its caller.
+    let mut accounts = vec![AccountMeta::new_readonly(w.m.caller, false)];
+    accounts.extend(deposit.accounts[3..].iter().cloned());
+    let direct = w.m.vault_ix(7, &(1_000 * USDC).to_le_bytes(), accounts);
+    assert_eq!(w.env.fails(&[direct], &[&u]), verr::WRONG_CALLER);
+
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 0);
+    w.env.ok(&[deposit], &[&u]);
+    assert_eq!(w.env.balance(&w.usdc.vault_tokens), 1_000 * USDC);
+}
+
+/// A release, too (custody.rs:277), one case per half of the check: this
+/// protocol's caller PDA unsigned, called directly, and another protocol's
+/// caller PDA, signed by its own Harbor. Without the second half any signer
+/// in slot 0, a key or another program's PDA, could release from this
+/// protocol's vaults.
 #[test]
 fn only_the_protocol_itself_can_release() {
     let mut w = World::new();
@@ -826,6 +864,16 @@ fn only_the_protocol_itself_can_release() {
     accounts.extend(w.m.release_accounts(&w.env, &w.usdc, &acc, &u.pubkey(), &w.usdc_prices(false)));
     let ix = w.m.vault_ix(8, &(1_000 * USDC).to_le_bytes(), accounts);
     assert_eq!(w.env.fails(&[ix], &[]), verr::WRONG_CALLER);
+    // Another protocol's caller PDA, signed by its own Harbor: the user's
+    // own withdrawal, but not through this protocol.
+    let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
+    let withdraw = w.m.withdraw_ix(&w.env, &w.usdc, &u.pubkey(), &acc, 1_000 * USDC, &w.usdc_prices(false));
+    let mut theirs = withdraw.clone();
+    theirs.program_id = other.harbor;
+    theirs.accounts[1].pubkey = other.caller;
+    assert_eq!(w.env.fails(&[theirs], &[&u]), verr::WRONG_CALLER);
+    w.env.ok(&[withdraw], &[&u]);
+    assert_eq!(w.env.balance(&acc), 1_000 * USDC);
 }
 
 #[test]
@@ -1278,7 +1326,8 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     w.env.ok(&[propose], &[&w.m.admin]);
     let dest_owner = w.m.destination.pubkey();
     let dest = w.account("usdc", &dest_owner);
-    let thief = w.account("usdc", &Keypair::new().pubkey());
+    let thief_key = Keypair::new();
+    let thief = w.account("usdc", &thief_key.pubkey());
     let exit = |to: Address| {
         w.m.vault_ix(
             27,
@@ -1298,7 +1347,11 @@ fn the_lifeboat_moves_instantly_in_but_leaves_only_slowly_to_the_committed_desti
     assert_eq!(w.env.fails(&[early], &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
     w.env.advance(3 * DAY);
     let wrong = exit(thief);
-    assert!(w.env.send(&[wrong], &[&w.m.destination]).is_err(), "only the committed destination");
+    assert_eq!(w.env.fails(&[wrong], &[&w.m.destination]), verr::RECIPIENT_OWNER_MISMATCH, "only the committed destination");
+    // Nor when the thief signs for its own account: only the owner check is left.
+    let mut theirs = exit(thief);
+    theirs.accounts[6] = AccountMeta::new_readonly(thief_key.pubkey(), true);
+    assert_eq!(w.env.fails(&[theirs], &[&thief_key]), verr::RECIPIENT_OWNER_MISMATCH);
     // The destination signs (finding 85): nobody else can make the exit land.
     let mut unsigned = exit(dest);
     unsigned.accounts[6].is_signer = false;
@@ -2239,7 +2292,7 @@ fn queued_releases_built_from_the_same_state_do_not_collide() {
     assert_eq!(a.pending, 2);
     // A payer reusing its own nonce is refused, and nothing else is.
     let again = w.m.admin_payout_with(&w.env, &w.usdc, &tb, &b.pubkey(), 1_000 * USDC, &w.usdc_prices(true), 8);
-    assert!(w.env.send(&[again], &[&w.m.admin]).is_err());
+    assert_eq!(w.env.fails(&[again], &[&w.m.admin]), verr::ALREADY_INITIALIZED);
 }
 
 fn veto_change_ix(w: &World, id: u64, guardian: &Address) -> Instruction {
@@ -2418,14 +2471,58 @@ fn a_stolen_recovery_key_is_replaced_by_the_admin_with_a_live_quorum() {
     assert_eq!(protocol_admin(&w), admin);
 }
 
+/// A vault in `other` for the world's USDC mint (and SOL's, with `sol`),
+/// and the sweep's twin sets: a vault with its token and lifeboat
+/// accounts, for the other protocol's vault of the same mint. Each account
+/// alone is refused by the checks that tie it to the vault, so only the
+/// whole set reaches the check that ties the vault to its protocol
+/// (`load_vault`).
+fn twin_vaults(
+    w: &mut World,
+    other: &Market,
+    s: &mut common::sweep::Sweep,
+    sol: bool,
+) -> Vec<(VaultRef, Vec<(Address, Address)>)> {
+    let lifeboat = |m: &Market, v: &VaultRef| {
+        pda(&[b"lifeboat-tokens", m.protocol.as_ref(), v.mint.as_ref()], &m.vault_program)
+    };
+    let mut twins = vec![];
+    let mut vaults = vec![("the USDC vault", &w.usdc)];
+    if sol {
+        vaults.push(("the SOL vault", &w.sol));
+    }
+    for (name, v) in vaults {
+        let t = other.create_vault_for(
+            &mut w.env,
+            v.mint,
+            v.mint_authority.insecure_clone(),
+            v.decimals,
+            Limits::default_limits(),
+            v.feed,
+            v.token_program,
+        );
+        let pairs = vec![
+            (v.vault, t.vault),
+            (v.vault_tokens, t.vault_tokens),
+            (lifeboat(&w.m, v), lifeboat(other, &t)),
+        ];
+        s.twin(name, pairs.clone(), verr::WRONG_VAULT);
+        twins.push((t, pairs));
+    }
+    twins
+}
+
 #[test]
 fn every_account_substitution_is_refused() {
-    use common::sweep::{any, role, Sweep};
+    use common::sweep::{any, backstop, role, Allow, Sweep};
+    use solana_instruction_error::InstructionError as IE;
     let mut w = World::new();
     // A second protocol on the same Vault program, with its own vault.
     let other = Market::with_ids(&mut w.env, w.m.vault_program, Address::new_unique());
     let other_vault = other.create_vault(&mut w.env, 6, Limits::default_limits(), USDC_FEED, None);
     let mut s = Sweep::for_market(&w.env, &w.m, &w.sol, &other, &other_vault);
+    // Only the seal, swept in the second world, uses the SOL vault.
+    let twins = twin_vaults(&mut w, &other, &mut s, false);
 
     let whale = w.user();
     let whale_acc = w.deposit("usdc", &whale, 10_000_000 * USDC);
@@ -2453,9 +2550,26 @@ fn every_account_substitution_is_refused() {
         10_000_000 * USDC,
     );
     w.env.ok(&[ix], &[&other_whale]);
+    let twin_usdc = &twins[0].0;
+    let twin_acc = w.account("usdc", &other_whale.pubkey());
+    w.env.mint_to(
+        &w.usdc.mint,
+        &w.usdc.mint_authority,
+        &twin_acc,
+        10_000_000 * USDC,
+        &w.usdc.token_program,
+    );
+    let ix = other.deposit_ix(
+        &w.env,
+        twin_usdc,
+        &other_whale.pubkey(),
+        &twin_acc,
+        10_000_000 * USDC,
+    );
+    w.env.ok(&[ix], &[&other_whale]);
     w.env.ok(&[other.propose_seal_ix()], &[&other.admin]);
     w.seal();
-    let ix = other.execute_seal_ix(&[&other_vault]);
+    let ix = other.execute_seal_ix(&[&other_vault, &twins[0].0]);
     w.env.ok(&[ix], &[]);
     // Look-alikes a missing check would accept: a stranger's token accounts of
     // both mints, a queued ticket on the other vault, and one in the other market.
@@ -2490,6 +2604,25 @@ fn every_account_substitution_is_refused() {
     let (_, other_ticket) = other.next_ticket(&w.env);
     w.env.ok(&[ix], &[&other.admin]);
     s.decoy("a ticket in the other market", other_ticket);
+    // A ticket on the other protocol's USDC vault: with the vault, the twin
+    // of a ticket on this protocol's (each ticket names its vault).
+    let twin_payee = w.account("usdc", &stranger);
+    let ix = other.admin_payout_ix(
+        &w.env,
+        twin_usdc,
+        &twin_payee,
+        &stranger,
+        500_000 * USDC,
+        &[(twin_usdc.asset, twin_usdc.price)],
+    );
+    let (_, twin_ticket) = other.next_ticket(&w.env);
+    w.env.ok(&[ix], &[&other.admin]);
+    assert!(w.env.svm.get_account(&twin_ticket).is_some(), "the twin payout queues");
+    let with_ticket = |t: Address| {
+        let mut pairs = twins[0].1.clone();
+        pairs.push((t, twin_ticket));
+        pairs
+    };
     let (admin, g0, g1, g2) = (
         w.m.admin.pubkey(),
         w.m.g[0].pubkey(),
@@ -2507,6 +2640,24 @@ fn every_account_substitution_is_refused() {
         2,
         "Harbor's own user slot (demo integration); the Vault checks its own source authority",
     );
+    // Harbor's own checks (ProgramError, not Vault codes) run before the CPI,
+    // so at these slots Harbor, not the Vault, refuses a swap: the Vault
+    // program it calls, its caller PDA and, but for a deposit (whose user
+    // slot is free), its signer: a withdrawal's user, who must sign and own
+    // the recipient, or a payout's admin, who must sign and be the one the
+    // protocol records. So the Vault's own checks of that key are not seen.
+    let harbor = |signer: bool| -> Vec<Allow> {
+        let mut v = vec![
+            backstop(0, &[IE::IncorrectProgramId], "Harbor: the Vault program it calls"),
+            backstop(1, &[IE::InvalidSeeds], "Harbor: its caller PDA"),
+        ];
+        if signer {
+            v.push(backstop(2, &[IE::MissingRequiredSignature], "Harbor: its user (signs, owns the recipient) or admin (signs, is the protocol's)"));
+        }
+        v
+    };
+    // Harbor reads the admin from the protocol account before the Vault does.
+    let payout_protocol = backstop(H, &[IE::MissingRequiredSignature], "Harbor: the protocol records its admin");
     let unqueued = [
         any(H + 8, "ticket PDA: only used when part of a release is queued"),
         any(H + 9, "system program: only used to create a ticket"),
@@ -2528,7 +2679,20 @@ fn every_account_substitution_is_refused() {
         "deposit",
         ix,
         &[&whale],
-        &[harbor_user, payer_free(H + 7)],
+        &[
+            vec![
+                harbor_user,
+                payer_free(H + 7),
+                backstop(
+                    H + 4,
+                    &[IE::Custom(1), IE::Custom(3), IE::InvalidAccountData, IE::PrivilegeEscalation],
+                    "token program: the source must be a writable token account of the mint, with the funds",
+                ),
+                backstop(H + 5, &[IE::Custom(4)], "token program: the authority must own the source; the Vault checks it signs"),
+            ],
+            harbor(false),
+        ]
+        .concat(),
     );
 
     let ix = w.m.withdraw_ix(
@@ -2544,7 +2708,12 @@ fn every_account_substitution_is_refused() {
     // The owner's signature after the price pair: read only for a loan, so an
     // own-deposit withdrawal takes any key there (finding 74).
     ok.push(any(H + 12, "owner's signature: consulted only for a loan"));
-    s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &ok);
+    ok.extend(harbor(true));
+    // Harbor refuses a recipient its user does not own before the Vault sees
+    // it, so this sweep cannot see the Vault's own recipient checks.
+    let mut withdraw_ok = ok.clone();
+    withdraw_ok.push(backstop(H + 4, &[IE::MissingRequiredSignature], "Harbor: the user must own the recipient"));
+    s.run(&mut w.env, "withdraw (backed)", ix, &[&whale], &withdraw_ok);
     // The same withdrawal with the user's signature only at the free slot:
     // signing is per key, so Harbor still sees account 2 signed, and the
     // sweep must pick the key from there.
@@ -2568,7 +2737,7 @@ fn every_account_substitution_is_refused() {
     );
     ix.accounts[2].is_signer = false;
     assert!(ix.accounts[H + 12].pubkey == whale.pubkey() && ix.accounts[H + 12].is_signer);
-    s.run(&mut w.env, "withdraw (signed at the free slot only)", ix, &[&whale], &ok);
+    s.run(&mut w.env, "withdraw (signed at the free slot only)", ix, &[&whale], &withdraw_ok);
     // Harbor is right, so no swap succeeds here: check the try was made.
     assert!(
         s.unsigned.contains(&("withdraw (signed at the free slot only)".into(), whale.pubkey())),
@@ -2585,7 +2754,9 @@ fn every_account_substitution_is_refused() {
         10_000 * USDC,
         &w.usdc_prices(true),
     );
-    s.run(&mut w.env, "admin payout (instant)", ix, &[], &ok);
+    let mut payout_ok = ok.clone();
+    payout_ok.push(payout_protocol.clone());
+    s.run(&mut w.env, "admin payout (instant)", ix, &[], &payout_ok);
 
     let ix = w.m.admin_payout_ix(
         &w.env,
@@ -2596,12 +2767,17 @@ fn every_account_substitution_is_refused() {
         &w.usdc_prices(true),
     );
     let (_, t1) = w.m.next_ticket(&w.env);
+    s.twin("the USDC vault and ticket t1", with_ticket(t1), verr::WRONG_VAULT);
     s.run(
         &mut w.env,
         "admin payout (queued)",
         ix,
         &[],
-        &[any(H + 11, "price account: the payee owes nothing")],
+        &[
+            vec![any(H + 11, "price account: the payee owes nothing"), payout_protocol],
+            harbor(true),
+        ]
+        .concat(),
     );
 
     // --- tickets: extend, settle -------------------------------------------
@@ -2640,6 +2816,7 @@ fn every_account_substitution_is_refused() {
         &w.usdc_prices(true),
     );
     let (_, t2) = w.m.next_ticket(&w.env);
+    s.twin("the USDC vault and ticket t2", with_ticket(t2), verr::WRONG_VAULT);
     w.env.ok(&[ix], &[&w.m.admin]);
     // Past the ticket's ETA, heartbeating on the way (a guardian silent
     // longer than its 7-day interval stops counting).
@@ -3023,6 +3200,7 @@ fn every_account_substitution_is_refused() {
     let other_p = Market::with_ids(&mut p.env, p.m.vault_program, Address::new_unique());
     let other_pv = other_p.create_vault(&mut p.env, 6, Limits::default_limits(), USDC_FEED, None);
     let mut sp = Sweep::for_market(&p.env, &p.m, &p.sol, &other_p, &other_pv);
+    twin_vaults(&mut p, &other_p, &mut sp, true);
     let ix = create_vault_ix(&mut p, &Limits::default_limits());
     let (third_vault, third_tokens, third_mint) = (
         ix.accounts[3].pubkey,
@@ -3054,7 +3232,11 @@ fn every_account_substitution_is_refused() {
     );
     let ix = import_ix(&p, &owner.pubkey(), 5 * USDC);
     let p_vaults = vec![p.usdc.vault, p.sol.vault, third_vault];
-    sp.run(&mut p.env, "import backing", ix, &[], &[payer_free(0), role(3, p_vaults, "the admin imports into any vault of its protocol; the seal checks each vault's coverage")]);
+    sp.run(&mut p.env, "import backing", ix, &[], &[
+        payer_free(0),
+        role(3, p_vaults, "the admin imports into any vault of its protocol; the seal checks each vault's coverage"),
+        backstop(6, &[IE::MissingAccount], "system program: invoked by its fixed id to create the backing; anything else leaves the callee missing"),
+    ]);
     let ix = p.m.propose_seal_ix();
     sp.run(&mut p.env, "propose seal", ix, &[], &[]);
     let ix = p.m.vault_ix(
@@ -3100,9 +3282,12 @@ fn every_account_substitution_is_refused() {
     p.env.svm.add_program(harbor2, &so("bulkhead_harbor")).unwrap();
     let ix = p.m.register_ix(&p.env, harbor2, 3 * DAY);
     sp.run(&mut p.env, "register (caller PDA)", ix, &[], &[
-        any(2, "rent payer: any funded signer"),
-        any(5, "programdata: read only when the registrar is the upgrade authority, not the caller PDA"),
-    ]);
+        vec![
+            any(2, "rent payer: any funded signer"),
+            any(5, "programdata: read only when the registrar is the upgrade authority, not the caller PDA"),
+        ],
+        harbor(false),
+    ].concat());
     let team = Keypair::new();
     p.env.fund(&team);
     let (program, programdata) = p.env.deploy(&honest_v1(), &team, 4096);
@@ -3129,10 +3314,25 @@ fn every_account_substitution_is_refused() {
 
     let total = s.attempts + sp.attempts;
     println!(
-        "{total} substitutions over {} transactions; {} needed a key nobody here holds",
+        "{total} substitutions over {} transactions; {} needed a key nobody here holds; {} refused at a backstop slot, not by the Vault",
         s.runs + sp.runs,
-        s.unsignable + sp.unsignable
+        s.unsignable + sp.unsignable,
+        s.backstopped + sp.backstopped
     );
+    println!(
+        "{} transactions with a vault's accounts swapped whole for another protocol's",
+        s.twinned.len() + sp.twinned.len()
+    );
+    // Every twin set is swapped in somewhere, and the tickets' sets reach
+    // the runs whose vault check a ticket's check would otherwise hide.
+    assert_eq!(s.unused_twins(), Vec::<String>::new());
+    assert_eq!(sp.unused_twins(), Vec::<String>::new());
+    for (run, set) in [
+        ("settle ticket", "the USDC vault and ticket t2"),
+        ("cancel ticket", "the USDC vault and ticket t1"),
+    ] {
+        assert!(s.twinned.contains(&(run.into(), set.into())), "{run}: {set} not swapped");
+    }
     let mut all = s.unexpected;
     all.extend(sp.unexpected);
     assert!(
@@ -4648,7 +4848,7 @@ fn a_pre_seal_thief_cannot_seal_and_park_the_vault() {
     w.env.ok(&[ix], &[&recovery]);
     w.env.advance(3 * DAY + 1);
     w.refresh_prices();
-    assert!(w.env.send(&[w.m.execute_seal_ix(&[&w.usdc, &w.sol])], &[]).is_err(), "the thief's seal is gone");
+    assert_eq!(w.env.fails(&[w.m.execute_seal_ix(&[&w.usdc, &w.sol])], &[]), verr::SEAL_NOT_EXECUTABLE, "the thief's seal is gone");
 
     // (2) Without one: the seal executes, but the vault cannot be parked in
     // the same transaction, and the depositor leaves during the window.

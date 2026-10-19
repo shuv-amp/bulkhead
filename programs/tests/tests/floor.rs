@@ -836,7 +836,7 @@ fn orphaned_buffers_return_their_rent_to_the_owner() {
     // Nor the program itself: only a buffer can pass, so `Close` of the
     // programdata stays unreachable.
     for not_a_buffer in [f.programdata, f.program] {
-        assert!(env.send(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]).is_err());
+        assert_eq!(env.fails(&[f.close_buffer(&owner, &not_a_buffer)], &[&p.owner]), err::WRONG_BUFFER);
     }
     // A buffer someone still holds is not Floor's to close.
     let theirs = env.write_buffer(&honest_fix(), &p.owner);
@@ -1106,10 +1106,12 @@ fn the_floor_recovery_key_can_only_replace_the_owner_or_itself() {
 /// Account substitution over Floor's instructions (common/sweep.rs): program
 /// A is the target, program B (registered with its own owner and guardians)
 /// supplies look-alike accounts, and a stranger owns one more buffer. Every
-/// swap must fail except where Floor leaves a position free on purpose.
+/// swap must fail, with a Floor code, except where Floor leaves a position
+/// free on purpose (or, at the loader's slot, the runtime refuses first).
 #[test]
 fn every_floor_account_substitution_is_refused() {
-    use common::sweep::{any, role, Sweep};
+    use common::sweep::{any, backstop, role, Sweep};
+    use solana_instruction_error::InstructionError;
     let mut env = Env::new();
     let p = protect(&mut env, &honest_v1());
     let q = protect(&mut env, &honest_fix());
@@ -1134,7 +1136,10 @@ fn every_floor_account_substitution_is_refused() {
     let mut keys: Vec<&Keypair> = vec![&p.owner, &q.owner, &p.team, &q.team, &stranger];
     keys.extend(p.g.iter());
     keys.extend(q.g.iter());
-    let mut s = Sweep::new(&env, decoys, &keys);
+    let mut s = Sweep::new(&env, err::INVALID_INSTRUCTION, decoys, &keys);
+    // Floor names the loader by its fixed id in every loader call (loader.rs),
+    // so the runtime, not Floor, refuses any other account there.
+    let loader = |at| backstop(at, &[InstructionError::MissingAccount], "loader-v3: invoked by its fixed id; anything else leaves the callee missing");
     let guardians = gs.clone();
     let heartbeat_all = |env: &mut Env| {
         for g in &p.g {
@@ -1153,10 +1158,10 @@ fn every_floor_account_substitution_is_refused() {
     env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
     env.advance(3 * DAY);
     heartbeat_all(&mut env);
-    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &p.owner.pubkey()), &[], &[]);
+    s.run(&mut env, "execute upgrade", f.execute_code(&v2, &p.owner.pubkey()), &[], &[loader(8)]);
     env.next_slot();
     // The upgrade left the old pin orphaned: the owner takes its rent back.
-    s.run(&mut env, "close orphaned buffer", f.close_buffer(&p.owner.pubkey(), &p.snapshot), &[], &[]);
+    s.run(&mut env, "close orphaned buffer", f.close_buffer(&p.owner.pubkey(), &p.snapshot), &[], &[loader(4)]);
 
     // The snapshot no longer matches: pin one of the new code; stage a fresh abort buffer.
     let snap2 = env.write_buffer(&honest_fix(), &stranger);
@@ -1167,10 +1172,12 @@ fn every_floor_account_substitution_is_refused() {
     // Stop, then restore the snapshot with a quorum.
     s.run(&mut env, "abort (stop)", f.abort(&gs[0], &p.abort_buffer, Some(&snap2)), &[], &[
         role(1, guardians.clone(), "any live guardian"),
+        loader(9),
     ]);
     env.next_slot();
     s.run(&mut env, "restore snapshot", f.restore_snapshot(&snap2, &p.owner.pubkey(), &gs[0..2]), &[], &[
         role(9, guardians.clone(), "any quorum"),
+        loader(8),
         role(10, guardians.clone(), "any quorum"),
     ]);
     env.next_slot();
@@ -1192,7 +1199,7 @@ fn every_floor_account_substitution_is_refused() {
         role(1, guardians.clone(), "any quorum"),
         role(2, guardians.clone(), "any quorum"),
     ]);
-    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &p.owner.pubkey()), &[], &[]);
+    s.run(&mut env, "execute approved fix", f.execute_code(&fix, &p.owner.pubkey()), &[], &[loader(8)]);
     env.next_slot();
 
     // A raised delay applies at once; a quorum of the others ejects one guardian.
@@ -1218,12 +1225,12 @@ fn every_floor_account_substitution_is_refused() {
     s.key(&team3);
     let gs3: Vec<_> = p.g.iter().map(|k| k.pubkey()).collect();
     let reg = f3.register(&payer, &team3.pubkey(), &p.owner.pubkey(), &gs3, 2, 7 * DAY, 3 * DAY);
-    s.run(&mut env, "register", reg, &[], &[any(0, "rent payer: any funded signer")]);
+    s.run(&mut env, "register", reg, &[], &[any(0, "rent payer: any funded signer"), loader(7)]);
     let new_key = Keypair::new();
     let new_auth = new_key.pubkey();
     env.ok(&[f.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &new_auth, &[], None)], &[&p.owner]);
     env.advance(7 * DAY);
-    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[]);
+    s.run(&mut env, "execute release", f.execute_release(&p.owner.pubkey(), Some(&new_auth), &[]), &[&new_key], &[loader(3)]);
 
     // Releasing the other program to none: the owner signs (finding 95).
     env.ok(&[f3.propose(&p.owner.pubkey(), RELEASE_AUTHORITY, &zero, &[], None)], &[&p.owner]);
@@ -1234,9 +1241,9 @@ fn every_floor_account_substitution_is_refused() {
         .filter(|b| *b != [0; 32])
         .map(solana_address::Address::new_from_array)
         .collect();
-    s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[]);
+    s.run(&mut env, "execute release to none", f3.execute_release(&p.owner.pubkey(), None, &held3), &[], &[loader(3)]);
 
-    println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds", s.attempts, s.runs, s.unsignable);
+    println!("{} substitutions over {} Floor transactions; {} needed a key nobody here holds; {} refused at a backstop slot, not by Floor", s.attempts, s.runs, s.unsignable, s.backstopped);
     assert!(s.unexpected.is_empty(), "accepted substitutions ({}):\n{}", s.unexpected.len(), s.unexpected.join("\n"));
 }
 

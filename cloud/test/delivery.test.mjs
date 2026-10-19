@@ -763,3 +763,122 @@ test("a blockhash refusal after a backup landed the first copy is that copy, not
   assert.ok(sig);
   assert.equal(distinct.size, 1, "not signed again");
 });
+
+// The guardian checked only the active endpoint's genesis hash; a failover or
+// a cross-check could move it onto a backup on another cluster (finding 114).
+const MAINNET_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+const DEVNET_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
+const onCluster = (hash, slot, sigs = []) => (method) => ({ result: { getGenesisHash: hash, getSlot: slot, getSignaturesForAddress: sigs }[method] ?? null });
+
+test("failover: a backup on another cluster is never used, and is asked its genesis hash once (finding 114)", async () => {
+  // c answers with no hash: not judged, asked again.
+  const f = stubFetch({ "a.invalid": "down", "b.invalid": onCluster(DEVNET_HASH, 9), "c.invalid": onCluster(null, 9) });
+  const told = [];
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid", "http://c.invalid"], { genesis: MAINNET_HASH, onCluster: (url, got, at) => told.push([url, got, at]) });
+    // Two checks at once share one ask.
+    assert.deepEqual(await Promise.all([rpc.admit(1), rpc.admit(1)]), [false, false]);
+    await assert.rejects(rpc.call("getSlot"), /getGenesisHash: no hash/);
+    await assert.rejects(rpc.call("getSlot"), /getGenesisHash: no hash/);
+    assert.deepEqual(f.calls.filter(([h]) => h === "b.invalid"), [["b.invalid", "getGenesisHash"]]);
+    assert.deepEqual(f.calls.filter(([h]) => h === "c.invalid").map(([, m]) => m), ["getGenesisHash", "getGenesisHash"]);
+    assert.deepEqual(told, [["http://b.invalid", DEVNET_HASH, 1]]);
+    assert.deepEqual(rpc.cluster, ["unknown", "wrong", "unknown"]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: a backup on the right cluster is used once its genesis hash has matched (finding 114)", async () => {
+  const f = stubFetch({ "a.invalid": "down", "b.invalid": onCluster(MAINNET_HASH, 9) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH });
+    assert.equal(await rpc.call("getSlot"), 9);
+    assert.deepEqual(f.calls.filter(([h]) => h === "b.invalid"), [["b.invalid", "getGenesisHash"], ["b.invalid", "getSlot"]]);
+    assert.equal(rpc.active, 1);
+    // Without `genesis`, nothing is asked first.
+    f.calls.length = 0;
+    assert.equal(await new FailoverRpc(["http://b.invalid"]).call("getSlot"), 9);
+    assert.deepEqual(f.calls, [["b.invalid", "getSlot"]]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: an active endpoint found on another cluster is left for the one that answered (finding 114)", async () => {
+  const f = stubFetch({ "a.invalid": onCluster(DEVNET_HASH, 5), "b.invalid": onCluster(MAINNET_HASH, 9) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH });
+    assert.equal(await rpc.call("getSlot"), 9);
+    assert.equal(rpc.active, 1);
+    f.calls.length = 0;
+    assert.equal(await rpc.call("getSlot"), 9);
+    assert.deepEqual(f.calls, [["b.invalid", "getSlot"]]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: crossCheck never moves to a backup on another cluster, however far ahead (finding 114)", async () => {
+  const f = stubFetch({ "a.invalid": onCluster(MAINNET_HASH, 370_000_000), "b.invalid": onCluster(DEVNET_HASH, 410_000_000, [{ signature: "s", slot: 410_000_000 }]) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH });
+    const r = await rpc.crossCheck("addr", { sigLagMs: 0, nowMs: 0 });
+    assert.equal(r.switched, false);
+    assert.equal((await rpc.crossCheck("addr", { sigLagMs: 0, nowMs: 1 })).switched, false);
+    assert.equal(rpc.active, 0);
+    assert.deepEqual(f.calls.filter(([h]) => h === "b.invalid"), [["b.invalid", "getGenesisHash"]]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: a backup silent at one crossCheck is asked again at the next, and used once it matches (finding 114)", async () => {
+  let up = false;
+  const f = stubFetch({ "a.invalid": onCluster(MAINNET_HASH, 1_000), "b.invalid": (m) => (up ? onCluster(MAINNET_HASH, 2_000)(m) : "down") });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH });
+    assert.equal((await rpc.crossCheck("addr")).switched, false);
+    assert.deepEqual(rpc.cluster, ["ok", "unknown"]);
+    up = true;
+    const r = await rpc.crossCheck("addr");
+    assert.equal(r.switched, true);
+    assert.equal(rpc.active, 1);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: a busy endpoint before one on another cluster still gets its one wait (finding 114)", async () => {
+  let asked = 0;
+  const f = stubFetch({ "a.invalid": (m) => (asked++ === 0 ? busyFor(3) : onCluster(MAINNET_HASH, 9)(m)), "b.invalid": onCluster(DEVNET_HASH, 9) });
+  try {
+    const t0 = Date.now();
+    assert.equal(await new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH }).call("getSlot"), 9);
+    assert.ok(Date.now() - t0 > HURRY_WAIT_MS, `took ${Date.now() - t0} ms`);
+    assert.deepEqual(f.calls, [["a.invalid", "getGenesisHash"], ["b.invalid", "getGenesisHash"], ["a.invalid", "getGenesisHash"], ["a.invalid", "getSlot"]]);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: with every endpoint on another cluster, a call fails saying so (finding 114)", async () => {
+  const f = stubFetch({ "a.invalid": onCluster(DEVNET_HASH, 9), "b.invalid": onCluster(DEVNET_HASH, 9) });
+  try {
+    await assert.rejects(new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH }).call("getSlot"), /^Error: getSlot: no RPC endpoint on the expected cluster$/);
+  } finally {
+    f.restore();
+  }
+});
+
+test("failover: an endpoint that refuses getGenesisHash is passed over, not taken as the call's answer (finding 114)", async () => {
+  const refused = { error: { code: -32000, message: "method blocked" } };
+  const f = stubFetch({ "a.invalid": (m) => (m === "getGenesisHash" ? refused : { result: "never" }), "b.invalid": onCluster(MAINNET_HASH, 9) });
+  try {
+    const rpc = new FailoverRpc(["http://a.invalid", "http://b.invalid"], { genesis: MAINNET_HASH });
+    assert.equal(await rpc.call("getSlot"), 9);
+    assert.deepEqual(rpc.cluster, ["unknown", "ok"]);
+  } finally {
+    f.restore();
+  }
+});
