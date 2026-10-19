@@ -3,9 +3,10 @@
 //! signer, which protocol or vault it belongs to). For each instruction this
 //! takes a transaction that succeeds and swaps one account at a time for a
 //! fresh address, every other account in the transaction, a second market's
-//! accounts, the other vault, programs and sysvars, copies under another
-//! owner of accounts only an owner check tells from the real ones
-//! (`forgery`), and, for a signer, every other known key; then, per key that
+//! accounts, the other vault, programs and sysvars, a copy under another
+//! owner of each account of the swept program a transaction names (the
+//! test names those only an owner check tells from the real ones,
+//! `forgery`), and, for a signer, every other known key; then, per key that
 //! signs at any slot (a free one included) and stands at a checked slot, the
 //! key unsigned at every checked slot (a free slot where it signed gets the
 //! payer; not for the fee payer); and a key no slot signs for, at two or
@@ -130,13 +131,19 @@ struct Forgery {
     /// The real account as last seen, under `owner`; None until it first
     /// exists.
     last: Option<Account>,
+    /// Made by the sweep itself, not named by the test (`copied`).
+    auto: bool,
 }
 
 pub struct Sweep {
+    /// The swept program, whose accounts are copied (not the program a
+    /// transaction calls: Harbor's calls reach the Vault by CPI).
+    program: Address,
     /// The swept program's error codes (`codes`).
     own: Range<u32>,
     decoys: Vec<(String, Address)>,
-    /// Decoys rewritten before each run (`forgery`).
+    /// Decoys rewritten before each run (`forgery`, and the copies the
+    /// sweep makes itself).
     forgeries: Vec<Forgery>,
     keys: Vec<Keypair>,
     pub unexpected: Vec<String>,
@@ -157,6 +164,10 @@ pub struct Sweep {
     /// (run name, forgery) for every run that names a forgery's real
     /// account at a slot swapped for decoys and was offered the copy.
     pub forged: Vec<(String, String)>,
+    /// (run name, account) for the same, of the copies the sweep makes
+    /// itself: one of each account of the swept program a run names that
+    /// no forgery names.
+    pub copied: Vec<(String, Address)>,
     /// (run name, account) for every account no slot signs for sent swapped
     /// at all its checked slots together.
     pub together: Vec<(String, Address)>,
@@ -198,13 +209,19 @@ impl Sweep {
         ];
         keys.extend(m.g.iter().map(|k| k.insecure_clone()));
         keys.extend(other.g.iter().map(|k| k.insecure_clone()));
-        Sweep::with(codes(verr::INVALID_INSTRUCTION), decoys, keys)
+        Sweep::with(
+            m.vault_program,
+            codes(verr::INVALID_INSTRUCTION),
+            decoys,
+            keys,
+        )
     }
 
-    /// A sweep with only the basic decoys and these keys, of a program whose
-    /// error codes start at `first_code`.
+    /// A sweep with only the basic decoys and these keys, of `program`,
+    /// whose error codes start at `first_code`.
     pub fn new(
         env: &Env,
+        program: Address,
         first_code: u32,
         decoys: Vec<(String, Address)>,
         keys: &[&Keypair],
@@ -224,11 +241,17 @@ impl Sweep {
         d.extend(decoys);
         let mut k = vec![env.payer.insecure_clone()];
         k.extend(keys.iter().map(|x| x.insecure_clone()));
-        Sweep::with(codes(first_code), d, k)
+        Sweep::with(program, codes(first_code), d, k)
     }
 
-    fn with(own: Range<u32>, decoys: Vec<(String, Address)>, keys: Vec<Keypair>) -> Sweep {
+    fn with(
+        program: Address,
+        own: Range<u32>,
+        decoys: Vec<(String, Address)>,
+        keys: Vec<Keypair>,
+    ) -> Sweep {
         Sweep {
+            program,
             own,
             decoys,
             forgeries: vec![],
@@ -242,6 +265,7 @@ impl Sweep {
             twins: vec![],
             twinned: vec![],
             forged: vec![],
+            copied: vec![],
             together: vec![],
         }
     }
@@ -267,12 +291,18 @@ impl Sweep {
             !self.forgeries.iter().any(|f| f.what == name),
             "forgery names are unique"
         );
+        // Named before any run names it, or the sweep has copied it already.
+        assert!(
+            !self.forgeries.iter().any(|f| f.real == real),
+            "one copy per account"
+        );
         self.forgeries.push(Forgery {
             what: name.into(),
             real,
             forged: Address::new_unique(),
             owner: Address::new_unique(),
             last: None,
+            auto: false,
         });
     }
 
@@ -282,7 +312,7 @@ impl Sweep {
     pub fn unused_forgeries(&self) -> Vec<String> {
         self.forgeries
             .iter()
-            .filter(|f| !self.forged.iter().any(|(_, what)| *what == f.what))
+            .filter(|f| !f.auto && !self.forged.iter().any(|(_, what)| *what == f.what))
             .map(|f| f.what.clone())
             .collect()
     }
@@ -425,6 +455,22 @@ impl Sweep {
         // The forgeries go into this run's states only, not the one it
         // leaves behind.
         let clean = env.svm.clone();
+        // Each account of the swept program the transaction names that no
+        // forgery names gets one, so a kind of account no test lists is
+        // copied too.
+        for m in &ix.accounts {
+            let owned = env.svm.get_account(&m.pubkey).map(|a| a.owner);
+            if owned == Some(self.program) && !self.forgeries.iter().any(|f| f.real == m.pubkey) {
+                self.forgeries.push(Forgery {
+                    what: format!("{} under another owner", short(&m.pubkey)),
+                    real: m.pubkey,
+                    forged: Address::new_unique(),
+                    owner: Address::new_unique(),
+                    last: None,
+                    auto: true,
+                });
+            }
+        }
         for f in &mut self.forgeries {
             if let Some(mut a) = env.svm.get_account(&f.real) {
                 a.owner = f.owner;
@@ -444,7 +490,11 @@ impl Sweep {
                         && refusals_at[j].is_empty()
                 };
                 if ix.accounts.iter().enumerate().any(swept) {
-                    self.forged.push((name.into(), f.what.clone()));
+                    if f.auto {
+                        self.copied.push((name.into(), f.real));
+                    } else {
+                        self.forged.push((name.into(), f.what.clone()));
+                    }
                 }
             }
         }
