@@ -23,7 +23,9 @@ On 1 April 2026, **Drift lost $285M in about twelve minutes.** Drift had withdra
 <sub>A model, not a replay (<code>reference/drift_model.py</code>): Chainalysis per-asset amounts and an <b>assumed</b> $550M TVL, with vaults proportional to what was drained. The 2-minute freeze is an assumption too: the guardian freezes in 5–20 s on a local validator, not yet measured on mainnet. Lines join modeled points.</sub>
 
 > [!WARNING]
-> **Not independently audited. Not for real funds.** Bulkhead runs on devnet. Until an audit, its upgrade key is a disclosed team key; after one, it is burned and nobody can change the program. An internal pre-audit by six AI-agent reviewers is in [16](docs/16-AUDIT-REPORT.md). It is not an audit; see [SECURITY.md](SECURITY.md).
+> **Not independently audited. Not for real funds.** Bulkhead runs on devnet. Until an audit, its upgrade key is a disclosed team key; after one, it is burned and nobody can change the program. Two internal reviews run the way audits are run, by AI agents, are in [16](docs/16-AUDIT-REPORT.md) and [17](docs/17-EXTERNAL-REVIEW.md). Neither is an audit; see [SECURITY.md](SECURITY.md).
+>
+> **Who it is for today:** new launches and relaunches that route custody through it (treasuries, vaults, protocols without lending). Lending integrators wait for the decisions in [16 §4](docs/16-AUDIT-REPORT.md#4-decisions-for-the-team-before-a-lending-integration).
 
 <br>
 
@@ -36,7 +38,7 @@ On 1 April 2026, **Drift lost $285M in about twelve minutes.** Drift had withdra
 
 <sub>One run of <code>cloud/e2e/run.sh</code> on 17 Oct 2026, drawn from its own logs and played at 4× (the still: <a href="docs/assets/attack-light.png">light</a>, <a href="docs/assets/attack-dark.png">dark</a>). Every time and transaction signature is in <a href="docs/assets/src/s1-run.json"><code>s1-run.json</code></a>; timings depend on the machine. A payout's line ends when the attacker's client reports it, one RPC call after it lands, so the guardian sometimes cancels a ticket first.</sub>
 
-**Measured end to end** (`E2E=1 scripts/check-programs.sh`): a local validator, the programs, a 10M USDC vault, the Cloud guardian, and an attacker holding the demo protocol's admin key.
+**Measured end to end**, and reproducible with one command (`E2E=1 scripts/check-programs.sh`): a local validator, the programs, a 10M USDC vault, the Cloud guardian, and an attacker holding the demo protocol's admin key.
 
 | | |
 |---|---|
@@ -69,11 +71,11 @@ On Solana, the one control an admin or upgrade key can't get around is ownership
 
 <br>
 
-The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes. A deposit made just before an attack buys almost nothing, capital held for a single transaction (a flash loan) buys nothing, and money that has left stops counting at once. Each rate refills a bucket of the same size, so of the payouts requested from any moment on, at most **4% are paid within the hour and 10% within the day**. Above that, payouts wait at least 6 hours in a public queue that guardians can freeze and cancel. These limits count payouts when they are asked for, not when they land. Queued payouts can come due together, and a ticket that is due can be settled later, so this is not a cap on what leaves in a given clock hour. At the defaults, a single request can be as large as 40% of the vault (it is then due 7 days later) and is paid in one transfer, and tickets asked for over several days can all be settled at the same moment (19 fit in one legacy transaction), with no cap but the limits at the time they were asked for: with nobody cancelling, the whole vault 19 days after the first request. Every such payout sits in a public queue for at least 6 hours first, and any guardian can cancel it (`docs/09`, finding 102).
-
-Protocols should also set absolute caps in tokens: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
-
-The one exception is a loan against allowlisted, Pyth-priced collateral. It is bounded by haircuts and Pyth, not by the limiter, and a guardian's freeze stops new ones ([threat model](docs/04-THREAT-MODEL.md), T5; [finding 90](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)).
+- **The base.** The percentages apply to the least of the live balance, its 24-hour average and its lowest balance of the last 30 to 60 minutes. A deposit made just before an attack buys almost nothing, capital held for one transaction (a flash loan) buys nothing, and money that has left stops counting at once.
+- **Two buckets.** Each rate refills a bucket of the same size, so of the payouts requested from any moment on, at most **4% are paid within the hour and 10% within the day**. Above that, payouts wait at least 6 hours in a public queue that guardians can freeze and cancel.
+- **What the queue is not.** The limits count payouts when they are asked for, not when they land. Queued payouts can come due together, so this is no cap on what leaves in a given clock hour: at the defaults one request can be 40% of the vault (due 7 days later) and tickets asked for over several days can settle in the same moment. What every such payout gets is at least 6 hours in public, in which any guardian can cancel it (`docs/09`, finding 102).
+- **Caps.** Set absolute caps in tokens too: they bound an attacker who parks their own capital in the vault first ([15](docs/15-ADVERSARIAL-REVIEW.md)).
+- **The exception.** A loan against allowlisted, Pyth-priced collateral is bounded by haircuts and Pyth, not by the limiter; a guardian's freeze stops new ones ([threat model](docs/04-THREAT-MODEL.md), T5; [finding 90](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)).
 
 </details>
 
@@ -85,6 +87,20 @@ The one exception is a loan against allowlisted, Pyth-priced collateral. It is b
 | **Stops** | Money leaving too fast, whatever the cause: a stolen admin key (the Drift class), a buggy payout path, malicious new code in the protocol, even a one-transaction drain | Malicious *new code*: new binaries wait 72 h in public, any guardian can stop the program at once, and a quorum restores the exact bytes that were stopped |
 | **Does not stop** | Outflow within the limits when nobody responds: up to 10% of the vault asked for and paid within a day, plus queued payouts once they are due, which can land together (finding 102). Guardians and alerts cover that. | A drain through the existing code's own admin instructions, which is how Drift was drained. Only Vault bounds that. |
 | **Adoption** | The protocol routes deposits and withdrawals through it: easiest for new launches and relaunches | One transaction, zero code changes, for any upgradeable program (shown on a real 1 MB mainnet program: `scripts/floor-demo.sh`) |
+
+### Integrating
+
+A protocol replaces two token transfers with two CPIs, signed by its own PDA `["bulkhead-caller"]`, which only its program can sign for. Everything else (limits, guardians, the queue) is configuration.
+
+```rust
+// deposit: the user signs as the source authority; the vault credits what arrived
+invoke_signed(&deposit_ix, &accounts, &[Signer::from(&caller_seeds)])?;
+// release: Bulkhead pays now, queues the rest as a public ticket, or refuses
+invoke_signed(&release_ix, &accounts, &[Signer::from(&caller_seeds)])?;
+let outcome = get_return_data(); // backed | instant | queued | ticket_id | eta_s
+```
+
+The checklist, the calibration method and the demo protocol that does exactly this (`programs/harbor`, 140 lines) are in [07](docs/07-INTEGRATION.md). `attest` returns the live worst case to any program that asks, so a router or curator can refuse to route into a venue whose bound is too wide.
 
 **Who the guardians are.** When a protocol registers, it names 4–8 guardian keys: for example its operations key, the Bulkhead Cloud bot and two security firms. Only guardians that heartbeat count. Any one of them can freeze, veto or stop, and none can move money. A live quorum of the others ejects a rogue guardian instantly (a new set has at least two keys more than its threshold, so after any two lost or rogue keys the others still reach one, unless the rogues are a quorum themselves: two in a 2-of-n set), so a stolen guardian key means denial of service until then, never theft.
 
@@ -117,7 +133,7 @@ Timelocks are settings, not floors. Stop buttons act after the transaction that 
 
 ## Verify it yourself
 
-**In seconds, with nothing to build** (Node 20+ or Python 3.9+): the live devnet market, as the status page shows it, and who can upgrade any program.
+Three levels, by the time they take. **In seconds, with nothing to build** (Node 20+ or Python 3.9+): the live devnet market, as the status page shows it, and who can upgrade any program.
 
 ```bash
 node cloud/status/snapshot.mjs https://api.devnet.solana.com HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b \
@@ -159,7 +175,7 @@ node cloud/deploy/vault-check.mjs <url> <market> # a live market checked without
 
 </details>
 
-These scripts install nothing. The core has zero dependencies, and Cloud and the Python code use only their standard libraries.
+These scripts install nothing. The core has zero dependencies, and Cloud and the Python code use only their standard libraries. Every count stated in this file and in `docs/` is checked against the tree by `tools/claims.py` on every pull request, so a number here is never older than the code.
 
 ### What the checks show
 
@@ -170,16 +186,16 @@ These scripts install nothing. The core has zero dependencies, and Cloud and the
 | **Differential** <br><sub>an independent Python reference vs the Rust core</sub> | **6,943,561 lines identical** (6 seeds × 200k cases, 27 Sep); 33 commands now, 300k cases on every pull request and 3M weekly in CI |
 | **Program vs model** | Random steps on-chain, every outcome equal to the core's prediction: 12,000 (Vault), 300,000 with random limits and every brake (Vault), 200,000 (Floor) |
 | **Mutation testing** <br><sub><code>cargo-mutants</code>: 797 mutants of the core in the last full run, 15 Oct; in CI on every change to the core</sub> | **Every non-equivalent mutant killed**; 22 equivalent mutants, each with the reason it can't change behavior ([`09 §6`](docs/09-VERIFICATION.md#6-mutation-testing)) |
-| **Coverage-guided fuzzing** <br><sub>libFuzzer, 9 targets: the byte parsers and the full-width limiter and ledger</sub> | 36M–277M executions per target in the 6 Oct run (10 min each), no program bug; every parser fuzzed in that run at full line coverage (but the loader-parser target, unchanged since that run, never got past `elf_info`'s magic check in 417M runs on 17 Oct). That run had 8 targets. 17 Oct: all 9 for 30 min each, 125M–440M executions per target, no crash; region coverage of that run found the guardian-set target (added 14 Oct) unable to build an empty set and the ELF header reader never past its magic check, both fixed since; 09 gives examples of the other regions it missed ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026)) |
+| **Coverage-guided fuzzing** <br><sub>libFuzzer, 9 targets: the byte parsers and the full-width limiter and ledger</sub> | 125M–440M executions per target in the 17 Oct run (30 min each), no crash. Region coverage of that run found two targets that never reached the code they exist for; both fixed ([`09 §2`](docs/09-VERIFICATION.md#2-layers-and-current-results-10-oct-2026), finding 109) |
 | **Property tests** <br><sub>G1–G5, fail closed, tightening, the SIMD-0500 gate, snapshot identity, ejection</sub> | 26/26, with coverage counters so a vacuous pass fails |
 | **Golden vectors** <br><sub>every worked example in the docs, exact boundaries, the abort binaries' bytes, loader layouts</sub> | 119/119 identical, Rust = Python |
 | **End to end** | [Above](#what-it-does-to-an-attack) |
-| **On devnet** | All three programs run the build of PR #85 (15 Oct; this tree's Floor and Vault add finding 107, and Floor findings 115 and 116, not deployed yet), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
-| **What this process found** <br><sub>in our own code and docs</sub> | **145 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–145 were recorded after the submission (107 is the engagement's AUD-2, decided 16 Oct): 96–99, 101 and 103 are fixed and run on devnet since 15 Oct; 105 (CI tooling), 106, 108, 112, 113 and 120 (Vault tests), 107 (the guardian margin, not yet on devnet), 109 (fuzz targets), 110 and 111 (Floor tests), 114 (the guardian's startup checks, not yet on devnet), 115 and 116 (Floor's snapshot length rule, not yet on devnet; 116's class below sBPF v3 is stated), 117–119, 121–126 and 128–131 (the guardian, its alerts and the emergency stop, not yet on devnet), and 127 (Floor and Vault tests) are fixed; 100, 102 and 104 are stated. The Rust core and the Python reference shared one bug; only a third, independent statement of the rule caught it. |
+| **On devnet** | All three programs run the build of PR #85 (15 Oct; the on-chain changes merged since are not deployed yet), matched byte for byte against CI's build of that commit, upgrade authority checked. **S1 ran there on 1 Oct**: the admin key ordered 1.2M, 100,000 left, the guardian froze and cancelled the other 11. Floor S10 with real transactions: one guardian stops, two restore byte-identical, 17/17 forbidden actions refused ([below](#live-on-devnet)) |
+| **What this process found** <br><sub>in our own code and docs</sub> | **145 findings**: real bugs, two overclaimed guarantees, test gaps, deploy-tooling hazards, and the attacks of adversarial reviews and audits. Each is fixed or stated, with the test that fails without the fix ([`09 §4`](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)); 96–145 were recorded after the submission, 132–145 by the review in [17](docs/17-EXTERNAL-REVIEW.md). The Rust core and the Python reference once shared a bug; only a third, independent statement of the rule caught it, which is why the reference is now written from the mechanism, not from the Rust (finding 142). |
 
 ## Live on devnet
 
-Deployed 28 Sep 2026. All three programs have been upgraded in place since then (same ids, market and seal), most recently on 15 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #85, `main` at `3eec968` (Harbor: the same bytes since 6 Oct): Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. CI repeats this check every week on `main`'s build, so its `devnet` job, and with it the required `ci` check, fails for Floor and Vault until findings 107, 115 and 116 are deployed (115 and 116 change Floor only).
+Deployed 28 Sep 2026 and upgraded in place since (same ids, market and seal), most recently on 15 Oct (Floor and Vault; Harbor on 6 Oct). Each runs exactly the canonical build of PR #85, `main` at `3eec968`: Linux x86_64, as CI builds it and as the Solana Foundation's verifiable-build image reproduces it on any machine. The on-chain changes merged since (findings 107, 115, 116 and 132–134) are not deployed yet; CI's weekly devnet comparison says so until they are.
 
 | Program | Devnet id | sha256 of the build |
 |---|---|---|
@@ -188,7 +204,7 @@ Deployed 28 Sep 2026. All three programs have been upgraded in place since then 
 | **Harbor** <sub>demo protocol</sub> | [`6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh`](https://explorer.solana.com/address/6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh?cluster=devnet) | `543be60b…10adeb40` |
 
 ```bash
-scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet (run it at `3eec968` until 107, 115 and 116 are deployed)
+scripts/verify-devnet.sh   # builds natively on Linux x86_64, in Docker elsewhere, then compares with devnet (at `3eec968` until the next deploy)
 ```
 
 A Mac build orders the Vault's functions differently, so compare with that build, not a local one ([`09`, finding 43](docs/09-VERIFICATION.md#4-what-this-process-found-every-item-fixed-or-stated)). All three programs share one upgrade authority, a team key disclosed with the full hashes in [SECURITY.md](SECURITY.md#devnet-deployment).
@@ -242,10 +258,10 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 
 ## Documentation
 
-**Start here:** [FAQ](docs/FAQ.md) · [03 Mechanism](docs/03-MECHANISM.md) · [04 Threat model](docs/04-THREAT-MODEL.md) · [16 Pre-audit report](docs/16-AUDIT-REPORT.md)
+**Start here:** [FAQ](docs/FAQ.md) · [07 Integration](docs/07-INTEGRATION.md) · [03 Mechanism](docs/03-MECHANISM.md) · [04 Threat model](docs/04-THREAT-MODEL.md) · [17 External review](docs/17-EXTERNAL-REVIEW.md)
 
 <details>
-<summary><b>All 18 documents</b></summary>
+<summary><b>All 19 documents</b></summary>
 
 <br>
 
@@ -269,6 +285,7 @@ The programs use [Pinocchio](https://github.com/anza-xyz/pinocchio) and build fo
 | [14 State of the art](docs/14-STATE-OF-THE-ART.md) | Every mechanism compared with the best shipped systems (Wormhole NTT, CCIP, Kamino, Project 0, MetaMorpho, Lido, Aave, network calculus): what we took, what we rejected, why |
 | [15 Adversarial review](docs/15-ADVERSARIAL-REVIEW.md) | An internal red-team pass on the code and the idea: what an attacker who knows every rule gets, what was fixed, what is still open |
 | [16 Pre-audit report](docs/16-AUDIT-REPORT.md) | A six-reviewer engagement run like an audit, by AI agents (9 Oct 2026): scope, method, every finding and its status, external assumptions checked, and the design decisions left before a lending integration. Not a substitute for an independent audit |
+| [17 External review](docs/17-EXTERNAL-REVIEW.md) | A full-tree review of the programs, the guardian, the verification layer and the build path (22 Oct 2026): findings 132–145, what held, what was fixed with a failing test each, and what is left for the team to decide |
 
 </details>
 
