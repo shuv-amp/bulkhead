@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Bulkhead reference model: the executable specification.
 
-This file is written independently of the Rust crate `bulkhead-core`. Both must
-produce identical integers for every input. `diff_runner.py` feeds the same
-random cases to both and fails on the first disagreement.
+This file states the mechanism of docs/03 in its own terms, not the Rust
+crate's: the limiter as rates and virtual finish times, the valuation as one
+exact rational rounded once, the ledger rule on the ledger after the payment
+with its soundness checked from scratch, the overflow domain as closed bounds
+rather than a chain of checked products (`09`, finding 140). The Rust crate
+`bulkhead-core` must produce identical integers for every input;
+`diff_runner.py` feeds the same random cases to both and fails on the first
+disagreement. Where the mechanism fixes an implementation detail (the search's
+midpoint where soundness is not an interval), it is named as such.
 
 Python integers are unbounded, so every place where Rust must detect overflow
 is checked here against an explicit limit (U64_MAX, U128_MAX, I128_MAX).
@@ -42,29 +48,49 @@ def ceil_div(a: int, b: int) -> int:
 # ---------------------------------------------------------------------------
 # Limiter: two GCRA buckets that must both conform
 # ---------------------------------------------------------------------------
+# Stated from the mechanism (docs/03 §2), not from the Rust code. A bucket is
+# a rate `C/W` (base units per millisecond) with a burst of `C`. Its state is
+# one instant, the theoretical arrival time TAT: the moment the bucket is
+# empty again. A request of `u` at time `t` is given the virtual finish time
+#
+#     finish(u, t) = max(TAT, t) + ⌈u · W / C⌉ ms
+#
+# (the exact time its share of the rate takes, rounded up to a whole
+# millisecond, never more than COST_MAX_MS), and it conforms when that finish
+# lies within one window of now: finish − t ≤ W. The arithmetic below is
+# exact (fractions.Fraction), with rounding applied once, where the mechanism
+# says so.
 
-def capacity_from_ref(reference: int, bps: int, floor: int, cap: int) -> int:
-    """C = clamp(floor(reference * bps / BPS), floor, cap); cap == 0 means no cap."""
-    c = min(reference * bps // BPS, U64_MAX)   # saturate; bps > BPS is rejected by the program
-    if c < floor:
-        c = floor
-    if cap > 0 and c > cap:
-        c = cap
+from fractions import Fraction
+from math import ceil, floor
+
+
+def capacity_from_ref(reference: int, bps: int, floor_: int, cap: int) -> int:
+    """C = clamp(⌊reference · bps / 10 000⌋, floor_, cap); cap == 0 means no cap.
+    A u64 result, saturated."""
+    c = min(floor(Fraction(reference * bps, BPS)), U64_MAX)
+    c = max(c, floor_)
+    if cap > 0:
+        c = min(c, cap)
     return c
 
 
 def cost_ms(amount: int, capacity: int, window_ms: int) -> int:
-    """Time a request of `amount` consumes in a bucket, rounded up, saturated."""
-    return min(ceil_div(amount * window_ms, capacity), COST_MAX_MS)
+    """Whole milliseconds a request of `amount` takes at the bucket's rate,
+    rounded up, never more than COST_MAX_MS."""
+    return min(ceil(Fraction(amount * window_ms, capacity)), COST_MAX_MS)
 
 
 class Limiter:
     """Dual-bucket GCRA with FIFO reservations.
 
     A request is instant only if it conforms to BOTH buckets and the lane is not
-    frozen. Otherwise it becomes a ticket whose ETA is the earliest time it would
-    conform, but never earlier than now + min_queue_delay or the end of a freeze.
-    Queued requests reserve capacity exactly like instant ones (FIFO).
+    frozen. Otherwise it becomes a ticket whose ETA is the earliest moment at
+    which it would have conformed to both (each bucket's finish minus its
+    window), never earlier than now + the minimum delay, nor than the end of a
+    freeze. A queued request reserves its finish times exactly as an instant
+    one does, so later requests queue behind it (FIFO), and a cancellation
+    gives nothing back.
     """
 
     def __init__(self, c1: int, w1: int, c2: int, w2: int, d: int, horizon: int):
@@ -73,92 +99,107 @@ class Limiter:
         self.tat1 = 0
         self.tat2 = 0
 
+    def _finish(self, now: int, amount: int):
+        """Each bucket's virtual finish time for this request."""
+        return (max(self.tat1, now) + cost_ms(amount, self.c1, self.w1),
+                max(self.tat2, now) + cost_ms(amount, self.c2, self.w2))
+
     def request(self, now: int, amount: int, frozen_until: int):
         if amount <= 0:
             return ("X", "ZeroAmount")
         if self.c1 == 0 or self.c2 == 0:
-            return ("X", "LaneClosed")
-        nt1 = max(self.tat1, now) + cost_ms(amount, self.c1, self.w1)
-        nt2 = max(self.tat2, now) + cost_ms(amount, self.c2, self.w2)
+            return ("X", "LaneClosed")        # a bucket with no capacity: the lane is shut
+        f1, f2 = self._finish(now, amount)
+        conforms = f1 - now <= self.w1 and f2 - now <= self.w2
         frozen = now < frozen_until
-        if (not frozen) and nt1 - now <= self.w1 and nt2 - now <= self.w2:
-            self.tat1, self.tat2 = nt1, nt2
-            return ("I", nt1, nt2)
-        eta = max(now + self.d, nt1 - self.w1, nt2 - self.w2)
+        if conforms and not frozen:
+            self.tat1, self.tat2 = f1, f2
+            return ("I", f1, f2)
+        # The earliest moment it would have conformed to both buckets, pushed
+        # to the minimum delay and past any freeze.
+        eta = max(now + self.d, f1 - self.w1, f2 - self.w2)
         if frozen:
             eta = max(eta, frozen_until)
         if eta - now > self.horizon:
-            return ("X", "QueueFull")
-        self.tat1, self.tat2 = nt1, nt2
-        return ("Q", eta, nt1, nt2)
+            return ("X", "QueueFull")         # nothing reserved
+        self.tat1, self.tat2 = f1, f2
+        return ("Q", eta, f1, f2)
 
     def reset_backlog(self, now: int, pending_tickets: int):
-        """Clamp each bucket to 'just emptied'. Only legal with no pending tickets."""
+        """With no ticket pending, each bucket is at most "just emptied": its
+        TAT is brought back to now + W where it lay beyond. That is a full
+        bucket's worth of waiting, never less than one, so G1's bound keeps
+        (docs/03 §2.5, the resets case)."""
         if pending_tickets != 0:
             return ("X", "TicketsPending")
-        if self.tat1 > now + self.w1:
-            self.tat1 = now + self.w1
-        if self.tat2 > now + self.w2:
-            self.tat2 = now + self.w2
+        self.tat1 = min(self.tat1, now + self.w1)
+        self.tat2 = min(self.tat2, now + self.w2)
         return ("Z", self.tat1, self.tat2)
 
     def set_windows(self, now: int, w1: int, w2: int):
-        """New windows keep each bucket's used fraction: backlog * new / old, rounded up.
-
-        A backlog in ms is a smaller share of a longer window; leaving it as is
-        would let a longer window (a tightening, applied at once) refill a
-        drained bucket.
-        """
-        def scaled(tat: int, old_w: int, new_w: int) -> int:
-            # No early exit on an unchanged window: the Rust rescales (and
-            # saturates at COST_MAX_MS) whatever the ratio, so a backlog past
-            # 2^61 ms must come out the same here (docs/09, finding 140).
-            if tat <= now or old_w <= 0 or new_w <= 0:
+        """New windows keep each bucket's *used fraction*: a backlog of
+        `b` ms in a window `W` is the share `b / W` of the bucket, and that
+        share is carried into the new window, rounded toward "more used"
+        (never more than COST_MAX_MS of backlog, never past i64). A bucket
+        with no backlog, or a window no valid config has, is left as it is."""
+        def carried(tat: int, old_w: int, new_w: int) -> int:
+            backlog = tat - now
+            if backlog <= 0 or old_w <= 0 or new_w <= 0:
                 return tat
-            backlog = ceil_div((tat - now) * new_w, old_w)
-            return min(now + min(backlog, COST_MAX_MS), I64_MAX)
-        self.tat1 = scaled(self.tat1, self.w1, w1)
-        self.tat2 = scaled(self.tat2, self.w2, w2)
+            share = Fraction(backlog, old_w)                  # used fraction of the old window
+            new_backlog = min(ceil(share * new_w), COST_MAX_MS)
+            return min(now + new_backlog, I64_MAX)
+        self.tat1 = carried(self.tat1, self.w1, w1)
+        self.tat2 = carried(self.tat2, self.w2, w2)
         self.w1, self.w2 = w1, w2
         return ("W", self.tat1, self.tat2)
 
     def available_now(self, now: int) -> int:
-        """Largest amount that would be instant right now (ignoring freezes)."""
-        out = None
-        for tat, c, w in ((self.tat1, self.c1, self.w1), (self.tat2, self.c2, self.w2)):
-            backlog = max(tat, now) - now
-            room = w - backlog
-            a = 0 if room <= 0 else room * c // w
-            out = a if out is None else min(out, a)
-        return min(out, U64_MAX)
+        """The largest amount instant right now (freezes aside): the amount
+        whose exact cost fits the room each bucket has left, ⌊room · C / W⌋,
+        the smaller of the two, as a u64."""
+        def room_of(tat: int, c: int, w: int) -> int:
+            room = w - (max(tat, now) - now)            # ms of the window not yet reserved
+            return 0 if room <= 0 else floor(Fraction(room * c, w))
+        return min(room_of(self.tat1, self.c1, self.w1), room_of(self.tat2, self.c2, self.w2), U64_MAX)
 
 
 def max_unbacked_over(c1: int, w1: int, c2: int, w2: int, t_ms: int) -> int:
-    """Upper bound on unbacked value an attacker can be paid within t_ms of starting."""
-    return min(c1 * (w1 + t_ms) // w1, c2 * (w2 + t_ms) // w2)
+    """G1: the most an attacker starting at a full bucket is paid within
+    `t_ms`: one burst plus the refill over `t_ms`, `C · (W + t) / W`, floored;
+    both buckets apply, so the smaller bound does."""
+    bound = lambda c, w: floor(Fraction(c * (w + t_ms), w))
+    return min(bound(c1, w1), bound(c2, w2))
 
 
 # ---------------------------------------------------------------------------
-# Reference balance (EMA with a linear step)
+# Reference balance (EMA with a linear step) and the low-water balance
 # ---------------------------------------------------------------------------
 
 def ema_update(reference: int, last_s: int, balance: int, now_s: int, initialized: bool) -> int:
+    """The reference moves the share `min(elapsed, τ) / τ` of the way toward
+    the balance, in whole units, truncated toward where it was (so it never
+    overshoots). A first touch takes the balance itself."""
     if not initialized:
         return balance
-    dt = max(0, now_s - last_s)
-    f = min(dt, TAU_S)
-    if balance >= reference:
-        return reference + (balance - reference) * f // TAU_S
-    return reference - (reference - balance) * f // TAU_S
+    share = Fraction(min(max(0, now_s - last_s), TAU_S), TAU_S)
+    gap = balance - reference
+    step = floor(share * abs(gap))
+    return reference + step if gap >= 0 else reference - step
 
 
 LOW_WINDOW_S = 1_800
 
 
 def window_low_touch(prev: int, cur: int, window: int, balance: int, now_s: int, initialized: bool):
-    """The low-water balance after a touch (Rust `WindowLow::touch`): the least
-    balance seen before an operation in the current and the previous window."""
-    w = now_s // LOW_WINDOW_S                      # floor division: div_euclid
+    """The low-water balance: the least balance any touch saw, before its
+    operation, in the current aligned 30-minute window and the one before.
+    State is (least of the previous window, least of this one, which window
+    "this" is). A first touch, or one after at least a whole idle window, has
+    no history but the balance itself; a touch in the next window rolls the
+    windows; a touch in the same window (or at a clock that stepped back)
+    only ever lowers this window's least."""
+    w = now_s // LOW_WINDOW_S
     if not initialized or w > window + 1:
         return balance, balance, w
     if w == window + 1:
@@ -170,61 +211,50 @@ def window_low_touch(prev: int, cur: int, window: int, balance: int, now_s: int,
 # Value conversion and conservative prices
 # ---------------------------------------------------------------------------
 
-def pow10(k: int):
-    if k > 38:
-        return None                          # 10^39 > U128_MAX; also avoids huge powers
-    return 10 ** k
-
-
 def value_v(amount: int, mantissa: int, expo: int, decimals: int, weight_bps: int, round_up: bool):
-    """Value of `amount` base units at price mantissa*10^expo, times weight_bps/BPS,
-    in units of 1e-18 USD. Returns None on any u128 overflow or if the result
-    does not fit in i128 (callers treat None as fail-closed)."""
+    """The value of `amount` base units at the price `mantissa · 10^expo`
+    (per whole token of `decimals` decimals), weighted by `weight_bps / 10 000`,
+    in units of 1e-18 USD:
+
+        value = amount · mantissa · 10^(18 + expo − decimals) · weight / 10 000
+
+    exactly, then floored (collateral) or ceiled (a liability). None, which
+    every caller reads as "unknown, fail closed", when the computation leaves
+    the program's 128-bit domain: the exponent gap `18 + expo − decimals`
+    beyond ±38 (10^39 has no u128), the numerator `amount · mantissa · weight ·
+    10^max(gap, 0)` or the denominator `10 000 · 10^max(−gap, 0)` above
+    U128_MAX, or a result above I128_MAX. A zero amount, price or weight is
+    worth exactly 0."""
     if amount == 0 or mantissa == 0 or weight_bps == 0:
         return 0
-    num = amount * mantissa
-    if num > U128_MAX:
+    gap = VALUE_DECIMALS + expo - decimals
+    if abs(gap) > 38:
         return None
-    num *= weight_bps
-    if num > U128_MAX:
+    numerator = amount * mantissa * weight_bps * 10 ** max(gap, 0)
+    denominator = BPS * 10 ** max(-gap, 0)
+    if numerator > U128_MAX or denominator > U128_MAX:
         return None
-    shift = VALUE_DECIMALS + expo - decimals
-    if shift >= 0:
-        p = pow10(shift)
-        if p is None:
-            return None
-        num *= p
-        if num > U128_MAX:
-            return None
-        den = BPS
-    else:
-        p = pow10(-shift)
-        if p is None:
-            return None
-        den = BPS * p
-        if den > U128_MAX:
-            return None
-    v = ceil_div(num, den) if round_up else num // den
+    exact = Fraction(numerator, denominator)
+    v = ceil(exact) if round_up else floor(exact)
     return v if v <= I128_MAX else None
 
 
 def conservative_price(price: int, conf: int, ema: int, conf_mult_bps: int):
-    """(lo, hi) mantissas. lo = min(spot, ema) - k, hi = max(spot, ema) + k,
-    k = ceil(conf * conf_mult_bps / BPS). Non-positive spot or ema -> None."""
+    """The bracket collateral and liabilities are valued at: `k` sigmas of
+    confidence (rounded up), taken off the lower of spot and EMA for `lo` (not
+    below 0) and added to the higher for `hi`. Spot and EMA must be positive."""
     if price <= 0 or ema <= 0:
         return None
-    k = ceil_div(conf * conf_mult_bps, BPS)
-    lo = max(0, min(price, ema) - k)
-    hi = max(price, ema) + k
-    return (lo, hi)
+    k = ceil(Fraction(conf * conf_mult_bps, BPS))
+    return (max(0, min(price, ema) - k), max(price, ema) + k)
 
 
 def price_is_usable(price: int, conf: int, publish_time: int, now: int, max_age_s: int, max_conf_bps: int) -> bool:
-    if price <= 0:
+    """A positive price, published no later than now and no more than
+    `max_age_s` ago, whose confidence is at most `max_conf_bps` of it."""
+    if price <= 0 or not 0 <= now - publish_time <= max_age_s:
         return False
-    if publish_time > now or now - publish_time > max_age_s:
-        return False
-    return conf * BPS <= max_conf_bps * price
+    return Fraction(conf, price) <= Fraction(max_conf_bps, BPS)
 
 
 # ---------------------------------------------------------------------------
@@ -234,78 +264,87 @@ def price_is_usable(price: int, conf: int, publish_time: int, now: int, max_age_
 #   ("N",)                              not allowlisted (worth 0 as collateral, cannot be borrowed backed)
 #   ("U",)                              allowlisted but no valid price supplied
 #   ("P", lo, hi, expo, decimals, haircut_bps, liability_bps)
+#
+# The rule (docs/03 §4.4), stated here on the ledger *after* the payment:
+# paying `b` of mint `j` is sound when the owner then
+#   1. owes nothing anywhere, and holds `j` (net ≥ 0): no prices needed (G2); or
+#   2. holds `j`, and `j` is not allowlisted: it was worth 0 as collateral; or
+#   3. otherwise: `j` is priced, a new liability has a free slot, every
+#      liability is priced, and health ≥ 0, where health is the sum of the
+#      collateral at `lo` times the haircut and the liabilities at `hi` times
+#      the liability weight. Collateral whose value leaves the 128-bit domain
+#      counts 0; a liability whose value does makes health unknown.
+# The backed amount is the largest sound `b ≤ a`.
 
 
 def contribution(net: int, pricing):
     """Signed value of one position; None means 'unknown' (fail closed)."""
     if net == 0:
         return 0
-    kind = pricing[0]
+    if pricing[0] != "P":
+        return 0 if net > 0 else None
+    _, lo, hi, expo, dec, haircut, liab = pricing
     if net > 0:
-        if kind != "P":
-            return 0
-        _, lo, _hi, expo, dec, haircut, _liab = pricing
         v = value_v(net, lo, expo, dec, haircut, False)
         return 0 if v is None else v
-    # liability
-    if kind != "P":
-        return None
-    _, _lo, hi, expo, dec, _haircut, liab = pricing
     v = value_v(-net, hi, expo, dec, liab, True)
     return None if v is None else -v
 
 
-def health(positions: dict, lookup) -> int | None:
+def health(positions: dict, lookup):
+    """Sum of contributions, or None if any is unknown or the sum leaves i128."""
     total = 0
     for mint, net in positions.items():
         c = contribution(net, lookup(mint))
         if c is None:
             return None
         total += c
-        if total > I128_MAX or total < -(I128_MAX + 1):
-            return None
-    return total
+    return total if -(I128_MAX + 1) <= total <= I128_MAX else None
 
 
-def _valid(positions: dict, mint, b: int, lookup, h_others) -> bool:
-    n = positions.get(mint, 0)
-    after = n - b
-    others_liab = any(v < 0 for m, v in positions.items() if m != mint)
-    if not others_liab and after >= 0:
-        return True                          # own deposit back, nobody owes anything: no prices
-    pj = lookup(mint)
-    if after >= 0 and pj[0] == "N":
-        return True                          # zero-valued collateral: withdrawing it cannot lower health
-    if pj[0] != "P":
-        return False
-    if after < 0 and mint not in positions and len(positions) >= MAX_SLOTS:
-        return False                         # a new liability needs a free slot
-    if h_others is None:
-        return False
-    cj = contribution(after, pj)
-    if cj is None:
-        return False
-    return h_others + cj >= 0
+def _after(positions: dict, mint, b: int) -> dict:
+    """The ledger after paying `b` of `mint` (a zero position is removed)."""
+    after = dict(positions)
+    net = after.pop(mint, 0) - b
+    if net != 0:
+        after[mint] = net
+    return after
+
+
+def sound_after(positions: dict, mint, b: int, lookup) -> bool:
+    """Whether paying `b` of `mint` leaves the ledger sound (the rule above)."""
+    after = _after(positions, mint, b)
+    net_after = after.get(mint, 0)
+    liabilities = [m for m, v in after.items() if v < 0]
+    if net_after >= 0 and not liabilities:
+        return True                                           # rule 1 (G2)
+    pricing = lookup(mint)
+    if net_after >= 0 and pricing[0] == "N":
+        return True                                           # rule 2
+    if pricing[0] != "P":
+        return False                                          # j must be priced
+    if net_after < 0 and mint not in positions and len(positions) >= MAX_SLOTS:
+        return False                                          # a new liability needs a free slot
+    h = health(after, lookup)
+    return h is not None and h >= 0                           # every liability priced, health ≥ 0
 
 
 def backed_amount(positions: dict, mint, amount: int, lookup) -> int:
-    """Largest b <= amount that may be paid through the backed lane."""
+    """The largest sound `b ≤ amount`, found by bisection over [0, amount]
+    (0 is always sound). Soundness is an interval below the largest sound
+    amount everywhere but where a collateral value leaves the 128-bit domain
+    and so counts 0 (docs/03 §4.4): there the search may stop at a sound
+    amount below the largest, which is conservative, and the on-chain program
+    is specified to stop at the same one, so the midpoint is fixed as
+    `lo + ⌈(hi − lo) / 2⌉` (`09`, finding 4)."""
     if amount <= 0:
         return 0
-    n = positions.get(mint, 0)
-    others_liab = any(v < 0 for m, v in positions.items() if m != mint)
-    if not others_liab and n >= amount:
+    if sound_after(positions, mint, amount, lookup):
         return amount
-    if all(v <= 0 for v in positions.values()):
-        return 0                            # no collateral at all: nothing can be backed
-    others = {m: v for m, v in positions.items() if m != mint}
-    h_others = health(others, lookup)
-    if _valid(positions, mint, amount, lookup, h_others):
-        return amount                       # the largest valid b <= amount, by definition
-    lo, hi = 0, amount - 1                  # invariant: b = lo is acceptable
+    lo, hi = 0, amount - 1
     while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if _valid(positions, mint, mid, lookup, h_others):
+        mid = lo + ceil_div(hi - lo, 2)
+        if sound_after(positions, mint, mid, lookup):
             lo = mid
         else:
             hi = mid - 1

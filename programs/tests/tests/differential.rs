@@ -253,6 +253,7 @@ fn run(seed: u64, steps: u64) -> [u64; 13] {
                     Some(i) => vec![&users[i]],
                     None => vec![&m.admin],
                 };
+                let recipient_before = env.balance(&recipient);
                 let result = env.send(&[ix], &signers);
 
                 // The model.
@@ -310,6 +311,13 @@ fn run(seed: u64, steps: u64) -> [u64; 13] {
                         // position left: the next new mint goes after the rest.
                         md.ledgers.insert(owner.to_bytes(), compact(&l));
                         md.balance -= backed + instant;
+                        // I8: the recipient, and only the recipient, receives
+                        // exactly what left the vault (finding 144).
+                        assert_eq!(
+                            env.balance(&recipient),
+                            recipient_before + backed + instant,
+                            "seed {seed} step {step}: I8 recipient balance"
+                        );
                         if queued > 0 {
                             md.tickets.insert(id, (queued, eta));
                             ticket_accounts.insert(id, (ticket, recipient));
@@ -323,6 +331,7 @@ fn run(seed: u64, steps: u64) -> [u64; 13] {
                     // lane closed, or not enough tokens).
                     (Err(f), Err(code)) => {
                         assert_eq!(custom_code(f), Some(code), "seed {seed} step {step}: refusal code {:?}", f.err);
+                        assert_eq!(env.balance(&recipient), recipient_before, "seed {seed} step {step}: a refused release pays nothing");
                         c[5] += 1;
                         c[match code {
                             verr::QUEUE_FULL => 8,
@@ -339,6 +348,7 @@ fn run(seed: u64, steps: u64) -> [u64; 13] {
                 if let Some((&id, &(amount, eta))) = md.tickets.iter().find(|(_, (_, eta))| *eta <= now) {
                     let (ticket, recipient) = ticket_accounts[&id];
                     let ix = m.settle_ix(&usdc, &ticket, &recipient, &env.payer.pubkey());
+                    let recipient_before = env.balance(&recipient);
                     let r = env.send(&[ix], &[]);
                     if now < md.frozen_until || amount > md.balance {
                         // Frozen is checked first; the program's own error when short.
@@ -348,6 +358,8 @@ fn run(seed: u64, steps: u64) -> [u64; 13] {
                         c[slot] += 1;
                     } else {
                         r.unwrap_or_else(|e| panic!("seed {seed} step {step}: settle {:?}", e.err));
+                        // I8: a settlement pays the stored recipient exactly the ticket's amount.
+                        assert_eq!(env.balance(&recipient), recipient_before + amount, "seed {seed} step {step}: I8 settle recipient");
                         md.low = md.low.touch(md.balance, now, md.ref_init);
                         md.reference = ema_update(md.reference, md.ref_at, md.balance, now, md.ref_init);
                         md.ref_at = now;
@@ -380,8 +392,10 @@ fn run(seed: u64, steps: u64) -> [u64; 13] {
                 assert_eq!(env.balance(&usdc.vault_tokens), vault_before, "I11: a freeze moves no tokens");
             }
         }
-        // I12: the vault holds exactly what the model says.
+        // I12: the vault holds exactly what the model says, and the collateral
+        // vault, which nothing here pays out of, is untouched (finding 144).
         assert_eq!(env.balance(&usdc.vault_tokens), md.balance, "seed {seed} step {step}: I12 balance");
+        assert_eq!(env.balance(&sol.vault_tokens), 30 * SOL, "seed {seed} step {step}: I12 collateral vault");
         // I14: the queue equals the sum of pending tickets.
         let a = m.attest(&mut env, &usdc);
         let pending: u64 = md.tickets.values().map(|x| x.0).sum();

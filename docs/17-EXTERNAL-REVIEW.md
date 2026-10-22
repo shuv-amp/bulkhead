@@ -1,6 +1,6 @@
 # 17. External review (22 Oct 2026)
 
-**What this is.** A full-tree review of Bulkhead at `main` (`1045cd9`, PR #86) run the way an external audit firm runs one: a line-by-line read of every on-chain program (`crates/bulkhead-core`, `programs/vault`, `programs/floor`, `programs/harbor`) by one reviewer, and three independent reviewers on the off-chain guardian, the verification layer (proofs, tests, reference model, fuzzing, mutation evidence) and the build, deployment and supply chain. Every finding was reproduced against the code before it was recorded, every fix carries a test that fails on the previous build, and the findings are entries 132–141 of `09` §4. The three reviewers of the off-chain and verification scopes were AI agents given the code and the docs, not the hypotheses; the on-chain review and every fix were checked by hand.
+**What this is.** A full-tree review of Bulkhead at `main` (`1045cd9`, PR #86) run the way an external audit firm runs one: a line-by-line read of every on-chain program (`crates/bulkhead-core`, `programs/vault`, `programs/floor`, `programs/harbor`) by one reviewer, and three independent reviewers on the off-chain guardian, the verification layer (proofs, tests, reference model, fuzzing, mutation evidence) and the build, deployment and supply chain. Every finding was reproduced against the code before it was recorded, every fix carries a test that fails on the previous build, and the findings are entries 132–141 of `09` §4, and the second pass that closed its residuals is 142–145. The three reviewers of the off-chain and verification scopes were AI agents given the code and the docs, not the hypotheses; the on-chain review and every fix were checked by hand.
 
 Between the reviewed commit and this report's merge, `main` gained findings 105–131 of its own (refusal tests, the AUD-2 margin, the loader's extent rule, the guardian's cluster and alert checks); the entries here are numbered after them, and two of the review's findings had been fixed on `main` meanwhile (alert markup, finding 123; an independent restatement of the extent rule in the fuzz target, findings 109, 115 and 116) and are left out.
 
@@ -42,6 +42,10 @@ No finding allows a theft without a key. The on-chain custody and limiter logic,
 
 **Build.** Every action SHA-pinned, no secrets, no `pull_request_target`, untrusted values through `env:`; cargo-deny enforcing on three lockfiles with every crate from crates.io; `pinocchio` pinned exactly; a pure Harbor `build.rs`; a third-party verification path that rebuilds from source in a digest-pinned image.
 
+## 2b. Second pass (22 Oct, after the merge of 132–141)
+
+Four of the residuals were closed the same day: the reference model is restated from the mechanism rather than ported (142; identical to the Rust on 1.4 million further random cases); releases are built from a tag in the pinned image with a signed provenance attestation (143); the program differential checks every recipient and the collateral vault (144); and the Floor checker validates its inputs and reports transport failures as such (145). The mainnet path now puts Bulkhead's own upgrade authority under a timelocked multisig or Floor before the TVL-capped phase.
+
 ## 3. Stated, and for the team to decide
 
 1. **The backed lane's economics (E1–E3 in `16` §4)** are unchanged by this review and remain the gate for a lending integrator: loan consent by any signature in the instruction, liquidations queuing in a crash.
@@ -50,8 +54,8 @@ No finding allows a theft without a key. The on-chain custody and limiter logic,
 4. **After a restore, no abort buffer is staged** until someone stages one (`stop.mjs` says so). A restore could take a fresh abort buffer in the same instruction.
 5. **Pyth's age window** is capped at one hour; within it a client picks the most favourable genuine update. The EMA bracket and haircuts bound it; the recommended per-asset `max_age_s` should be far lower (Pyth's own guidance is tens of seconds).
 6. **`close_buffer`** lets the owner close a buffer a stranger just froze for a pin or a re-staged abort, before it is pinned or staged; the stranger loses rent to the owner.
-7. **The release workflow and provenance** (141): nothing binds a devnet binary to a reviewed commit but the weekly rebuild; a tag-triggered build in the digest-pinned image with provenance is the fix. **The upgrade authority** is a hot key with no multisig step before the burn.
-8. **The reference model** (140): an independent formulation of the limiter and the ledger (a `Fraction`-based limiter, a scanning search on small cases) would make the differential a conformance check rather than a port-fidelity check.
+7. **The upgrade authority** is a hot key today; the mainnet path now commits to a timelocked multisig or Floor before the TVL-capped phase (the release workflow with provenance exists since 143).
+8. **The reference model** is restated from the mechanism since 142; what remains a port by design is the search's midpoint where soundness is not an interval, which the mechanism fixes.
 9. **The security contact** in `SECURITY.md` names no address or key.
 
 ## 4. Verification of the fixes
