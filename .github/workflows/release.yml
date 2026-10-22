@@ -1,0 +1,87 @@
+# A release: the three programs built from a tag, in the Solana Foundation's
+# verifiable-build image pinned by digest (the canonical Linux x86_64 bytes
+# that scripts/verify-devnet.sh and third parties reproduce), with a signed
+# build provenance attestation for each binary, published as a GitHub Release
+# together with SHA256SUMS. Until this existed, every published binary came
+# from a pull request's run and its hashes were self-attested by the job that
+# built them (docs/09, finding 141). Nothing here deploys: the upgrade
+# authority's holder downloads a release, checks `gh attestation verify`, and
+# deploys with scripts/deploy.sh.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  DOCKER_IMAGE: solanafoundation/solana-verifiable-build:4.3.0@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd
+
+jobs:
+  programs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write      # the GitHub Release and its assets
+      id-token: write      # the Sigstore identity the attestation signs with
+      attestations: write  # the provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only committed files reach the image (git archive HEAD inside the
+      # script), so the bytes follow from the tag alone.
+      - name: Build the canonical binaries in the pinned image
+        run: scripts/build-programs-docker.sh
+      - name: SIMD-0500 gate (sBPF v3) on every binary
+        run: |
+          python3 - <<'PY'
+          import glob, hashlib, sys
+          sys.path.insert(0, "reference")
+          import bulkhead_ref as r
+          bad = 0
+          for so in sorted(glob.glob("target/docker/*.so")):
+              data = open(so, "rb").read()
+              ok = r.deployable_after_simd0500(r.elf_info(data[:64]))
+              print(f"{so}: deployable after SIMD-0500: {ok}; sha256 {hashlib.sha256(data).hexdigest()}")
+              bad += not ok
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            target/docker/*.so
+            target/docker/SHA256SUMS
+      - name: Keep the binaries as a workflow artifact too
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-programs
+          path: |
+            target/docker/*.so
+            target/docker/SHA256SUMS
+          retention-days: 90
+      - name: Publish the GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Canonical builds (Linux x86_64, Agave v4.3.0, platform-tools v1.57, image $DOCKER_IMAGE), from tag $TAG."
+            echo
+            echo 'Verify a download against this build and the commit it came from:'
+            echo
+            echo '```'
+            echo "gh attestation verify bulkhead_vault.so --repo $REPO"
+            echo 'sha256sum -c SHA256SUMS'
+            echo '```'
+            echo
+            echo '```'
+            cat target/docker/SHA256SUMS
+            echo '```'
+          } > release-notes.md
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md target/docker/*.so target/docker/SHA256SUMS

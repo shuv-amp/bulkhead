@@ -24,6 +24,8 @@ import base64
 import json
 import os
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,9 +41,32 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 def b58decode(s: str) -> bytes:
     n = 0
     for c in s:
+        if c not in B58:
+            raise ValueError(f"not a base58 string: {s!r}")
         n = n * 58 + B58.index(c)
     raw = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
     return b"\x00" * (len(s) - len(s.lstrip("1"))) + raw
+
+
+def program_id(s: str) -> str:
+    """A program id as given, once it decodes to exactly 32 bytes. A mistyped
+    id used to go to the RPC as it was (or crash on a character outside the
+    alphabet); the answer was then the node's, not this tool's (finding 145)."""
+    try:
+        raw = b58decode(s)
+    except ValueError as e:
+        raise SystemExit(f"floor_check: {e}")
+    if len(raw) != 32:
+        raise SystemExit(f"floor_check: {s!r} decodes to {len(raw)} bytes, not the 32 of an address")
+    return s
+
+
+def rpc_url(url: str) -> str:
+    """An http(s) URL. urllib would also open file: and other schemes."""
+    scheme = urllib.parse.urlsplit(url).scheme
+    if scheme not in ("http", "https"):
+        raise SystemExit(f"floor_check: --rpc must be an http(s) URL, not {url!r}")
+    return url
 
 
 def b58encode(b: bytes) -> str:
@@ -76,8 +101,15 @@ def on_curve(key: bytes) -> bool:
 def rpc(url: str, method: str, params: list):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
     req = urllib.request.Request(url, body, {"content-type": "application/json", "user-agent": "floor-check"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        out = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            out = json.loads(r.read())
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        # A transport or decoding failure is reported as such, never as a
+        # verdict about the program (finding 145).
+        raise SystemExit(f"floor_check: {method} failed against {urllib.parse.urlsplit(url).netloc}: {e}")
+    if not isinstance(out, dict) or "result" not in out and "error" not in out:
+        raise SystemExit(f"floor_check: {method}: the endpoint did not answer JSON-RPC")
     if "error" in out:
         raise RuntimeError(f"{method}: {out['error']}")
     return out["result"]
@@ -180,7 +212,7 @@ def main() -> int:
         return 0
     if not a.program:
         ap.error("program id required")
-    r = check(a.program, a.rpc)
+    r = check(program_id(a.program), rpc_url(a.rpc))
     print(json.dumps(r, indent=2) if a.json else report(r))
     return 0 if "error" not in r else 1
 

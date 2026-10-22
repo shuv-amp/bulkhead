@@ -14,9 +14,9 @@
 None of this is an audit. The mainnet path:
 1. two independent audits (a Solana specialist, and a formal-methods review of the core);
 2. prover rules for the programs;
-3. verifiable builds;
+3. verifiable builds: every release is built from a tag in the digest-pinned verifiable-build image and carries a signed provenance attestation (`.github/workflows/release.yml`; check a download with `gh attestation verify <file> --repo shuv-amp/bulkhead`);
 4. a public bug bounty;
-5. a TVL-capped first partner;
+5. a TVL-capped first partner, with Bulkhead's own upgrade authorities held by a timelocked multisig (or by Floor itself) rather than a single key, so no one key can replace the code during that phase (`09`, finding 141);
 6. then burning the upgrade authorities (`docs/09-VERIFICATION.md §9`).
 
 ## Devnet deployment
