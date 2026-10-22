@@ -86,7 +86,7 @@ import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, foll
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll, actionLine, jsonText, errorCause } from "./alert.mjs";
 import { activeTickets, activeChanges, ticketRelease, settlementRows, truncatedOutflows, unexplainedOutflow } from "./chain.mjs";
-import { stateJson, restoreState, writeStateFile } from "./statefile.mjs";
+import { stateJson, restoreState, writeStateFile, lockInstance } from "./statefile.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 
 const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
@@ -124,6 +124,15 @@ async function must(run) {
 }
 
 const configWarnings = await must(() => checkConfig(cfg));
+// The config holds the alert webhook and, in its RPC URLs, API keys: like the
+// key, it should be readable by this user only. Said, not refused: a service
+// may share it with its group on purpose (docs/09, finding 139).
+try {
+  const mode = statSync(process.argv[2]).mode & 0o777;
+  if (mode & 0o077) configWarnings.push(`the config ${process.argv[2]} is readable by others (mode ${mode.toString(8)}); it holds the alert webhook and any RPC keys: chmod 600 it`);
+} catch {
+  // read above: a missing file already failed there
+}
 const policy = await must(() => checkPolicy({ ...DEFAULT_POLICY, ...(cfg.policy ?? {}) }));
 // With backup endpoints, reads and sends move to the next endpoint when one
 // cannot answer (FailoverRpc); one endpoint keeps the patient retry. Hosts
@@ -175,10 +184,19 @@ const stateFile = cfg.stateFile
   ?? (process.env.STATE_DIRECTORY
     ? `${process.env.STATE_DIRECTORY.split(":")[0]}/${basename(process.argv[2])}.state.json`
     : `${process.argv[2]}.state.json`);
+// One guardian per state file: a second one would race it and send every
+// action twice (finding 139).
+await must(() => lockInstance(stateFile));
 let saveError = null;
 // The protocol's freeze end at the last sync: an end that moves earlier is a
 // guardian quorum's unfreeze (observeFreezeEnd).
 let lastChainFrozenUntil = 0;
+// The newest slot the protocol account was read at (readProtocolAccount).
+// Reads never go back: a lagging node (a backup behind the others) would show
+// an older freeze end, which looks like a quorum's unfreeze and would end an
+// incident hold. Kept in the state file, so the first read after a restart
+// cannot regress either (docs/09, finding 137).
+let protocolSlot = 0;
 // Proposals waiting for their account to be read (checkProposedChange):
 // change id -> when first seen. Kept in the state file: a restart's replay
 // covers only the last day.
@@ -189,7 +207,7 @@ let changeChecks = new Map();
 // an execution while this guardian was down is read on restart and spends.
 let floorPendingSeen = new Map();
 let floorCursors = new Map();
-const persisted = () => stateJson({ protocol: protocolKey, incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil, state, floorCursors, floorPendingSeen, changeChecks });
+const persisted = () => stateJson({ protocol: protocolKey, incidentSince: state.incidentSince, frozenUntil: lastChainFrozenUntil, protocolSlot, state, floorCursors, floorPendingSeen, changeChecks });
 let saved = persisted();
 // Whether a state file of this protocol was read: without one, the incident
 // hold may have to be rebuilt from chain (`rebuildIncident`).
@@ -210,6 +228,7 @@ let stateProblem = null;
       lastChainFrozenUntil = r.frozenUntil;
       restoredState = true;
     }
+    if (r.protocolSlot > 0) protocolSlot = r.protocolSlot;
     ({ floorCursors, floorPendingSeen, changeChecks } = r);
     saved = persisted();
   }
@@ -254,6 +273,8 @@ const worst24h = new Map();
 // port (`attestLocal`): `attest` returns no 72-hour figure (finding 76).
 const worst72h = new Map();
 const warned = new Set();
+// Mints said to be blind (no attest) while acting, once each (finding 136).
+const blindLogged = new Set();
 let pendingFreeze = null;
 let pendingVetoes = [];
 let vetoNotBefore = 0;
@@ -284,7 +305,7 @@ function worstFor(mint) {
   }
   if (!warned.has(mint)) {
     warned.add(mint);
-    log({ level: "warn", msg: `no attest for ${mint}; worst case treated as 0 so any unbacked outflow freezes` });
+    log({ level: "warn", msg: `no attest for ${mint} yet: its outflows are recorded and judged once attest succeeds (docs/09, finding 136)` });
   }
   return { worst1h: 0n, worst24h: 0n };
 }
@@ -341,6 +362,18 @@ async function refreshWorst72h(mint, clockS) {
       log({ level: "warn", msg: `no 72-hour figure for ${mint} yet (${e.message}): the 72-hour rule waits for it`, mint });
     }
   }
+}
+
+/**
+ * A value that only grows on chain, for the freshness cross-check: the
+ * protocol's next ticket id (every queued release bumps it) and a vault's
+ * unbacked outflow (every instant one and every settlement adds to it). A
+ * backup reporting a larger one than the primary proves the primary is
+ * behind on writes to that very account (finding 138).
+ */
+function counterOf(address, bytes) {
+  if (address === protocolKey) return decodeProtocol(bytes).nextTicketId;
+  return vaultMints.has(address) ? decodeVault(bytes).unbackedOut : null;
 }
 
 /** A promise that gives up after `ms` (resolving to `fallback`): no read may hold a freeze back. */
@@ -653,12 +686,32 @@ async function sweepCancels(event, eventTime, { refresh = true } = {}) {
   }
   // Four at a time: one after another, a sweep of eight tickets took over
   // 15 s with 1.5 s RPC latency, and ingestion waited for it (docs/09, finding 84).
-  const queue = pendingCancels(state, policy);
+  const queue = budgetCancels(pendingCancels(state, policy));
   for (let i = 0; i < queue.length; i += CANCEL_CONCURRENCY) {
     await Promise.all(queue.slice(i, i + CANCEL_CONCURRENCY).map(async (action) => afterCancel(action, await execute(action, event, eventTime))));
   }
 }
 const CANCEL_CONCURRENCY = 4;
+/**
+ * Cancels sent in one pass. Ticket *count* is not bounded by the limiter
+ * (only amount is): thousands of one-unit tickets, cheap to the attacker,
+ * used to hold the loop in one sweep for as long as it took (tens of
+ * minutes), with ingestion, Floor events, vetoes and the freshness check
+ * waiting and no stall alert, since nothing was failing (docs/09, finding
+ * 139). Past the budget the rest is marked uncancelled again and the next
+ * ticket scan, due at once, continues; `state.cancelled` keeps it idempotent.
+ */
+const CANCEL_SWEEP_MAX = 64;
+function budgetCancels(actions) {
+  let cancels = 0;
+  const kept = [];
+  for (const a of actions) {
+    if (a.type !== "cancel" || cancels++ < CANCEL_SWEEP_MAX) kept.push(a);
+    else state.cancelled.delete(a.ticketId);
+  }
+  if (cancels > CANCEL_SWEEP_MAX) nextTicketScanAt = 0;
+  return kept;
+}
 
 /** A proposal to read by id (checkProposedChange), once; kept in the state file. */
 function queueCheck(changeId) {
@@ -670,7 +723,7 @@ function queueCheck(changeId) {
 async function applyActions(actions, event, eventTime) {
   let freezeOk = true;
   let froze = false;
-  for (const action of actions) {
+  for (const action of budgetCancels(actions)) {
     if (action.type === "check_change") {
       queueCheck(action.changeId);
       continue;
@@ -776,16 +829,31 @@ async function signatures(until, oldestWanted, { minSlot = null, seen = null, ma
 
 /** One fact (a release, freeze or proposal), from an event or from the chain. */
 async function consider(e, signature, now, act) {
+  // A release of a mint whose attest has not succeeded yet (a 429 at startup,
+  // an underfunded key) used to be judged against a worst case of 0, which
+  // every unbacked payout breaks: a 24h freeze and the 7-day hold on an
+  // honest protocol. It is recorded now and judged, like the replayed
+  // startup window, as soon as attest gives the figure (every 10 s), and
+  // the blindness is said once per mint (docs/09, finding 136).
+  const blind = e.kind === "released" && !worst1h.has(e.mint);
+  if (blind && act) {
+    unjudged.add(e.mint);
+    if (!blindLogged.has(e.mint)) {
+      blindLogged.add(e.mint);
+      log({ level: "error", msg: `no attest for ${e.mint}: this outflow is recorded, not judged, until attest succeeds; the guardian is blind to this mint's freeze rules meanwhile (docs/09, finding 136)`, mint: e.mint, signature });
+    }
+  }
+  const judgeNow = act && !blind;
   // Only a release needs the worst case; other events carry no mint.
   const ctx = e.kind === "released" ? { ...worstFor(e.mint), now } : { now };
-  const actions = assess(state, e, ctx, policy, act);
+  const actions = assess(state, e, ctx, policy, judgeNow);
   // Outflow under the freeze thresholds still goes to people once it is a
   // large share of them, or keeps up for days: a patient attacker under the
   // thresholds is not frozen by this bot (docs/09, finding 76). A replay
   // records each day's high only.
-  const drip = e.kind === "released" ? outflowAlerts(state, e.mint, ctx, policy, act) : [];
+  const drip = e.kind === "released" ? outflowAlerts(state, e.mint, ctx, policy, judgeNow) : [];
   if (e.kind === "released") saveIncident();
-  if (!act) {
+  if (!judgeNow) {
     // Replay sends nothing, but a replayed proposal is read by id once
     // acting starts (docs/09, finding 71).
     for (const a of actions) if (a.type === "check_change") queueCheck(a.changeId);
@@ -915,9 +983,47 @@ async function ingest(sigs, act, checkpoint = () => {}, floor = null, budgetMs =
   });
 }
 
+// Block times the signature list and the transaction left out, by slot.
+const blockTimes = new Map();
+async function blockTimeOf(slot) {
+  if (!Number.isInteger(slot)) return null;
+  if (blockTimes.has(slot)) return blockTimes.get(slot);
+  let t = null;
+  try {
+    const v = await rpc.call("getBlockTime", [slot]);
+    if (Number.isInteger(v)) t = v;
+  } catch {
+    // the node has no time for this slot
+  }
+  if (blockTimes.size > 10_000) blockTimes.clear();
+  blockTimes.set(slot, t);
+  return t;
+}
+
+let undatedLogged = 0;
+/**
+ * A replayed release whose time the node does not know: its ticket is kept
+ * (so a cancel can find it) and its amount is not counted in the rolling
+ * windows, since no freeze rule can place it. It used to be dated "now",
+ * which collapsed up to 72 hours of honest outflow into the last hour: a
+ * restart against a node without block times froze an honest protocol for
+ * 24 hours and opened the 7-day hold (docs/09, finding 135).
+ */
+function undatedRelease(e, signature) {
+  if (e.queued > 0n) rememberTicket(state, { ticketId: e.ticketId, mint: e.mint, vault: e.vault, owner: e.owner, amount: e.queued, address: e.ticket });
+  if (undatedLogged++ < 3) {
+    log({ level: "error", msg: "startup replay: the node knows no block time for a release, so it is not counted in the rolling windows; the 24-hour and 72-hour rules undercount by it. Use an RPC with full history (docs/07 §6; docs/09, finding 135)", signature, mint: e.mint, amount: e.instant + e.queued });
+  }
+}
+
 async function ingestOne(s, tx, act, floor) {
   if (s.err || tx?.skipped) return;
-  const now = s.blockTime ?? tx?.blockTime ?? wallNow();
+  let now = s.blockTime ?? tx?.blockTime ?? null;
+  if (now == null) now = await blockTimeOf(s.slot);
+  // Live, an unknown time is the present; replayed, it is unknown.
+  const undated = now == null;
+  if (undated) now = wallNow();
+  const judge = (e) => (undated && !act && e.kind === "released" ? undatedRelease(e, s.signature) : consider(e, s.signature, now, act));
   const { events: decoded, truncated, unnamed } = watchedEvents(tx?.meta?.logMessages, floor
     ? { floorProgram: cfg.floorProgram, floorPrograms: [floor] }
     : { vaultProgram: cfg.vaultProgram, protocol: protocolKey });
@@ -933,7 +1039,7 @@ async function ingestOne(s, tx, act, floor) {
   // Tickets as they were before this transaction: a surviving `settled`
   // event would otherwise drop the ticket its payout is matched against.
   const known = truncated ? await knownTickets() : [];
-  for (const e of decoded) await consider(e, s.signature, now, act);
+  for (const e of decoded) await judge(e);
   if (!truncated) return;
   // Events past the log cap are gone; the instructions and balances are not.
   // What left the vaults beyond the events that survived is an unbacked
@@ -947,7 +1053,7 @@ async function ingestOne(s, tx, act, floor) {
   for (const [mint, amount] of unexplainedOutflow(seen.outflows, released, policy.allowlistedOwners)) {
     if (amount === 0n) continue;
     const e = { kind: "released", mint, owner: "(truncated log)", backed: 0n, instant: amount, queued: 0n, ticketId: 0n, etaS: 0 };
-    await consider(e, s.signature, now, act);
+    await judge(e);
   }
   // Their `vault:settled` events may be among the lost lines.
   for (const ticketId of seen.closed) assess(state, { kind: "ticket_closed", ticketId }, { now }, policy, act);
@@ -1000,10 +1106,6 @@ async function tryRefreshPendingTickets(options = {}) {
   }
 }
 
-// The newest slot the protocol account was read at. Reads never go back: a
-// lagging node (a backup endpoint behind the others) would show an older freeze
-// end, which looks like a quorum's unfreeze and would end an incident hold.
-let protocolSlot = 0;
 async function readProtocolAccount() {
   const r = await rpc.call("getAccountInfo", [b58encode(vc.protocol), { encoding: "base64", commitment: "confirmed", minContextSlot: protocolSlot }]);
   protocolSlot = Math.max(protocolSlot, r.context?.slot ?? 0);
@@ -1397,7 +1499,19 @@ async function main() {
   // The chain scan recovers every active ticket, including older tickets whose
   // release is outside the rolling outflow window. Current chain state is live,
   // so an already-active freeze must sweep tickets at startup too.
-  await syncFromChain(true, { startup: true });
+  // A node behind the saved read slot refuses the first read (minContextSlot,
+  // finding 137), and a transient RPC fault here used to exit into the same
+  // 72-hour replay under systemd: wait for it instead, within reason.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await syncFromChain(true, { startup: true });
+      break;
+    } catch (e) {
+      if (attempt >= 20) throw e;
+      log({ level: "warn", msg: `startup chain sync failed (attempt ${attempt} of 20): ${e.message}; retrying in 3 s` });
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
+  }
   rebuildIncident();
   unjudged =new Set([...cfg.mints, ...state.outflows.map((o) => o.mint)]);
   await judgeStartupWindow(decisionTime(wallNow(), state.outflows));
@@ -1486,7 +1600,13 @@ async function main() {
       freshnessAt = Date.now() + freshnessEveryMs;
       await step("rpc freshness", async () => {
         const r = await rpc.crossCheck(b58encode(vc.protocol));
-        if (r.switched) log({ level: "warn", msg: `${r.reason}; switched endpoints (docs/07 §6)`, slots: r.slots });
+        if (r.switched) {
+          log({ level: "warn", msg: `${r.reason}; switched endpoints (docs/07 §6)`, slots: r.slots });
+          return;
+        }
+        // Counters a censoring primary cannot pass (finding 138).
+        const c = await rpc.crossCheckCounters([protocolKey, ...vaultMints.keys()], counterOf);
+        if (c.switched) log({ level: "warn", msg: `${c.reason}; switched endpoints (docs/09, finding 138)` });
       });
     }
     if (floorWatch.length) await step("floor events", followFloor);

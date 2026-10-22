@@ -110,7 +110,10 @@ class Limiter:
         drained bucket.
         """
         def scaled(tat: int, old_w: int, new_w: int) -> int:
-            if tat <= now or old_w == new_w or old_w <= 0 or new_w <= 0:
+            # No early exit on an unchanged window: the Rust rescales (and
+            # saturates at COST_MAX_MS) whatever the ratio, so a backlog past
+            # 2^61 ms must come out the same here (docs/09, finding 140).
+            if tat <= now or old_w <= 0 or new_w <= 0:
                 return tat
             backlog = ceil_div((tat - now) * new_w, old_w)
             return min(now + min(backlog, COST_MAX_MS), I64_MAX)

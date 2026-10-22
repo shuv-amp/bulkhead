@@ -125,11 +125,20 @@ pub fn deposit(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
     let owner = key(authority);
     let mut b = load_or_create_backing(program_id, accounts, 8, 1, 7, &owner)?;
     let mut ledger = b.ledger()?;
-    let backed = ledger.credit(v.mint, received);
+    // No free slot (a ninth mint) or an impossible sum: refuse, as
+    // `import_backing` does. The deposit used to go through with no backing,
+    // which took this depositor's own-deposit guarantee (G2) away in silence:
+    // the only way out was the limited, freezable lane, and the integrator
+    // saw nothing but a flag in the event (docs/09, finding 132).
+    if !ledger.credit(v.mint, received) {
+        return Err(VaultError::NoSlot.into());
+    }
     b.set_ledger(&ledger);
     save(&mut accounts[7], |d| b.store(d))?;
     save(&mut accounts[2], |d| v.store(d))?;
     pinocchio::cpi::set_return_data(&received.to_le_bytes());
+    // The last field used to say whether the deposit earned backing; every
+    // deposit that goes through now does (the layout is kept for readers).
     sys::event(
         &key(&accounts[1]),
         &[
@@ -137,7 +146,7 @@ pub fn deposit(program_id: &Address, accounts: &mut [AccountView], args: &[u8]) 
             &v.mint,
             &owner,
             &received.to_le_bytes(),
-            &[backed as u8],
+            &[1],
         ],
     );
     Ok(())

@@ -47,10 +47,11 @@ export function b58encode(bytes) {
 export function key(k) {
   if (typeof k === "string") {
     const b = b58decode(k);
-    if (b.length > 32) throw new Error(`not a 32-byte key: ${k}`);
-    const out = new Uint8Array(32);
-    out.set(b, 32 - b.length);
-    return out;
+    // Exactly 32 bytes. A shorter string used to be zero-padded on the left
+    // and accepted, so a typo in a configured program or mint id became a
+    // different, valid-looking key rather than an error (docs/09, finding 139).
+    if (b.length !== 32) throw new Error(`not a 32-byte key: ${k}`);
+    return b;
   }
   if (k.length !== 32) throw new Error("not a 32-byte key");
   return Uint8Array.from(k);
@@ -531,6 +532,64 @@ export class FailoverRpc extends Rpc {
       }
     }
     return { switched: false, reason: null, slots };
+  }
+
+  /**
+   * Counters a censoring primary cannot pass. `crossCheck` compares slots and
+   * each backup's newest signature on one address: a primary that serves
+   * everything except the transactions that matter (the attacker's releases)
+   * passes it whenever the address also sees other traffic, which the
+   * attacker's own cheap calls provide. Here every admitted endpoint reads
+   * each of `addresses` and `counter(address, bytes)` returns a value that
+   * only ever grows on chain (the protocol's next ticket id, a vault's
+   * unbacked outflow). A backup reporting a larger value than the active
+   * endpoint for more than `lagMs` means the active one is behind on writes
+   * to that very account, whatever its signature list says: switch to that
+   * backup (docs/09, finding 138). Judged only while `active` is still the
+   * endpoint the reads were made for, as `crossCheck` does since finding 119.
+   * An endpoint that does not answer, or is on another cluster, is skipped.
+   * Returns `{ switched, reason }`.
+   */
+  async crossCheckCounters(addresses, counter, { lagMs = SIGNATURE_LAG_SWITCH_MS, nowMs = Date.now() } = {}) {
+    this.behind ??= new Map(); // address -> { at: first seen behind, from: endpoint index, active }
+    if (this.endpoints.length < 2) return { switched: false, reason: null };
+    const quiet = (p) => p.then((v) => v, () => undefined);
+    const active = this.active;
+    const read = async (e, i, address) => {
+      if (!(await quiet(this.admit(i)))) return null;
+      const r = await quiet(e.call("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }]));
+      const data = r?.value?.data?.[0];
+      if (typeof data !== "string") return null;
+      try {
+        return counter(address, Uint8Array.from(atob(data), (c) => c.charCodeAt(0)));
+      } catch {
+        return null;
+      }
+    };
+    for (const address of addresses) {
+      const values = await Promise.all(this.endpoints.map((e, i) => read(e, i, address)));
+      const mine = values[active];
+      if (mine == null) continue;
+      let ahead = -1;
+      for (let i = 0; i < values.length; i++) {
+        if (i !== active && values[i] != null && values[i] > mine && (ahead < 0 || values[i] > values[ahead])) ahead = i;
+      }
+      const seen = this.behind.get(address);
+      if (ahead < 0 || seen?.active !== active) {
+        // Caught up, or judged for another active endpoint: start again.
+        if (ahead < 0) this.behind.delete(address);
+        else this.behind.set(address, { at: nowMs, from: ahead, active });
+        continue;
+      }
+      if (nowMs - seen.at > lagMs && this.active === active) {
+        const reason = `RPC endpoint is behind on ${address}: a backup has read a counter of ${values[ahead]} there for ${Math.round((nowMs - seen.at) / 1000)}s while the primary returns ${mine}`;
+        this.switchTo(ahead, new Error(reason));
+        this.restartWaits();
+        this.behind.clear();
+        return { switched: true, reason };
+      }
+    }
+    return { switched: false, reason: null };
   }
 
   /**

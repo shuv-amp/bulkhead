@@ -644,6 +644,23 @@ function decodeFields(ev) {
  * (an older build) is dropped, never guessed (`unnamed` counts them).
  * Floor events count only for the programs in `floorPrograms`.
  */
+/**
+ * `decode`, with a layout this guardian cannot read dropped as "other". The
+ * field counts are checked before, but not every field's length: an event
+ * from a Vault or Floor build with a changed layout made a decoder throw,
+ * and since ingestion is strictly in order, that one signature stalled every
+ * later read for good (docs/09, finding 139). A dropped event is logged by
+ * the caller's `unnamed`/`foreign` counts no more than a foreign one; the
+ * chain state (freezes, tickets) is read directly every cycle anyway.
+ */
+export function decodeOrOther(raw) {
+  try {
+    return decode(raw);
+  } catch {
+    return { kind: "other", name: raw.name, unreadable: true };
+  }
+}
+
 export function watchedEvents(logs, { vaultProgram = null, protocol = null, floorProgram = null, floorPrograms = [] }) {
   const { events, truncated } = parseLogs(logs);
   const out = [];
@@ -652,13 +669,13 @@ export function watchedEvents(logs, { vaultProgram = null, protocol = null, floo
   for (const raw of events) {
     // Written by another program: not an event (any program can write "Program data:").
     if (vaultProgram && raw.program === vaultProgram && raw.name.startsWith("vault:")) {
-      const e = decode(raw);
+      const e = decodeOrOther(raw);
       if (e.kind === "other") continue;
       if (e.protocol === null) unnamed++;
       else if (e.protocol !== protocol) foreign++;
       else out.push(e);
     } else if (floorProgram && raw.program === floorProgram && raw.name.startsWith("floor:")) {
-      const e = decode(raw);
+      const e = decodeOrOther(raw);
       if (e.kind !== "other" && floorPrograms.includes(e.program)) out.push(e);
     }
   }
@@ -1245,6 +1262,10 @@ export function incidentHold(state, chainFrozenUntil, now, policy = DEFAULT_POLI
     return null;
   }
   if (chainFrozenUntil - now > (policy.holdRenewBeforeS ?? 3_600)) return null;
+  // The chain already covers the hold to its end: nothing to renew. Without
+  // this, the last short renewal was returned every poll until the end, and
+  // skipped as already covered, line after line (docs/09, finding 139).
+  if (chainFrozenUntil >= end) return null;
   const secs = Math.min(policy.freezeSecs, end - now);
   return { type: "freeze", secs, reason: `incident hold: frozen since ${state.incidentSince}; renewed until a guardian quorum unfreezes, at most until ${end}` };
 }

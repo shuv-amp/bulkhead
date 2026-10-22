@@ -465,7 +465,17 @@ pub fn execute_change(program_id: &Address, accounts: &mut [AccountView]) -> Pro
     // after the delay, and nobody could cancel them: only a guardian veto
     // stood in the way (docs/09, finding 87). A rotation the admin made
     // itself voids its own pending changes the same way: propose them again.
-    if c.proposer != p.admin && (p.recovery == [0; 32] || c.proposer != p.recovery) {
+    // The recovery key counts only for the kinds it may propose. The key
+    // compared is the key as it is now: an admin key that queued a
+    // loosening, was replaced, and was then made the recovery key (by the
+    // new admin with a live quorum) would otherwise have that loosening
+    // execute, which no reviewer saw coming from a recovery key (docs/09,
+    // finding 133).
+    let by_admin = c.proposer == p.admin;
+    let by_recovery = p.recovery != [0; 32]
+        && c.proposer == p.recovery
+        && (c.kind == change::SET_ADMIN || c.kind == change::SET_RECOVERY);
+    if !by_admin && !by_recovery {
         return Err(VaultError::ChangeStale.into());
     }
     // The target must be what the review saw: a tightening, another change or

@@ -115,7 +115,7 @@ jobs:
           rustup toolchain install 1.92.0 --profile minimal --component rustfmt,clippy
           python3 --version && node --version
       - name: Build differential worker
-        run: cargo build --release -p bulkhead-diff
+        run: cargo build --locked --release -p bulkhead-diff
       - name: All checks
         env:
           CASES: ${{ env.DEEP == 'true' && '1000000' || '100000' }}
@@ -277,7 +277,7 @@ jobs:
         run: cd fuzz && cargo +"$NIGHTLY" clippy --all-targets -- -D warnings
 
   kani:
-    # Bounded model checking of the core's 19 harnesses (proofs.rs). Kani is
+    # Bounded model checking of the core's 20 harnesses (proofs.rs). Kani is
     # installed at a pinned version from crates.io, not through an action.
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.kani == 'true'

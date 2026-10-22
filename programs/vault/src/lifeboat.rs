@@ -256,6 +256,14 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
         return Err(VaultError::NothingToExit.into());
     }
     can_execute(&s, t, v.exit_vetoed, false, false).map_err(|_| VaultError::ChangeNotExecutable)?;
+    // A freeze is the incident signal: while the protocol or the vault is
+    // frozen nothing leaves Bulkhead's custody, the lifeboat included. A
+    // guardian who froze but had no time to veto is still covered, and no key
+    // gains a power it lacked: a guardian who can freeze can veto the exit
+    // outright (docs/09, finding 134).
+    if t < p.frozen_until.max(v.frozen_until) {
+        return Err(VaultError::Frozen.into());
+    }
     // Only an exit the current admin proposed executes. A recovery rotation
     // replaced a stolen admin, yet an exit it queued while the rotation waited
     // still executed: finding 87's rule for changes, missed here (issue #66).

@@ -356,3 +356,157 @@ fn a_tightening_never_raises_the_room() {
     }
     assert!(n > 10_000_000);
 }
+
+// ---------------------------------------------------------------------------
+// The backed-amount search at the edges of the valuation (finding 140)
+// ---------------------------------------------------------------------------
+
+const A: Mint = [1; 32];
+const B: Mint = [2; 32];
+
+fn priced(lo: u128, hi: u128, haircut_bps: u32, liability_bps: u32) -> Pricing {
+    Pricing::Priced(bulkhead_core::ledger::PricedAsset {
+        lo,
+        hi,
+        expo: -18,
+        decimals: 0,
+        haircut_bps,
+        liability_bps,
+    })
+}
+
+/// Independent oracle for "paying `b` of mint `A` leaves this ledger sound":
+/// build the ledger after the payment and ask `health`, never `backed_amount`.
+fn sound_oracle(net_a: i128, net_b: i128, b: u64, lookup: &impl Fn(&Mint) -> Pricing) -> bool {
+    let after = net_a - b as i128;
+    let mut positions = Vec::new();
+    if after != 0 {
+        positions.push((A, after));
+    }
+    if net_b != 0 {
+        positions.push((B, net_b));
+    }
+    match Ledger::from_positions(&positions) {
+        Ok(l) => matches!(l.health(lookup), Some(h) if h >= 0),
+        Err(_) => false,
+    }
+}
+
+/// The one region where the valid set is not an interval (docs/03 §4.4): a
+/// collateral whose value overflows u128 counts 0, so paying less can be
+/// invalid while paying more is valid. Here `A` overflows at four units and
+/// up, and one unit of `B` is owed, so exactly `n − 3 ≤ b ≤ n − 1` is valid.
+/// Every `n ≤ 48` and every request up to `n + 8`: the search never returns
+/// an invalid amount, never more than the true maximum (found by scanning
+/// every `b`), and `debit_backed` accepts what it returns. What it returns
+/// below the true maximum is pinned: exactly the requests of `n` or more,
+/// which golden E7 shows for `n = 7` (the search is bisection, which cannot
+/// see an island of valid amounts below an invalid one).
+#[test]
+fn overflow_region_search_is_sound_and_never_above_the_true_maximum() {
+    let lo_a = u128::MAX / (10_000 * 4) + 1; // 4 · lo_a · 10 000 overflows u128
+    let lookup = |m: &Mint| {
+        if *m == A {
+            priced(lo_a, lo_a, 10_000, 10_000)
+        } else {
+            priced(1, 1, 10_000, 10_000)
+        }
+    };
+    assert!(value_v(3, lo_a, -18, 0, 10_000, false).is_some());
+    assert!(value_v(4, lo_a, -18, 0, 10_000, false).is_none());
+    let (mut checked, mut under) = (0u64, 0u64);
+    for n in 1..=48i128 {
+        let ledger = Ledger::from_positions(&[(A, n), (B, -1)]).unwrap();
+        for a in 1..=(n as u64 + 8) {
+            let b = ledger.backed_amount(&A, a, &lookup);
+            let truth = (0..=a)
+                .rev()
+                .find(|&x| sound_oracle(n, -1, x, &lookup))
+                .unwrap_or(0);
+            assert!(
+                b <= a && b <= truth,
+                "n {n} a {a}: {b} > true maximum {truth}"
+            );
+            assert!(
+                b == 0 || sound_oracle(n, -1, b, &lookup),
+                "n {n} a {a}: {b} unsound"
+            );
+            let mut l2 = ledger;
+            assert!(l2.debit_backed(A, b, &lookup).is_ok());
+            // Where the search stops short, and where it must not.
+            let island = (n - 3).max(0) as u64..=(n - 1).max(0) as u64;
+            if island.contains(&a) {
+                assert_eq!(b, a, "a request inside the valid island is paid in full");
+            }
+            if a < *island.start() {
+                assert_eq!((b, truth), (0, 0));
+            }
+            if b < truth {
+                under += 1;
+                assert!(
+                    a >= n as u64,
+                    "n {n} a {a}: only a request past the island stops short"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, (1..=48u64).map(|n| n + 8).sum::<u64>());
+    assert!(under > 0, "the region must be reached");
+}
+
+/// G3 maximality at full width, where no valuation overflows: positions up to
+/// `u64::MAX`, prices up to 2^45, every weight extreme, with and without a
+/// liability. The valid set is an interval there, so the largest sound `b` is
+/// exactly what `backed_amount` returns: `b` is sound (by the independent
+/// oracle) and `b + 1` is not. The property tests draw magnitudes only up to
+/// 2^50 (finding 140).
+#[test]
+fn g3_is_maximal_at_full_width_without_overflow() {
+    let mut cases = 0u64;
+    for &n in &[1u64 << 40, 1 << 63, u64::MAX - 1, u64::MAX] {
+        for &lo in &[1u128, 1 << 30, 1 << 45] {
+            for &haircut in &[1u32, 5_000, 10_000] {
+                for &(net_b, hi_b) in &[
+                    (0i128, 1u128),
+                    (-1, 1),
+                    (-(1 << 30), 1 << 30),
+                    (-(1 << 50), 1),
+                ] {
+                    let lookup = |m: &Mint| {
+                        if *m == A {
+                            priced(lo, lo + 1, haircut, 10_000)
+                        } else {
+                            priced(hi_b, hi_b, 10_000, 10_500)
+                        }
+                    };
+                    // Within u128: the whole position is valued, nothing overflows.
+                    assert!(value_v(n as u128, lo, -18, 0, haircut, false).is_some());
+                    let mut positions = vec![(A, n as i128)];
+                    if net_b != 0 {
+                        positions.push((B, net_b));
+                    }
+                    let ledger = Ledger::from_positions(&positions).unwrap();
+                    for &a in &[1u64, n - 1, n, n.saturating_add(1), u64::MAX] {
+                        let b = ledger.backed_amount(&A, a, &lookup);
+                        assert!(b <= a);
+                        assert!(
+                            b == 0 || sound_oracle(n as i128, net_b, b, &lookup),
+                            "unsound: n {n} lo {lo} h {haircut} B {net_b} a {a} b {b}"
+                        );
+                        if b < a {
+                            assert!(
+                                !sound_oracle(n as i128, net_b, b + 1, &lookup),
+                                "not maximal: n {n} lo {lo} h {haircut} B {net_b} a {a} b {b}"
+                            );
+                        }
+                        let mut l2 = ledger;
+                        assert!(l2.debit_backed(A, b, &lookup).is_ok());
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 4 * 3 * 3 * 4 * 5);
+}
