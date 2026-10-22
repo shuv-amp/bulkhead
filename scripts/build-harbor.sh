@@ -15,11 +15,12 @@ export PATH="$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/b
 VAULT_ID="${1:-HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b}"
 OUT="${2:-target/deploy}"
 export BULKHEAD_VAULT_ID="$VAULT_ID"
-TOOLS="${PLATFORM_TOOLS:-$HOME/.cache/solana/v1.57/platform-tools}"
+TOOLS_VERSION="${PLATFORM_TOOLS_VERSION:-v1.57}"
+TOOLS="${PLATFORM_TOOLS:-$HOME/.cache/solana/$TOOLS_VERSION/platform-tools}"
 if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
   echo "platform-tools rustc not found at $TOOLS; run scripts/build-programs.sh once" >&2
   exit 1
 fi
 echo "== Harbor for Vault $VAULT_ID"
-RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --arch v3 \
-  --manifest-path programs/harbor/Cargo.toml --sbf-out-dir "$OUT"
+RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --tools-version "$TOOLS_VERSION" --arch v3 \
+  --manifest-path programs/harbor/Cargo.toml --sbf-out-dir "$OUT" -- --locked

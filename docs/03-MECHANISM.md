@@ -163,7 +163,7 @@ Both are updated on every touch, **before** the operation, from the balance befo
 ### 4.1 State and updates
 
 Each owner has up to 8 positions `(mint, net: i128)`. Zero entries are removed.
-- `deposit`: the program measures the vault balance before and after the transfer, then credits `net += received`. Transfer-fee mints credit what actually arrived. If there is no free slot, the deposit still happens but earns no backing (conservative).
+- `deposit`: the program measures the vault balance before and after the transfer, then credits `net += received`. Transfer-fee mints credit what actually arrived. If there is no free slot (a ninth mint), the deposit is refused (`NoSlot`), as an import is: it used to go through with no backing, which took the depositor's own-deposit guarantee away in silence (`09`, finding 132).
 - `release`, backed part `b`: `net −= b`. A negative `net` is a backed borrow.
 - Unbacked payouts never touch the ledger. Profits and bonuses don't create debt against the owner's future withdrawals.
 
@@ -319,7 +319,7 @@ Examples (golden G-12):
 | `reset_backlog` | admin or guardian | §2.2 | Only with zero pending tickets |
 | `lifeboat_move` | admin | Vault → lifeboat, instant, any amount | Destination is the lifeboat PDA only; refused while the protocol or the vault is frozen (`Frozen`) |
 | `lifeboat_return` | admin, or a live guardian quorum | Lifeboat → vault, instant | |
-| `lifeboat_exit` | admin proposes; executed after the delay with the destination's signature (`09` finding 85) | Lifeboat → committed destination | ≥ 72h; guardian veto; destination committed ≥ 72h earlier; the destination is never the admin (`SetAdmin` refuses it, `SetLifeboatDestination` refuses the admin); the seal does not count tokens a live exit will take |
+| `lifeboat_exit` | admin proposes; executed after the delay with the destination's signature (`09` finding 85) | Lifeboat → committed destination | ≥ 72h; guardian veto; destination committed ≥ 72h earlier; the destination is never the admin (`SetAdmin` refuses it, `SetLifeboatDestination` refuses the admin); the seal does not count tokens a live exit will take; never while the protocol or the vault is frozen (`Frozen`, finding 134) |
 
 ## 7. The worst-case attestation
 

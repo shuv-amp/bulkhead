@@ -22,7 +22,8 @@
 //! arguments in docs/03 §10.
 
 use crate::classify::{classify_limits, Class, LimitConfig};
-use crate::ema::ema_update;
+use crate::consts::LOW_WINDOW_S;
+use crate::ema::{ema_update, WindowLow};
 use crate::floor::{
     buffer_authority, can_restore, deployable_after_simd0500, elf_info, programdata_header,
     snapshot_matches, RestoreSource,
@@ -65,6 +66,36 @@ fn small_params() -> LimiterParams {
 // ---------------------------------------------------------------------------
 // FULL domain
 // ---------------------------------------------------------------------------
+
+/// FULL. The low-water balance (finding 65) with any stored mark, any
+/// balance, any time in ±35,000 years and either initialisation: after a
+/// touch the mark never exceeds the balance the touch saw (fresh capital
+/// never counts); a touch in the same window as the mark, or at a clock that
+/// stepped back, never raises it; and a first touch, or one after at least a
+/// whole idle window, sets it to that balance (the history is the balance).
+/// Pure branch logic: no multiply, so it finishes at full width.
+#[kani::proof]
+fn low_water_never_counts_fresh_capital() {
+    let w = WindowLow {
+        prev: kani::any(),
+        cur: kani::any(),
+        window: kani::any(),
+    };
+    let balance: u64 = kani::any();
+    let now_s: i64 = kani::any();
+    let init: bool = kani::any();
+    kani::assume(now_s >= -MAX_TIME_MS && now_s <= MAX_TIME_MS);
+    let after = w.touch(balance, now_s, init);
+    assert!(after.low() <= balance);
+    let wnow = now_s.div_euclid(LOW_WINDOW_S);
+    if init && wnow <= w.window {
+        assert!(after.low() <= w.low());
+    }
+    if !init || wnow > w.window.saturating_add(1) {
+        assert!(after.low() == balance && after.prev == balance && after.cur == balance);
+    }
+    assert!(!init || wnow > w.window || after.window == w.window);
+}
 
 /// FULL. `reset_backlog` refuses with pending tickets; otherwise each TAT is
 /// unchanged or clamped to exactly "empty at now" (never more capacity than

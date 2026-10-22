@@ -21,8 +21,8 @@ echo "== mutant exclusions (each .cargo/mutants.toml pattern against cargo-mutan
 # Before review, not only in CI: an edit that moves the code of the murmur3
 # tail's line-pinned pattern fails here (finding 105).
 scripts/mutants.sh --exclusions-only
-echo "== clippy";   cargo clippy --all-targets --release -- -D warnings
-echo "== tests";    BULKHEAD_CASES="${BULKHEAD_CASES:-5000}" cargo test --release --quiet
+echo "== clippy";   cargo clippy --locked --all-targets --release -- -D warnings
+echo "== tests";    BULKHEAD_CASES="${BULKHEAD_CASES:-5000}" cargo test --locked --release --quiet
 echo "== golden";   python3 reference/golden.py --check
 echo "== regressions"
 for f in reference/regressions/*.txt; do python3 reference/diff_runner.py --replay "$f" >/dev/null; done

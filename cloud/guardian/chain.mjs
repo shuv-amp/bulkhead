@@ -27,7 +27,10 @@ export function accountKeys(tx) {
  */
 export function vaultOutflows(tx, tokenMints) {
   const keys = accountKeys(tx);
-  const read = (list) => new Map((list ?? []).map((b) => [keys[b.accountIndex], BigInt(b.uiTokenAmount.amount)]));
+  // A row without an amount (a malformed or partial answer) is skipped: this
+  // ran in the startup replay with nothing to catch a throw, and one such
+  // row restarted the guardian into the same replay (docs/09, finding 139).
+  const read = (list) => new Map((list ?? []).filter((b) => /^\d+$/.test(b?.uiTokenAmount?.amount ?? "")).map((b) => [keys[b.accountIndex], BigInt(b.uiTokenAmount.amount)]));
   const pre = read(tx?.meta?.preTokenBalances);
   const post = read(tx?.meta?.postTokenBalances);
   const out = new Map();

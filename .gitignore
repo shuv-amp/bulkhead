@@ -11,8 +11,9 @@ __pycache__/
 pitch.md
 pitch_*.md
 PITCH*.md
-# Outreach drafts name the people being contacted
+# Outreach drafts and the competitive analysis name the people contacted
 outreach-*.md
+COMPETITIVE_*.md
 pitch.pdf
 deck/
 generate_pitch_deck.py

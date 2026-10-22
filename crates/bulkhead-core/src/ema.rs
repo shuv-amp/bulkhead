@@ -59,7 +59,7 @@ impl WindowLow {
                 cur: balance,
                 window: w,
             }
-        } else if w == self.window + 1 {
+        } else if w == self.window.saturating_add(1) {
             WindowLow {
                 prev: self.cur,
                 cur: balance,

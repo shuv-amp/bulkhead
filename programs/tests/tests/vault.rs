@@ -5780,3 +5780,125 @@ fn a_four_mint_ledger_release_fits_with_room() {
     let (relayer, _) = release_cost_report(4);
     assert!(relayer + 200 <= PACKET, "{relayer} B");
 }
+
+// ---------------------------------------------------------------------------
+// External review, 22 Oct 2026 (docs/09, findings 132–134)
+// ---------------------------------------------------------------------------
+
+/// Guardians `i` heartbeat: these scenarios run past the 7-day interval.
+fn beat(w: &mut World, i: &[usize]) {
+    for &g in i {
+        let ix = w.m.vault_ix(14, &[], vec![
+            AccountMeta::new(w.m.protocol, false),
+            AccountMeta::new_readonly(w.m.g[g].pubkey(), true),
+        ]);
+        let signer = w.m.g[g].insecure_clone();
+        w.env.ok(&[ix], &[&signer]);
+    }
+}
+
+/// Finding 132: a deposit into a full ledger (eight positions) used to go
+/// through with no backing, which took the depositor's own-deposit guarantee
+/// (G2) away in silence. It is refused now (`NoSlot`), as `import_backing`
+/// always was; a deposit into a mint the ledger already holds still works.
+#[test]
+fn a_deposit_into_a_full_ledger_is_refused_not_silently_unbacked() {
+    let mut l = Ledgered::new(MAX_SLOTS_T); // 7 collateral mints + 1 loan: full
+    let b = l.borrower.insecure_clone();
+    let ninth = &l.vs[MAX_SLOTS_T];
+    let acc = l.env.token_account(&ninth.mint, &b.pubkey(), &ninth.token_program);
+    l.env.mint_to(&ninth.mint, &ninth.mint_authority, &acc, 10 * USDC, &ninth.token_program);
+    let before = l.env.balance(&ninth.vault_tokens);
+    let ix = l.m.deposit_ix(&l.env, ninth, &b.pubkey(), &acc, 10 * USDC);
+    assert_eq!(l.env.fails(&[ix], &[&b]), verr::NO_SLOT);
+    assert_eq!(l.env.balance(&ninth.vault_tokens), before, "nothing moved");
+    assert_eq!(l.env.balance(&acc), 10 * USDC, "the depositor keeps the tokens");
+    // A mint already in the ledger takes a deposit as before.
+    l.deposit(0, &b, 10 * USDC);
+    // So does repaying the loan (its mint is in the ledger too).
+    l.deposit(MAX_SLOTS_T - 1, &b, 10 * USDC);
+}
+
+/// Finding 133: `execute_change` let a change proposed by the key that is the
+/// recovery key *now* execute whatever its kind. An admin key that queued a
+/// loosening, was replaced by the recovery key's rotation, and was then made
+/// the recovery key by the new admin with a live quorum had that loosening
+/// execute. The recovery key's changes count only for the kinds it may
+/// propose (a new admin, a new recovery key).
+#[test]
+fn a_loosening_by_a_former_admin_stays_stale_once_that_key_is_the_recovery_key() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let protocol = w.m.protocol;
+    let vault = w.usdc.vault;
+    let recovery = w.user();
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None)], &[&w.m.admin]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 0, &protocol)], &[]);
+    // The admin key (stolen, say) queues a loosening of the vault's limits.
+    let before = short_bps(&w, &vault);
+    let mut looser = Limits::default_limits();
+    looser.short_bps = before * 5;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault))], &[&w.m.admin]);
+    // The recovery key rotates the admin out.
+    let fresh = w.user();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh.pubkey(), &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    beat(&mut w, &[0, 1]);
+    w.env.advance(3 * DAY + 1);
+    w.env.ok(&[execute_change_ix(&w, 2, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh.pubkey());
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &vault)], &[]), verr::CHANGE_STALE, "finding 87");
+    // The new admin, with a live quorum, makes the old admin key the recovery key.
+    let (g0, g1) = (w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let old = w.m.admin.pubkey();
+    w.env.ok(&[w.m.replace_recovery_ix(&fresh.pubkey(), &old, &[g0, g1])], &[&fresh, &w.m.g[0], &w.m.g[1]]);
+    // Its loosening is still stale: a recovery key has no say over limits.
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, 1, &vault)], &[]), verr::CHANGE_STALE);
+    assert_eq!(short_bps(&w, &vault), before, "the limits stand");
+}
+
+/// Finding 134: a lifeboat exit executed while the protocol or the vault was
+/// frozen. A freeze is the incident signal, and a guardian who froze but had
+/// no time to veto was not covered. The exit now waits out every freeze; once
+/// they have run out it executes as before (within its expiry).
+#[test]
+fn a_lifeboat_exit_does_not_execute_while_frozen() {
+    let mut w = World::new();
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    w.env.advance(3 * DAY + 1); // the lifeboat opens a loosen delay after the seal
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    beat(&mut w, &[0, 1]);
+    w.env.advance(3 * DAY + 1); // due
+    let lifeboat = r2_lifeboat(&w);
+    let destination = w.m.destination.pubkey();
+    let dest = w.account("usdc", &destination);
+    let exit = w.m.vault_ix(27, &[], vec![
+        AccountMeta::new_readonly(w.m.protocol, false),
+        AccountMeta::new(w.usdc.vault, false),
+        AccountMeta::new(lifeboat, false),
+        AccountMeta::new_readonly(w.usdc.mint, false),
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(w.usdc.token_program, false),
+        AccountMeta::new_readonly(destination, true),
+    ]);
+    // One guardian freezes the protocol as the exit comes due.
+    w.env.ok(&[w.m.freeze_ix(&w.m.g[0].pubkey(), None, DAY)], &[&w.m.g[0]]);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::FROZEN);
+    assert_eq!(w.env.balance(&lifeboat), 1_000_000 * USDC, "still in the lifeboat");
+    // A freeze of the vault alone holds it too.
+    w.env.advance(DAY + 1);
+    w.env.ok(&[w.m.freeze_ix(&w.m.g[1].pubkey(), Some(&w.usdc), DAY)], &[&w.m.g[1]]);
+    assert_eq!(w.env.fails(std::slice::from_ref(&exit), &[&w.m.destination]), verr::FROZEN);
+    // Every freeze over: the exit executes, inside its 7-day expiry.
+    w.env.advance(DAY + 1);
+    w.env.ok(&[exit], &[&w.m.destination]);
+    assert_eq!(w.env.balance(&dest), 1_000_000 * USDC);
+    assert_eq!(w.env.balance(&lifeboat), 0);
+}

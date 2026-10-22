@@ -7,21 +7,34 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH"
-TOOLS="${PLATFORM_TOOLS:-$HOME/.cache/solana/v1.57/platform-tools}"
+# The release toolchain, named here and asserted, not implied by a cache
+# path: the canonical bytes depend on both (docs/09, finding 141).
+CLI_VERSION="${AGAVE_CLI_VERSION:-4.3.0}"
+TOOLS_VERSION="${PLATFORM_TOOLS_VERSION:-v1.57}"
+TOOLS="${PLATFORM_TOOLS:-$HOME/.cache/solana/$TOOLS_VERSION/platform-tools}"
 if ! command -v cargo-build-sbf >/dev/null; then
-  echo "cargo-build-sbf not found: install the Agave CLI v4.3.0 with" >&2
-  echo '  sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"' >&2
+  echo "cargo-build-sbf not found: install the Agave CLI v$CLI_VERSION with" >&2
+  echo "  sh -c \"\$(curl -sSfL https://release.anza.xyz/v$CLI_VERSION/install)\"" >&2
   exit 127
 fi
+found=$(cargo-build-sbf --version 2>/dev/null | head -1)
+if [ "$found" != "cargo-build-sbf $CLI_VERSION" ]; then
+  echo "refusing: the release build needs cargo-build-sbf $CLI_VERSION, found '$found' (AGAVE_CLI_VERSION to override)" >&2
+  exit 1
+fi
 if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
-  # First run: let cargo-build-sbf download platform-tools (the target check
-  # after the download fails harmlessly because RUSTC is not set yet).
-  cargo-build-sbf --no-rustup-override --arch v3 --manifest-path programs/floor/Cargo.toml \
-    --sbf-out-dir target/deploy >/dev/null 2>&1 || true
+  # First run: download platform-tools. An error here used to be swallowed,
+  # and the build then failed on a missing rustc a few lines down.
+  echo "== platform-tools $TOOLS_VERSION not in $TOOLS: downloading"
+  cargo-build-sbf --install-only --tools-version "$TOOLS_VERSION"
+  if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
+    echo "platform-tools $TOOLS_VERSION did not install into $TOOLS (a download timeout? re-run, or set PLATFORM_TOOLS)" >&2
+    exit 1
+  fi
 fi
 for p in programs/floor programs/vault; do
-  RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --arch v3 \
-    --manifest-path "$p/Cargo.toml" --sbf-out-dir target/deploy
+  RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --tools-version "$TOOLS_VERSION" --arch v3 \
+    --manifest-path "$p/Cargo.toml" --sbf-out-dir target/deploy -- --locked
 done
 # Harbor is bound to one Vault id at compile time. The canonical binary is
 # always the devnet Vault. Passing it as an argument keeps a leftover

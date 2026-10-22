@@ -28,12 +28,19 @@ python3 -c "import sys; sys.path.insert(0, 'reference'); import bulkhead_ref as 
 chmod 600 "$D/program-keypair.json"
 FLOOR=$(solana-keygen pubkey target/deploy/bulkhead_floor-keypair.json)
 ID=$(solana-keygen pubkey "$D/program-keypair.json")
-if solana program show --url "$URL" --keypair "$TEAM" "$ID" > /dev/null 2>&1; then
+# Three states, as in deploy.sh: deployed, absent, or unknown (an RPC error, a
+# rate limit). Unknown used to read as absent and deploy, an in-place upgrade
+# of a program this key owns (finding 141).
+if shown=$(solana program show --url "$URL" --keypair "$TEAM" "$ID" 2>&1); then
   echo "== the target program $ID is already deployed"
-else
+elif printf '%s' "$shown" | grep -qiE "unable to find|not found|AccountNotFound"; then
   echo "== deploying the target program as $ID (upgrade authority: the team key)"
   solana program deploy --url "$URL" --keypair "$TEAM" --upgrade-authority "$TEAM" \
     --program-id "$D/program-keypair.json" "$D/program.so" | grep -E "^(Program Id|Signature)"
+else
+  echo "cannot tell whether $ID is deployed (not an 'account not found' answer): refusing to deploy over it; re-run" >&2
+  printf '%s\n' "$shown" >&2
+  exit 1
 fi
 echo
 node cloud/deploy/floor-demo.mjs "$URL" "$D" "$FLOOR" "$ID" "$TEAM"

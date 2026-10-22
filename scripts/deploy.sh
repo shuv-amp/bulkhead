@@ -27,11 +27,15 @@ case "$URL" in
        echo "refusing: $(uname -s)-$(uname -m) is not the canonical build host; deploy from Linux x86_64 or CI's binaries" >&2
        exit 1
      fi
-     # Only reviewed code: the bytes must be rebuildable from a commit.
-     if [ -n "$(git status --porcelain -- programs crates Cargo.toml Cargo.lock)" ] && [ "${ALLOW_DIRTY:-0}" != 1 ]; then
-       echo "refusing: uncommitted changes under programs/, crates/ or Cargo.*; commit them (or ALLOW_DIRTY=1)" >&2
+     # Only reviewed code: the bytes must be rebuildable from a commit. Every
+     # tracked file counts (the build scripts, the toolchain pin and the
+     # reference's SIMD-0500 gate shape the bytes too; finding 141).
+     if [ -n "$(git status --porcelain --untracked-files=no)" ] && [ "${ALLOW_DIRTY:-0}" != 1 ]; then
+       echo "refusing: uncommitted changes to tracked files; commit them (or ALLOW_DIRTY=1)" >&2
+       git status --porcelain --untracked-files=no >&2
        exit 1
-     fi ;;
+     fi
+     echo "== deploying $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))" ;;
 esac
 
 scripts/build-programs.sh
