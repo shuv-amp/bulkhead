@@ -1082,6 +1082,34 @@ fn a_recovery_key_replaces_a_stolen_owner_key_that_cannot_stop_it() {
     assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), SET_DELAY, &solana_address::Address::default(), &(4 * DAY).to_le_bytes(), None)], &[&p.owner]), err::NOT_OWNER);
 }
 
+/// docs/17 §3 item 3 on Floor: with every guardian dead nobody can veto, yet a
+/// stolen owner key's upgrade cannot execute ahead of recovery. One proposal
+/// waits at a time and the recovery key's takes the owner's slot, so Floor
+/// needs no guardianless veto (the Vault, with many pending changes, does).
+#[test]
+fn with_every_guardian_dead_the_recovery_key_still_displaces_a_stolen_owners_upgrade() {
+    let mut env = Env::new();
+    let p = protect(&mut env, &honest_v1());
+    let f = &p.f;
+    let gs = p.guardians();
+    let recovery = with_recovery(&mut env, &p);
+    env.advance(4 * DAY); // every guardian last beat at registration, 7 days ago
+    let v2 = env.write_buffer(&honest_fix(), &p.owner);
+    env.set_buffer_authority(&v2, &p.owner, &f.authority);
+    env.ok(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]);
+    for (g, k) in gs.iter().zip(&p.g) {
+        assert_eq!(env.fails(&[f.veto(g)], &[k]), err::NOT_LIVE_GUARDIAN, "a dead guardian");
+    }
+    let fresh = Keypair::new().pubkey();
+    env.ok(&[f.propose(&recovery.pubkey(), SET_OWNER, &fresh, &[], None)], &[&recovery]);
+    assert_eq!(read_config(&env, f).pending_kind, SET_OWNER, "the upgrade is gone");
+    assert_eq!(env.fails(&[f.propose(&p.owner.pubkey(), UPGRADE, &v2, &[], Some(&v2))], &[&p.owner]), err::PROPOSAL_PENDING);
+    env.advance(3 * DAY + 1);
+    env.ok(&[f.execute_config()], &[]);
+    assert_eq!(floor_owner(&env, f), fresh.to_bytes());
+    assert_eq!(env.fails(&[f.execute_code(&v2, &p.owner.pubkey())], &[]), err::NO_PROPOSAL);
+}
+
 #[test]
 fn the_floor_recovery_key_can_only_replace_the_owner_or_itself() {
     let mut env = Env::new();

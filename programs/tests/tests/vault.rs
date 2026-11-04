@@ -2570,6 +2570,212 @@ fn a_stolen_recovery_key_is_replaced_by_the_admin_with_a_live_quorum() {
     assert_eq!(protocol_admin(&w), admin);
 }
 
+// --- with every guardian dead, the recovery key vetoes (docs/17 §3 item 3) ---
+
+/// Sealed, with a deposit, and a recovery key set by the admin (a 72h change).
+fn sealed_with_recovery(w: &mut World) -> Keypair {
+    let whale = w.user();
+    w.deposit("usdc", &whale, 10_000_000 * USDC);
+    w.seal();
+    let recovery = w.user();
+    let protocol = w.m.protocol;
+    let id = read_protocol(&w.env, &protocol).next_change_id;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 6, &recovery.pubkey(), &[], None)], &[&w.m.admin]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(w, id, &protocol)], &[]);
+    recovery
+}
+
+/// Moves to the first second at which no guardian is alive.
+fn kill_guardians(w: &mut World) {
+    let p = read_protocol(&w.env, &w.m.protocol);
+    let last = *p.last_heartbeat[..p.guardian_count as usize].iter().max().unwrap();
+    let gap = last + p.heartbeat_interval_s + 1 - w.env.time;
+    assert!(gap > 0);
+    w.env.advance(gap);
+    w.refresh_prices();
+    assert_eq!(read_protocol(&w.env, &w.m.protocol).alive_mask(w.env.time), 0, "every guardian is dead");
+}
+
+/// Proposes looser USDC limits as the admin; returns the change id.
+fn propose_looser_limits(w: &mut World, admin: &Keypair) -> u64 {
+    let id = read_protocol(&w.env, &w.m.protocol).next_change_id;
+    let vault = w.usdc.vault;
+    let mut looser = Limits::default_limits();
+    looser.short_bps = 1_000;
+    let mut ix = w.m.propose_change_ix(&w.env, 0, &vault, &looser.bytes(), Some(&vault));
+    ix.accounts[1].pubkey = admin.pubkey();
+    w.env.ok(&[ix], &[admin]);
+    id
+}
+
+/// With every guardian dead nobody could veto: a dead guardian cannot beat
+/// itself back and ejection needs a live quorum, so a stolen admin key's
+/// loosening executed after its delay, ahead of the recovery key's rotation
+/// proposed later. Now the recovery key vetoes it; a dead guardian, a
+/// stranger and the recovery key unsigned still cannot.
+#[test]
+fn the_recovery_key_vetoes_a_thiefs_loosening_once_every_guardian_is_dead() {
+    let mut w = World::new();
+    let recovery = sealed_with_recovery(&mut w);
+    kill_guardians(&mut w);
+    let thief = w.m.admin.insecure_clone();
+    let id = propose_looser_limits(&mut w, &thief);
+    let (g0, stranger) = (w.m.g[0].pubkey(), w.user());
+    assert_eq!(w.env.fails(&[veto_change_ix(&w, id, &g0)], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "a dead guardian");
+    assert_eq!(w.env.fails(&[veto_change_ix(&w, id, &stranger.pubkey())], &[&stranger]), verr::NOT_GUARDIAN, "a stranger");
+    let mut unsigned = veto_change_ix(&w, id, &recovery.pubkey());
+    unsigned.accounts[2].is_signer = false;
+    assert_eq!(w.env.fails(&[unsigned], &[]), verr::MISSING_SIGNATURE, "the recovery key, unsigned");
+    w.env.ok(&[veto_change_ix(&w, id, &recovery.pubkey())], &[&recovery]);
+    w.env.advance(3 * DAY);
+    let vault = w.usdc.vault;
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, id, &vault)], &[]), verr::CHANGE_VETOED);
+    assert_eq!(short_bps(&w, &vault), Limits::default_limits().short_bps);
+}
+
+/// Only while the set is guardianless: one live guardian (1 of threshold 2,
+/// no quorum) can veto, so the recovery key cannot; a recovery key that could
+/// would let a stolen one out-vote honest guardians, the override AUD-2
+/// rejected (docs/16 §4.4). From the second that guardian's interval ends, it can.
+#[test]
+fn the_recovery_key_cannot_veto_while_any_guardian_is_live() {
+    let mut w = World::new();
+    let recovery = sealed_with_recovery(&mut w);
+    let g0 = w.m.g[0].pubkey();
+    w.env.ok(&[r2_heartbeat(&w, &g0)], &[&w.m.g[0]]);
+    let beat = w.env.time;
+    w.env.advance(DAY + 1); // the others last beat at registration, 7 days ago
+    let p = read_protocol(&w.env, &w.m.protocol);
+    assert_eq!((p.alive_mask(w.env.time), p.threshold), (0b0001, 2), "g0 alone is live");
+    let thief = w.m.admin.insecure_clone();
+    let id = propose_looser_limits(&mut w, &thief);
+    let veto = veto_change_ix(&w, id, &recovery.pubkey());
+    assert_eq!(w.env.fails(std::slice::from_ref(&veto), &[&recovery]), verr::NOT_GUARDIAN);
+    w.env.advance(beat + 7 * DAY - w.env.time); // g0's last live second
+    assert_eq!(w.env.fails(std::slice::from_ref(&veto), &[&recovery]), verr::NOT_GUARDIAN, "g0 still live");
+    w.env.advance(1);
+    w.env.ok(&[veto], &[&recovery]);
+}
+
+/// Never its own proposal: the recovery key withdraws those with
+/// `cancel_change`. With every guardian dead it vetoes the thief's new
+/// lifeboat destination, not its own rotation, which executes.
+#[test]
+fn the_recovery_key_cannot_veto_its_own_rotation() {
+    let mut w = World::new();
+    let recovery = sealed_with_recovery(&mut w);
+    kill_guardians(&mut w);
+    let protocol = w.m.protocol;
+    let theirs = read_protocol(&w.env, &protocol).next_change_id;
+    let accomplice = Keypair::new().pubkey();
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 4, &accomplice, &[], None)], &[&w.m.admin]);
+    let fresh = Keypair::new().pubkey();
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh, &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    let own = theirs + 1;
+    assert_eq!(w.env.fails(&[veto_change_ix(&w, own, &recovery.pubkey())], &[&recovery]), verr::NOT_GUARDIAN);
+    w.env.ok(&[veto_change_ix(&w, theirs, &recovery.pubkey())], &[&recovery]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, own, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, theirs, &protocol)], &[]), verr::CHANGE_VETOED);
+}
+
+/// The same for a lifeboat exit: with every guardian dead, the recovery key
+/// vetoes the thief's exit, and the tokens stay in the lifeboat.
+#[test]
+fn the_recovery_key_vetoes_a_thiefs_exit_once_every_guardian_is_dead() {
+    let mut w = World::new();
+    let recovery = sealed_with_recovery(&mut w); // the lifeboat is open (finding 88)
+    kill_guardians(&mut w);
+    w.env.ok(&[r2_move_in(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    w.env.ok(&[r2_propose_exit(&w, 1_000_000 * USDC)], &[&w.m.admin]);
+    let g0 = w.m.g[0].pubkey();
+    assert_eq!(w.env.fails(&[r2_veto_exit(&w, &g0)], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "a dead guardian");
+    w.env.ok(&[r2_veto_exit(&w, &recovery.pubkey())], &[&recovery]);
+    w.env.advance(3 * DAY);
+    let owner = w.m.destination.pubkey();
+    let dest = w.account("usdc", &owner);
+    let exit = r2_execute_exit(&w, &owner, &dest);
+    assert_eq!(w.env.fails(&[exit], &[&w.m.destination]), verr::CHANGE_NOT_EXECUTABLE);
+    assert_eq!(w.env.balance(&r2_lifeboat(&w)), 1_000_000 * USDC, "still in the lifeboat");
+}
+
+/// No recovery key, nothing changes: with every guardian dead nobody vetoes,
+/// and the loosening executes after its delay. A recovery key the admin and
+/// a live quorum removed (`replace_recovery`) has no veto either.
+#[test]
+fn with_no_recovery_key_a_guardianless_set_still_has_no_veto() {
+    let mut w = World::new();
+    let former = sealed_with_recovery(&mut w);
+    let (admin, g0, g1) = (w.m.admin.pubkey(), w.m.g[0].pubkey(), w.m.g[1].pubkey());
+    let ix = w.m.replace_recovery_ix(&admin, &Address::default(), &[g0, g1]);
+    w.env.ok(&[ix], &[&w.m.admin, &w.m.g[0], &w.m.g[1]]);
+    assert_eq!(read_protocol(&w.env, &w.m.protocol).recovery, [0; 32]);
+    kill_guardians(&mut w);
+    let thief = w.m.admin.insecure_clone();
+    let id = propose_looser_limits(&mut w, &thief);
+    assert_eq!(w.env.fails(&[veto_change_ix(&w, id, &former.pubkey())], &[&former]), verr::NOT_GUARDIAN, "the removed key");
+    assert_eq!(w.env.fails(&[veto_change_ix(&w, id, &g0)], &[&w.m.g[0]]), verr::NOT_GUARDIAN, "a dead guardian");
+    w.env.advance(3 * DAY);
+    let vault = w.usdc.vault;
+    w.env.ok(&[execute_change_ix(&w, id, &vault)], &[]);
+    assert_eq!(short_bps(&w, &vault), 1_000);
+}
+
+/// End to end: every guardian dead, a thief holding the admin key proposes
+/// looser limits and a guardian set of its own. Before, both executed ahead of
+/// the recovery key's rotation, and the thief's live guardians could then veto
+/// the rotation. Now the recovery key vetoes both and proposes a new admin;
+/// the rotation executes, the thief's changes never do, and the new admin's
+/// guardian set brings the set back to life, after which the recovery key
+/// has no veto again.
+#[test]
+fn the_recovery_key_outruns_a_thief_while_every_guardian_is_dead() {
+    let mut w = World::new();
+    let recovery = sealed_with_recovery(&mut w);
+    kill_guardians(&mut w);
+    let protocol = w.m.protocol;
+    let vault = w.usdc.vault;
+    let zero = Address::default();
+    let thief = w.m.admin.insecure_clone();
+    let limits = propose_looser_limits(&mut w, &thief);
+    let theirs: Vec<Address> = (0..4).map(|_| Keypair::new().pubkey()).collect();
+    let guardians = read_protocol(&w.env, &protocol).next_change_id;
+    w.env.ok(&[w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&theirs, 2), None)], &[&w.m.admin]);
+    for id in [limits, guardians] {
+        w.env.ok(&[veto_change_ix(&w, id, &recovery.pubkey())], &[&recovery]);
+    }
+    let fresh = w.user();
+    let rotation = read_protocol(&w.env, &protocol).next_change_id;
+    let mut ix = w.m.propose_change_ix(&w.env, 3, &fresh.pubkey(), &[], None);
+    ix.accounts[1].pubkey = recovery.pubkey();
+    w.env.ok(&[ix], &[&recovery]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, rotation, &protocol)], &[]);
+    assert_eq!(protocol_admin(&w), fresh.pubkey());
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, limits, &vault)], &[]), verr::CHANGE_VETOED);
+    assert_eq!(w.env.fails(&[execute_change_ix(&w, guardians, &protocol)], &[]), verr::CHANGE_VETOED);
+    // The new admin revives the set.
+    let new_set: Vec<Keypair> = (0..4).map(|_| w.user()).collect();
+    let keys: Vec<Address> = new_set.iter().map(|k| k.pubkey()).collect();
+    let revival = read_protocol(&w.env, &protocol).next_change_id;
+    let mut ix = w.m.propose_change_ix(&w.env, 2, &zero, &guardian_set(&keys, 2), None);
+    ix.accounts[1].pubkey = fresh.pubkey();
+    w.env.ok(&[ix], &[&fresh]);
+    w.env.advance(3 * DAY);
+    w.env.ok(&[execute_change_ix(&w, revival, &protocol)], &[]);
+    let p = read_protocol(&w.env, &protocol);
+    assert_eq!(&p.guardians[..4], &keys.iter().map(|k| k.to_bytes()).collect::<Vec<_>>()[..]);
+    assert_eq!(p.alive_mask(w.env.time), 0b1111, "the new set is live");
+    // With a guardian live again, the recovery key cannot veto; a guardian can.
+    let next = propose_looser_limits(&mut w, &fresh);
+    assert_eq!(w.env.fails(&[veto_change_ix(&w, next, &recovery.pubkey())], &[&recovery]), verr::NOT_GUARDIAN);
+    w.env.ok(&[veto_change_ix(&w, next, &keys[0])], &[&new_set[0]]);
+}
+
 /// A vault in `other` for the world's USDC mint (and SOL's, with `sol`),
 /// and the sweep's twin sets: a vault with its token and lifeboat
 /// accounts, for the other protocol's vault of the same mint. Each account

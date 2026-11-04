@@ -1029,3 +1029,22 @@ fn guardian_bitmaps_only_name_current_guardians() {
     );
     assert_eq!(signer_bits(&keys, 3, []), Ok(0));
 }
+
+/// docs/17 §3 item 3: the recovery key vetoes only while no guardian is alive,
+/// only when one is set and is the signer, and never its own proposal. Every
+/// row of the truth table, at 0, 1, 2 and 8 live guardians.
+#[test]
+fn the_recovery_key_vetoes_exactly_while_the_set_is_guardianless() {
+    use bulkhead_core::governance::recovery_may_veto;
+    for alive in [0u8, 1, 2, 8] {
+        for bits in 0u8..8 {
+            let (set, signer, proposer) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            let want = alive == 0 && set && signer && !proposer;
+            assert_eq!(
+                recovery_may_veto(alive, set, signer, proposer),
+                want,
+                "alive {alive}, set {set}, signer {signer}, proposer {proposer}"
+            );
+        }
+    }
+}

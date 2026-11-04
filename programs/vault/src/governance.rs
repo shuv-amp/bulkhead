@@ -415,13 +415,17 @@ fn load_change(
 }
 
 // ---------------------------------------------------------------------------
-// 19. veto_change (any live guardian)   Accounts: 0 protocol, 1 change [w], 2 guardian [s].
+// 19. veto_change (any live guardian; with none alive, the recovery key)
+// Accounts: 0 protocol, 1 change [w], 2 guardian or recovery key [s].
 // ---------------------------------------------------------------------------
+// With every guardian dead, a stolen admin key's loosening used to execute
+// ahead of the recovery key's rotation; the recovery key now vetoes it, never
+// its own proposal (`require_vetoer`, docs/17 §3 item 3).
 pub fn veto_change(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
-    live_guardian(&p, acc(accounts, 2)?, now()?)?;
     let mut c = load_change(program_id, protocol, acc(accounts, 1)?)?;
+    require_vetoer(&p, acc(accounts, 2)?, now()?, &c.proposer)?;
     if c.executed {
         return Err(VaultError::ChangeExecuted.into());
     }

@@ -40,7 +40,9 @@ pub use pyth::{parse as parse_price_update, PriceUpdate};
 pub use token::{mint_policy_decimals, token_account_fields, transfer_fee_possible};
 
 use bulkhead_core::ema::ema_update;
-use bulkhead_core::governance::{signer_bits, GuardianSet, GuardianSetError, SignerError};
+use bulkhead_core::governance::{
+    recovery_may_veto, signer_bits, GuardianSet, GuardianSetError, SignerError,
+};
 use bulkhead_core::limiter::capacity_base;
 use pinocchio::cpi::{invoke, invoke_signed, Seed, Signer};
 use pinocchio::error::ProgramError;
@@ -403,6 +405,33 @@ pub(crate) fn live_guardian(
         return Err(VaultError::NotGuardian.into());
     }
     Ok(i)
+}
+
+/// A signing, live guardian, or, while no guardian is alive, the recovery key
+/// against what it did not propose (`recovery_may_veto`, docs/17 §3 item 3).
+/// Anyone else is refused with `live_guardian`'s error, as before.
+pub(crate) fn require_vetoer(
+    p: &Protocol,
+    a: &AccountView,
+    now_s: i64,
+    proposer: &[u8; 32],
+) -> ProgramResult {
+    let Err(e) = live_guardian(p, a, now_s) else {
+        return Ok(());
+    };
+    let alive = p.alive_mask(now_s).count_ones() as u8;
+    let recovery_set = p.recovery != [0; 32];
+    if a.is_signer()
+        && recovery_may_veto(
+            alive,
+            recovery_set,
+            key(a) == p.recovery,
+            *proposer == p.recovery,
+        )
+    {
+        return Ok(());
+    }
+    Err(e)
 }
 
 pub(crate) fn require_admin(p: &Protocol, a: &AccountView) -> ProgramResult {
