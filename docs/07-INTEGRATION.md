@@ -47,6 +47,8 @@ bulkhead_floor::register(owner, guardians, threshold, heartbeat_interval, delay,
 
 - **Admin.** Make it a multisig (a Squads vault, at least 2-of-3, hardware keys) from registration. Set the recovery key at registration, a separate cold key.
 - **Guardians.** Use independent operators, each running a guardian from registration.
+- **No shared signer.** The admin's keys, the recovery key and each guardian key are signed for by different stacks: no one MPC cluster, HSM, KMS account, signing service or CI secret holds two of them. A quorum signed for by one service is one key (`04`, T8). This is how the October 2026 Binance theft worked: nothing leaked, but one signing service signed for eleven hot-wallet keys once the attackers controlled what it signed (`01 §10`).
+- **The machines that can sign are targets.** Binance's attackers reached the signer through a tampered developer-tool download, a fake recruiter's coding assignment and a deploy token found on a colleague's laptop (`01 §10`). Keep signing keys off the machines that browse, take interviews or run code someone sent; fetch toolchains against pinned hashes (`scripts/fetch-toolchain.sh`); and give deploy and CI credentials no path to a signer.
 - **A short, public genesis.** Register, create the vaults, add the assets, import and `propose_seal` on the same day. Publish the snapshot of imported balances with the seal proposal, so anyone can compare it during the 72h review.
 - **No deposits before the seal.** Open deposits in your UI only once the status page (or `attest`) shows the protocol sealed. Before that, a deposit cannot be withdrawn.
 - **After the seal**, check that the guardian set, the admin, the recovery key and the lifeboat destination are the ones you published, then announce.

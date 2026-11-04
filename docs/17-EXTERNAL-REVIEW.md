@@ -50,13 +50,13 @@ Four of the residuals were closed the same day: the reference model is restated 
 
 1. **The backed lane's economics (E1–E3 in `16` §4)** are unchanged by this review and remain the gate for a lending integrator: loan consent by any signature in the instruction, liquidations queuing in a crash.
 2. **Guardian liveness (AUD-2).** A 2-of-3 set can still reach 2-of-2 by ejection. The operational rule (`threshold + 2`) stands; the protocol change belongs with the audit.
-3. **Dead guardians cannot veto or stop.** By design (the Lido pattern), but it means a stolen owner or admin key can wait for guardians to miss a heartbeat and then push a change through its 72 hours with nobody able to veto. Allowing a dead guardian's stop powers (veto, freeze, abort; never restore or unfreeze) would be strictly safer against theft at the cost of griefing by a stale key, which ejection already bounds.
-4. **After a restore, no abort buffer is staged** until someone stages one (`stop.mjs` says so). A restore could take a fresh abort buffer in the same instruction.
+3. **Dead guardians cannot veto or stop.** By design (the Lido pattern), but it means a stolen owner or admin key can wait for guardians to miss a heartbeat and then push a change through its 72 hours with nobody able to veto. Allowing a dead guardian's stop powers (veto, freeze, abort; never restore or unfreeze) would be strictly safer against theft at the cost of griefing by a stale key, which ejection already bounds. **Decided 5 Nov (`09`, finding 154):** not the dead guardians, whose veto would let one leaked stale key block every revival for good, but the recovery key, which may veto the admin's changes and lifeboat exits while no guardian is alive.
+4. **After a restore, no abort buffer is staged** until someone stages one (`stop.mjs` says so). A restore could take a fresh abort buffer in the same instruction. **Decided 5 Nov (finding 153):** no program change; guardians stage the next abort buffer before the restore, and the clients freeze and stage in one transaction.
 5. **Pyth's age window** is capped at one hour; within it a client picks the most favourable genuine update. The EMA bracket and haircuts bound it; the recommended per-asset `max_age_s` should be far lower (Pyth's own guidance is tens of seconds).
-6. **`close_buffer`** lets the owner close a buffer a stranger just froze for a pin or a re-staged abort, before it is pinned or staged; the stranger loses rent to the owner.
+6. **`close_buffer`** lets the owner close a buffer a stranger just froze for a pin or a re-staged abort, before it is pinned or staged; the stranger loses rent to the owner. **Decided 5 Nov (finding 153):** closed in the clients: a buffer is frozen and staged or pinned in one transaction, which leaves nothing to close.
 7. **The upgrade authority** is a hot key today; the mainnet path now commits to a timelocked multisig or Floor before the TVL-capped phase (the release workflow with provenance exists since 143).
 8. **The reference model** is restated from the mechanism since 142; what remains a port by design is the search's midpoint where soundness is not an interval, which the mechanism fixes.
-9. **The security contact** in `SECURITY.md` names no address or key.
+9. **The security contact** in `SECURITY.md` names no address or key. **Done 5 Nov (finding 155):** GitHub private vulnerability reporting.
 
 ## 4. Verification of the fixes
 

@@ -148,7 +148,7 @@ The status page is a static file that needs a local web server (browsers refuse 
 ```bash
 scripts/check.sh                  # the core, the reference, the tools, Cloud: needs rustup, Python 3.9+, Node 20+
 scripts/check-programs.sh         # the programs on the real runtime: needs the Agave CLI v4.3.0:
-                                  #   sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+                                  #   scripts/fetch-toolchain.sh agave   (checked against a pinned SHA-256)
 ```
 
 <details>

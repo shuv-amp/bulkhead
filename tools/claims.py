@@ -178,6 +178,7 @@ TEST_FILES = {
     f"{CORE}/tests/cascade.rs": "cascade",
     "programs/tests/tests/floor.rs": "floor_programs",
     "programs/tests/tests/vault.rs": "vault_programs",
+    "programs/tests/tests/wsol.rs": "vault_programs",  # the Vault on the native mint (finding 152)
 }
 UNCOUNTED = {
     "programs/tests/tests/differential.rs": "a program-vs-model differential, reported in steps (09 §2)",

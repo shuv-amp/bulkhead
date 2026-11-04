@@ -157,6 +157,27 @@ export class FloorClient {
   pinSnapshot(buffer) {
     return this.ix(2, new Uint8Array(0), [w(this.config), r(this.programdata), r(buffer)]);
   }
+  /**
+   * Loader-v3 `SetAuthority` (tag 4) of a buffer to Floor's PDA: it freezes
+   * the buffer. Signed by the buffer's current authority.
+   */
+  freezeBuffer(buffer, currentAuthority) {
+    return { programId: IDS.loaderV3, accounts: [w(buffer), s(currentAuthority), r(this.authority)], data: Uint8Array.of(4, 0, 0, 0) };
+  }
+  /**
+   * Freeze a buffer and stage it as the abort, in one transaction. Frozen in
+   * one transaction and staged in the next, the buffer is Floor's but not yet
+   * staged: the owner can `close_buffer` it in between and keep the rent, and
+   * a stolen owner key can repeat that to hold off re-arming after a restore
+   * (docs/17 §3 item 6; docs/09, finding 153). One transaction leaves no gap.
+   */
+  freezeAndStage(buffer, currentAuthority, guardians = []) {
+    return [this.freezeBuffer(buffer, currentAuthority), this.stageAbort(buffer, guardians)];
+  }
+  /** The same for a snapshot: freeze and pin in one transaction. */
+  freezeAndPin(buffer, currentAuthority) {
+    return [this.freezeBuffer(buffer, currentAuthority), this.pinSnapshot(buffer)];
+  }
   /** A live guardian quorum reinstalls the verified snapshot. */
   restoreSnapshot(snapshot, spill, guardians) {
     return this.ix(8, new Uint8Array(0), [

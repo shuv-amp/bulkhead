@@ -36,7 +36,7 @@ The demo market's admin and guardian keys are also team-held. On devnet that is 
 
 ## Reporting a vulnerability
 
-Please report privately. Do not open a public issue. Email the maintainer listed on the GitHub profile of `shuv-amp`. We will acknowledge within 72 hours and credit you unless you prefer otherwise.
+Please report privately. Do not open a public issue. Use GitHub's private vulnerability reporting: [Report a vulnerability](https://github.com/shuv-amp/bulkhead/security/advisories/new) (the repository's **Security** tab). The report stays private to you and the maintainers until a fix and an advisory are published. We will acknowledge within 72 hours and credit you unless you prefer otherwise.
 
 ## Responsible disclosure by us
 

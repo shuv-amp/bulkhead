@@ -197,12 +197,15 @@ say(`   restore: ${restoreSig}`);
 say(`   the same call now: ${callAfter.err === "null" ? "succeeds" : `rejected by its own code again (${callAfter.err})`}; identical to before: ${callAfter.err === callBefore.err}`);
 say(`   code sha256 ${after.sha256.slice(0, 16)}…: byte-identical to before: ${after.sha256 === before.sha256}`);
 
-say("\n6. re-arm: a new stop button and a new snapshot");
-const snapshot2 = buffer(`${dir}/program.so`);
-await refused("staging the program's own code as the abort", [f.stageAbort(snapshot2)], "NotCanonicalAbort");
-const abort2 = buffer(`${dir}/abort.so`);
-await send(rpc, team, [f.stageAbort(abort2)]);
-await send(rpc, team, [f.pinSnapshot(snapshot2)]);
+say("\n6. re-arm: a new stop button and a new snapshot, each frozen and staged in one transaction");
+// Frozen in one transaction and staged in the next, a buffer can be closed by
+// the owner in between (docs/17 §3 item 6); together, there is no gap. A
+// refused staging takes its freeze with it: the buffer stays the team's.
+const snapshot2 = buffer(`${dir}/program.so`, true);
+await refused("staging the program's own code as the abort", f.freezeAndStage(snapshot2, team.publicKey), "NotCanonicalAbort");
+const abort2 = buffer(`${dir}/abort.so`, true);
+await send(rpc, team, f.freezeAndStage(abort2, team.publicKey));
+await send(rpc, team, f.freezeAndPin(snapshot2, team.publicKey));
 await send(rpc, guardians[2], [f.heartbeat(guardians[2].publicKey)]);
 const c = await config();
 const armed = c.status === "live" && c.abortStaged && c.snapshotPinned && c.pendingKind === 0;

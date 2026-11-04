@@ -11,6 +11,15 @@ Accessed 26–27 Sep 2026 unless noted. Re-check any figure before putting it on
 - Drift protocol-v2 source, commit `13e8e9b` (23 Jun 2026), `programs/drift/src/instructions/admin.rs` (`handle_update_withdraw_guard_threshold`, `AdminUpdateSpotMarket`), read 27 Sep 2026: https://github.com/drift-labs/protocol-v2
 - TRM Labs attribution (search result): https://www.trmlabs.com/resources/blog/north-korean-hackers-attack-drift-protocol-in-285-million-heist
 
+## Binance incident (29 Oct 2026; accessed 4–5 Nov 2026; used in `01 §10`)
+- TRM Labs, timeline, per-chain amounts, signing-system assessment: https://www.trmlabs.com/resources/blog/north-korea-steals-usd-6-36-billion-from-binance-in-the-largest-hack-in-history
+- Chainalysis, start time, attack vector, frozen total: https://www.chainalysis.com/blog/binance-exploit-latest-findings-and-response/
+- Elliptic, laundering and the Solana funds after the theft: https://www.elliptic.co/insights/how-north-korea-is-laundering-the-6-4-billion-stolen-from-binance/
+- FinanceFeeds, Teng's statements and Blockaid's eleven keys: https://financefeeds.com/binance-hack-eleven-keys-signed-no-leak/
+- CoinCentral, Binance's account of the intrusion: https://coincentral.com/binance-hack-timeline-how-a-fake-coding-test-gave-hackers-wallet-access
+- Wikipedia, response timeline: https://en.wikipedia.org/wiki/2026_Binance_hack
+- Release digests pinned in `scripts/fetch-toolchain.sh` (GitHub API, read 5 Nov 2026): https://api.github.com/repos/anza-xyz/platform-tools/releases/tags/v1.57 · https://api.github.com/repos/anza-xyz/agave/releases/tags/v4.3.0
+
 ## Incident statistics
 - Zhou, Xiong, Ernstberger, Chaliasos, Wang, Wang, Qin, Wattenhofer, Song, Gervais. "SoK: Decentralized Finance (DeFi) Attacks." IEEE S&P 2023. arXiv 2208.13035v3: https://arxiv.org/abs/2208.13035 (Table VI; §V-A)
 - Chainalysis, 2024 private key compromise share (search result): https://www.chainalysis.com/blog/crypto-hacking-stolen-funds-2025/
