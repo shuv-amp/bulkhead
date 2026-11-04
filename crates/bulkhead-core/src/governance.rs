@@ -118,6 +118,30 @@ pub fn quorum(approvals: u8, alive: u8, threshold: u8) -> bool {
     threshold > 0 && (approvals & alive).count_ones() >= threshold as u32
 }
 
+/// Whether the recovery key may veto a pending change or exit: only while no
+/// guardian is alive (`alive` counts the live guardians), and never what the
+/// recovery key proposed itself. With every guardian dead nobody could veto:
+/// a dead guardian cannot heartbeat itself back, ejection needs a live
+/// quorum, so a stolen admin key's loosening executed ahead of the recovery
+/// key's later rotation (docs/17 §3 item 3; AUD-2, docs/16 §4.4: "a stolen
+/// owner key while every guardian is dead"). `alive == 0`, not `< threshold`:
+/// any single live guardian can already veto, and a recovery key that could
+/// veto while one lives would let a stolen recovery key out-vote honest
+/// guardians, the override AUD-2 rejected. Accepted: with every guardian dead
+/// and the recovery key stolen, the thief can veto an honest admin's new
+/// guardian set proposed before the thief's own rotation, a race the admin
+/// used to win; that thief already wins every other guardianless case (the
+/// admin cannot cancel its rotation), while a stolen admin key, the more
+/// exposed key, now loses. No recovery key: nothing changes.
+pub fn recovery_may_veto(
+    alive: u8,
+    recovery_set: bool,
+    signer_is_recovery: bool,
+    proposer_is_recovery: bool,
+) -> bool {
+    alive == 0 && recovery_set && signer_is_recovery && !proposer_is_recovery
+}
+
 /// Minimum guardian threshold. One key alone can stop things, never undo a
 /// stop: unfreeze, restore and eject always need at least two live guardians.
 pub const MIN_GUARDIAN_THRESHOLD: u8 = 2;

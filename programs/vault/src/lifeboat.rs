@@ -312,14 +312,16 @@ pub fn execute_exit(program_id: &Address, accounts: &mut [AccountView]) -> Progr
 }
 
 // ---------------------------------------------------------------------------
-// 28. veto_lifeboat_exit (any live guardian)
+// 28. veto_lifeboat_exit (any live guardian; with none alive, the recovery key)
 // ---------------------------------------------------------------------------
-// Accounts: 0 protocol, 1 vault [w], 2 guardian [s].
+// Accounts: 0 protocol, 1 vault [w], 2 guardian or recovery key [s].
+// As `veto_change`: with every guardian dead, the recovery key vetoes a
+// stolen admin key's exit (docs/17 §3 item 3).
 pub fn veto_exit(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let protocol = acc(accounts, 0)?;
     let p = load_protocol(program_id, protocol)?;
-    live_guardian(&p, acc(accounts, 2)?, now()?)?;
     let mut v = load_vault(program_id, protocol, acc(accounts, 1)?)?;
+    require_vetoer(&p, acc(accounts, 2)?, now()?, &v.exit_proposer)?;
     v.exit_vetoed = true;
     save(&mut accounts[1], |d| v.store(d))?;
     sys::event(&key(&accounts[0]), &[b"vault:exit_vetoed", &v.mint]);

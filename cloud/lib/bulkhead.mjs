@@ -1,7 +1,7 @@
 // Instruction builders for Bulkhead Vault and Floor, and the views a guardian
 // reads. Account orders follow programs/vault/src and programs/floor/src.
 
-import { key, findPda, concat, i64le, u64le, IDS, decodeAttestation, b58encode as b58 } from "./solana.mjs";
+import { key, findPda, concat, i64le, u64le, IDS, decodeAttestation, b58encode as b58, ownerProblem, SYSVAR_OWNER } from "./solana.mjs";
 
 const w = (pubkey) => ({ pubkey: key(pubkey), writable: true });
 const r = (pubkey) => ({ pubkey: key(pubkey) });
@@ -84,8 +84,18 @@ export class VaultClient {
    */
   async attest(rpc, feePayer, mint) {
     const { vault, vaultTokens } = await this.vault(mint);
-    const sim = await rpc.simulate(feePayer, [this.attestIx(vault, vaultTokens)], [IDS.clock]);
+    // The figures are believed only from the Vault's own return data, and the
+    // time only from the Clock sysvar: an endpoint answering otherwise is
+    // lying or broken, and the next one is asked (docs/09, finding 146).
+    const accept = (v) => {
+      if (!v || v.err) return null;
+      if (v.returnData?.programId !== b58(this.program)) return `attest's return data came from ${v.returnData?.programId ?? "no program"}, not the Vault program ${b58(this.program)}`;
+      return ownerProblem(b58(IDS.clock), v.accounts?.[0], SYSVAR_OWNER);
+    };
+    const sim = await rpc.simulate(feePayer, [this.attestIx(vault, vaultTokens)], [IDS.clock], { accept });
     if (sim.err) throw new Error(`attest failed: ${JSON.stringify(sim.err)} ${sim.logs?.join(" | ")}`);
+    const why = accept(sim);
+    if (why) throw new Error(`attest: ${why}`);
     const b = Uint8Array.from(atob(sim.returnData.data[0]), (c) => c.charCodeAt(0));
     const clock = Uint8Array.from(atob(sim.accounts[0].data[0]), (c) => c.charCodeAt(0));
     const clockS = Number(new DataView(clock.buffer).getBigInt64(32, true)); // Clock.unix_timestamp
@@ -156,6 +166,27 @@ export class FloorClient {
   /** A frozen buffer holding a copy of the live code, verified byte for byte. */
   pinSnapshot(buffer) {
     return this.ix(2, new Uint8Array(0), [w(this.config), r(this.programdata), r(buffer)]);
+  }
+  /**
+   * Loader-v3 `SetAuthority` (tag 4) of a buffer to Floor's PDA: it freezes
+   * the buffer. Signed by the buffer's current authority.
+   */
+  freezeBuffer(buffer, currentAuthority) {
+    return { programId: IDS.loaderV3, accounts: [w(buffer), s(currentAuthority), r(this.authority)], data: Uint8Array.of(4, 0, 0, 0) };
+  }
+  /**
+   * Freeze a buffer and stage it as the abort, in one transaction. Frozen in
+   * one transaction and staged in the next, the buffer is Floor's but not yet
+   * staged: the owner can `close_buffer` it in between and keep the rent, and
+   * a stolen owner key can repeat that to hold off re-arming after a restore
+   * (docs/17 §3 item 6; docs/09, finding 153). One transaction leaves no gap.
+   */
+  freezeAndStage(buffer, currentAuthority, guardians = []) {
+    return [this.freezeBuffer(buffer, currentAuthority), this.stageAbort(buffer, guardians)];
+  }
+  /** The same for a snapshot: freeze and pin in one transaction. */
+  freezeAndPin(buffer, currentAuthority) {
+    return [this.freezeBuffer(buffer, currentAuthority), this.pinSnapshot(buffer)];
   }
   /** A live guardian quorum reinstalls the verified snapshot. */
   restoreSnapshot(snapshot, spill, guardians) {

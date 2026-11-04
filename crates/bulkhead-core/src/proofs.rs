@@ -30,7 +30,7 @@ use crate::floor::{
 };
 use crate::governance::{
     alive_mask, can_eject, can_execute, freeze_until, guardian_alive, guardian_set_ok, quorum,
-    schedule, signer_bits, Abdications,
+    recovery_may_veto, schedule, signer_bits, Abdications,
 };
 use crate::limiter::{
     clamp_capacity, lane_always_closed, params_from_config, request, reset_backlog, Bucket,
@@ -504,6 +504,22 @@ fn governance_g5_building_blocks() {
     let (mask, k): (u32, u8) = (kani::any(), kani::any());
     let m2 = Abdications(mask).abdicate(k);
     assert!(m2.0 & mask == mask);
+}
+
+/// FULL. The recovery key vetoes exactly while no guardian is alive, when it
+/// is set, signs, and did not propose what it vetoes (docs/17 §3 item 3): one
+/// live guardian, whatever the threshold, takes the power away.
+#[kani::proof]
+fn recovery_veto_only_when_guardianless() {
+    let (alive, set, signer, proposer): (u8, bool, bool, bool) =
+        (kani::any(), kani::any(), kani::any(), kani::any());
+    let may = recovery_may_veto(alive, set, signer, proposer);
+    if may {
+        assert!(alive == 0 && set && signer && !proposer);
+    }
+    if alive == 0 && set && signer && !proposer {
+        assert!(may);
+    }
 }
 
 // ---------------------------------------------------------------------------

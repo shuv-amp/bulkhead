@@ -57,6 +57,14 @@
 // it, read from that watched config's own transactions; freeze state is read from
 // chain every cycle; active tickets are scanned at startup, on a freeze, and
 // periodically; truncated logs use the vault's own transfers and balances.
+// An account is read only as the program that must own it owns it (the
+// Vault's, Floor's, a token program's): an endpoint serving another owner's
+// is a lying one, logged and alerted, and the next endpoint is asked.
+//
+// Fresh recipients (policy.freshRecipientAgeS): a live unbacked payout to an
+// owner first seen on chain within the window alerts, and with
+// `freshRecipientWeight` above 1 counts more toward the freeze rules. The
+// age is looked up in the background; it only ever adds caution.
 //
 // Keeper: once due, it executes exactly what is approved below (anyone may
 // execute after the delay; this makes sure someone does), except a release of
@@ -78,10 +86,10 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { Rpc, FailoverRpc, hostOf, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault } from "../lib/solana.mjs";
+import { Rpc, FailoverRpc, hostOf, b58encode, decodeTicket, key, decodeProtocol, decodeFloor, decodeVault, ownerProblem, TOKEN_PROGRAM_IDS } from "../lib/solana.mjs";
 import { Keypair, sendWithFallback, sendEscalating, priorityPrice } from "../lib/signer.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
-import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue, freezeRefusal } from "./policy.mjs";
+import { assess, watchedEvents, checkFloors, guardianSetCheck, newState, observeProtocolFreeze, pendingCancels, rememberTicket, retirePendingFreeze, decisionTime, judgeReplayedWindow, queueFailedVeto, openIncident, observeFreezeEnd, incidentHold, guardianStanding, afterHeartbeat, heartbeatEveryAfterAccount, HEARTBEAT_ALERT_AFTER, pendingChangeVeto, pendingExitVeto, pendingUpgradeVeto, dueApprovedChange, dueApprovedFloor, vetoRetryDisposition, readChangeVeto, readPendingChange, checkPolicy, checkConfig, GENESIS, checkProposedChange, spendExecution, observeExecutions, unpinnedChangeApprovals, parseApproval, changeApproval, floorApproval, afterCancelFailure, CANCEL_RETRY_MS, DEFAULT_POLICY, DAY_S, outflowAlerts, OUTFLOW_KEEP_S, ticketAlreadyGone, freezeAlreadyCovers, replayedBreachTime, ticketScanDue, freezeRefusal, freshRecipientCheck, recipientFreshness, recipientFirstSeen, freshCandidate, freshLookups, readyPayouts, needsLookup, FRESH_LOOKUP_LIMIT, FRESH_CACHE_MAX } from "./policy.mjs";
 import { ingestBudgeted, ingestLagS, signatureWalk, signatureWalkSinceSlot, followConfigs, startSlot, cursorGone, PAGE_LOG_INTERVAL, requireTransaction, transactionOrSkip } from "./follow.mjs";
 import { executeChangeIx as executeChangeIxFor } from "./keeper.mjs";
 import { alerter, stallWatch, scanAll, actionLine, jsonText, errorCause } from "./alert.mjs";
@@ -142,8 +150,22 @@ const rpcUrls = [cfg.rpc, ...(cfg.rpcs ?? [])];
 const endpointName = (i) => `${hostOf(rpcUrls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
 const genesisSeen = []; // by endpoint: the genesis hash it gave
 let clusterChecked = false; // the start's check is over: later news is logged
+// An account owned by another program than the one that must own it is a
+// lying or broken endpoint: nothing is read from that answer, the read goes
+// to the next endpoint (or fails, with one), and it is said once per endpoint
+// and cause every 10 minutes (docs/09, finding 146).
+const badAnswers = new Map();
+function badAnswer(at, why) {
+  const k = `${at}:${why}`;
+  if (Date.now() - (badAnswers.get(k) ?? -Infinity) < 600_000) return;
+  if (badAnswers.size > 1_000) badAnswers.clear();
+  badAnswers.set(k, Date.now());
+  const endpoint = endpointName(at);
+  log({ level: "error", msg: `RPC endpoint ${endpoint} served an account with the wrong owner: nothing is read from that answer, and ${rpcUrls.length > 1 ? "the next endpoint is asked" : "the read fails"}. A lying or broken endpoint: replace it (docs/09, finding 146)`, error: why, endpoint });
+}
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(rpcUrls, {
+    onBadAnswer: (url, why, at) => badAnswer(at, why),
     // By entry, as a URL may be listed twice; both key its alert (finding 129).
     onSwitch: (from, to, e, fromAt, toAt) => {
       const [endpointFrom, endpoint] = [endpointName(fromAt), endpointName(toAt)];
@@ -158,12 +180,18 @@ const rpc = cfg.rpcs?.length
       else log({ msg: `RPC endpoint ${endpoint} answers on ${cfg.cluster}: it may be used from now on` });
     },
   })
-  : new Rpc(cfg.rpc);
+  : new Rpc(cfg.rpc, { onBadAnswer: (url, why) => badAnswer(0, why) });
 // Extra endpoints every guardian transaction is also sent to (optional).
 const extraRpcs = (cfg.rpcs ?? []).map((url) => new Rpc(url));
 const guardian = await must(() => Keypair.load(cfg.guardianKey));
 const vc = await must(() => new VaultClient(cfg.vaultProgram, cfg.protocolProgram).init());
 protocolLabel = b58encode(vc.protocol);
+// Every account read names the program that must own it (`Rpc.account`'s
+// `owner`): the protocol, vaults, tickets and changes are the Vault's
+// (docs/09, finding 146). Floor configs are Floor's (`floorOwned`, below).
+const VAULT_PROGRAM = b58encode(vc.program);
+const vaultOwned = { owner: VAULT_PROGRAM };
+const readVault = (address) => rpc.account(address, "confirmed", vaultOwned);
 // The watched vaults, by vault address and by token account address.
 const watched = await must(() => Promise.all(cfg.mints.map(async (mint) => ({ mint, ...(await vc.vault(mint)) }))));
 const vaultMints = new Map(watched.map((v) => [b58encode(v.vault), v.mint]));
@@ -265,6 +293,8 @@ function saveIncident() {
 const floorWatch = cfg.floorProgram
   ? await must(() => Promise.all((cfg.floorProtected ?? []).map((p) => new FloorClient(cfg.floorProgram, p).init())))
   : [];
+const floorOwned = { owner: floorWatch.length ? b58encode(floorWatch[0].program) : null };
+const readFloor = (address) => rpc.account(address, "confirmed", floorOwned);
 const floorReported = new Map();
 
 const worst1h = new Map();
@@ -334,7 +364,7 @@ async function refreshWorstCase() {
 const capsChecked = new Set();
 async function checkCaps(mint) {
   const { vault } = await vc.vault(mint);
-  const v = await rpc.account(vault);
+  const v = await readVault(vault);
   if (!v) return;
   capsChecked.add(mint);
   const { shortCap, longCap } = decodeVault(v.bytes).limits;
@@ -352,10 +382,13 @@ const warned72h = new Set();
 async function refreshWorst72h(mint, clockS) {
   try {
     const { vault, vaultTokens } = await vc.vault(mint);
-    const [v, t] = await Promise.all([rpc.account(vault), rpc.account(vaultTokens)]);
+    // The token account is the vault's own token program's (finding 146).
+    const [v, t] = await Promise.all([readVault(vault), rpc.account(vaultTokens, "confirmed", { owner: TOKEN_PROGRAM_IDS })]);
     if (!v || !t) throw new Error("vault account missing");
+    const decoded = decodeVault(v.bytes);
+    if (t.owner !== decoded.tokenProgram) throw new Error(`the vault's token account is owned by ${t.owner}, not the vault's token program ${decoded.tokenProgram}`);
     const balance = new DataView(t.bytes.buffer, t.bytes.byteOffset).getBigUint64(64, true);
-    worst72h.set(mint, attestLocal(decodeVault(v.bytes), { frozenUntil: 0 }, balance, clockS).worst72h);
+    worst72h.set(mint, attestLocal(decoded, { frozenUntil: 0 }, balance, clockS).worst72h);
   } catch (e) {
     if (!worst72h.has(mint) && !warned72h.has(mint)) {
       warned72h.add(mint);
@@ -369,7 +402,8 @@ async function refreshWorst72h(mint, clockS) {
  * protocol's next ticket id (every queued release bumps it) and a vault's
  * unbacked outflow (every instant one and every settlement adds to it). A
  * backup reporting a larger one than the primary proves the primary is
- * behind on writes to that very account (finding 138).
+ * behind on writes to that very account (finding 138). Read only from
+ * accounts the Vault program owns (crossCheckCounters' `owner`; finding 146).
  */
 function counterOf(address, bytes) {
   if (address === protocolKey) return decodeProtocol(bytes).nextTicketId;
@@ -440,10 +474,11 @@ async function freezeSend(ixs, secs, basePrice) {
   return r.signature ?? "already frozen (an earlier attempt or another guardian)";
 }
 
-/** Decoded account, null when it does not exist, undefined when it could not be read. */
-async function readDecoded(address, decodeBytes) {
+/** Decoded account, null when it does not exist, undefined when it could not
+ * be read (an account with the wrong owner included: finding 146). */
+async function readDecoded(read, address, decodeBytes) {
   try {
-    const acc = await rpc.account(address);
+    const acc = await read(address);
     return acc ? decodeBytes(acc.bytes) : null;
   } catch {
     return undefined;
@@ -493,10 +528,10 @@ async function beatOne(id, read, ix, logged) {
  * stays inside its own chain interval. Returns when the next one is due.
  */
 async function beat() {
-  let next = await beatOne("vault", () => readDecoded(vc.protocol, decodeProtocol), () => vc.heartbeat(guardian.publicKey), { action: "heartbeat", target: "vault" });
+  let next = await beatOne("vault", () => readDecoded(readVault, vc.protocol, decodeProtocol), () => vc.heartbeat(guardian.publicKey), { action: "heartbeat", target: "vault" });
   for (const fc of floorWatch) {
     const program = b58encode(fc.protected);
-    const at = await beatOne(`floor:${program}`, () => readDecoded(fc.config, decodeFloor), () => fc.heartbeat(guardian.publicKey), { action: "floor_heartbeat", program, target: `floor ${program}` });
+    const at = await beatOne(`floor:${program}`, () => readDecoded(readFloor, fc.config, decodeFloor), () => fc.heartbeat(guardian.publicKey), { action: "floor_heartbeat", program, target: `floor ${program}` });
     next = Math.min(next, at);
   }
   return next;
@@ -539,7 +574,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         // ticket only known by id waits for the next scan to name it.
         const address = action.address ?? state.pendingTickets.get(action.ticketId)?.address;
         const ticket = address ? key(address) : null;
-        let acc = ticket ? await rpc.account(ticket) : null;
+        let acc = ticket ? await readVault(ticket) : null;
         if (!acc) {
           // A missing account with history is a ticket that was there and is
           // closed now (a peer cancelled it, or it settled): done, not an
@@ -548,12 +583,12 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
           // at or after the ticket's newest transaction.
           const history = ticket ? await rpc.call("getSignaturesForAddress", [b58encode(ticket), { limit: 1, commitment: "confirmed" }]).catch(() => null) : null;
           if (history?.length) {
-            const r = await rpc.call("getAccountInfo", [b58encode(ticket), { encoding: "base64", commitment: "confirmed", minContextSlot: history[0].slot }]).catch(() => undefined);
-            if (r && !r.value) {
+            const r = await rpc.account(ticket, "confirmed", { ...vaultOwned, minContextSlot: history[0].slot }).catch(() => undefined);
+            if (r === null) {
               log({ action: "cancel", skipped: "ticket already closed (cancelled by another guardian, or settled)", ticketId: action.ticketId });
               return true;
             }
-            if (r?.value) acc = { ...r.value, bytes: Uint8Array.from(atob(r.value.data[0]), (c) => c.charCodeAt(0)) };
+            if (r) acc = r;
           }
         }
         if (!acc) {
@@ -578,7 +613,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
       }
       case "veto_change":
         if (retrying) {
-          const acc = await rpc.account(await vc.changeAddress(action.changeId));
+          const acc = await readVault(await vc.changeAddress(action.changeId));
           const what = vetoRetryDisposition(action, acc ? readChangeVeto(acc.bytes) : null);
           if (what !== "send") {
             if (what === "drop") log({ action: "veto_change", skipped: "change is already closed", changeId: action.changeId });
@@ -591,7 +626,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
         const vault = (watched.find((v) => v.mint === action.mint) ?? {}).vault;
         if (!vault) throw new Error(`no watched vault for ${action.mint}`);
         if (retrying) {
-          const acc = await rpc.account(vault);
+          const acc = await readVault(vault);
           let chain = null;
           if (acc) {
             try { chain = decodeVault(acc.bytes); } catch { chain = null; }
@@ -614,7 +649,7 @@ async function execute(action, event, eventTime, { retrying = false } = {}) {
           return true;
         }
         if (retrying) {
-          const acc = await rpc.account(fc.config);
+          const acc = await readFloor(fc.config);
           let chain = null;
           if (acc) {
             try { chain = decodeFloor(acc.bytes); } catch { chain = null; }
@@ -777,7 +812,7 @@ async function checkChanges() {
   for (const [id, check] of changeChecks) {
     let change;
     try {
-      const acc = await rpc.account(await vc.changeAddress(id));
+      const acc = await readVault(await vc.changeAddress(id));
       change = acc ? readPendingChange(acc.bytes) ?? undefined : undefined;
     } catch {
       change = undefined;
@@ -886,7 +921,73 @@ async function consider(e, signature, now, act) {
       ? { level: "warn", msg: `the recovery key was replaced${where} ${by}`, recovery: e.recovery }
       : { level: "warn", msg: `the recovery key was removed${where} ${by}: there is no recovery key now` });
   }
+  // After `assess`, which already froze if a rule broke: this can only add.
+  if (e.kind === "released") actions.push(...freshPayout(e, ctx));
   await applyActions(actions, e, now);
+}
+
+// Fresh recipients (policy.freshRecipientAgeS): each owner's age, the live
+// payouts waiting for theirs, and the lookups in flight. Lookups run in the
+// background, bounded per pass, so no read of an age stands in front of
+// ingestion or a freeze; a payout is judged again once its lookup returns.
+const freshAges = new Map();
+let freshPending = [];
+const freshInflight = new Set();
+const freshOf = (owner, t) => recipientFreshness(freshAges.get(owner), t, policy.freshRecipientAgeS);
+
+/** The fresh-recipient rule for `mint` now (`freshRecipientCheck`): its alert
+ * logged, its freeze (if any) returned. */
+function freshDecide(mint, ctx) {
+  const out = freshRecipientCheck(state, mint, ctx, policy, freshOf);
+  for (const a of out) if (a.code) log({ level: "warn", msg: a.msg, mint, alert: a.code });
+  return out.filter((a) => a.type === "freeze");
+}
+
+/** A live payout: judged with the ages already known, and queued for its
+ * recipient's lookup if that age is not known yet. */
+function freshPayout(e, ctx) {
+  if (!freshCandidate(e, policy)) return [];
+  if (freshInflight.has(e.owner) || needsLookup(freshAges.get(e.owner), wallNow())) freshPending.push({ mint: e.mint, owner: e.owner, t: e.at ?? ctx.now });
+  return freshDecide(e.mint, ctx);
+}
+
+/** One page of the owner's signatures, within 2 s; a failure is an unknown age. */
+async function lookupAge(owner) {
+  const checkedS = wallNow();
+  const rows = await within(rpc.call("getSignaturesForAddress", [owner, { limit: FRESH_LOOKUP_LIMIT, commitment: "confirmed" }]), 2_000, null);
+  return recipientFirstSeen(rows, FRESH_LOOKUP_LIMIT, checkedS);
+}
+
+/**
+ * Starts this pass's lookups (at most `freshRecipientLookupsPerPass` in
+ * flight) and judges the payouts whose recipient's age is now settled, each
+ * at its own time: one line per fresh or unknown recipient, the alert, and a
+ * freeze only with `freshRecipientWeight` above 1.
+ */
+async function judgeRecipients() {
+  const nowS = wallNow();
+  for (const owner of freshLookups(freshPending, freshAges, freshInflight, nowS, policy.freshRecipientLookupsPerPass)) {
+    freshInflight.add(owner);
+    lookupAge(owner).then((age) => {
+      freshAges.delete(owner);
+      freshAges.set(owner, age);
+      for (const k of freshAges.keys()) {
+        if (freshAges.size <= FRESH_CACHE_MAX) break;
+        freshAges.delete(k);
+      }
+    }).finally(() => freshInflight.delete(owner));
+  }
+  const { ready, waiting } = readyPayouts(freshPending, freshAges, freshInflight, nowS);
+  freshPending = waiting;
+  for (const p of ready) {
+    const verdict = freshOf(p.owner, p.t);
+    const age = freshAges.get(p.owner);
+    if (verdict === "fresh" || verdict === "unknown") log({ msg: verdict === "fresh" ? "payout to a fresh recipient" : `payout to a recipient of unknown age (${age?.why ?? "a full page of recent signatures"})`, owner: p.owner, mint: p.mint, firstSeenS: age?.firstS ?? null, at: p.t });
+    // A mint with no attest is recorded, not judged (finding 136).
+    if (!worst1h.has(p.mint)) continue;
+    const freezes = freshDecide(p.mint, { ...worstFor(p.mint), now: p.t });
+    if (freezes.length) await applyActions(freezes, { mint: p.mint, owner: p.owner }, nowS);
+  }
 }
 
 const spentLine = (what, approval) => ({ msg: `approval spent: ${what} executed; a new proposal of the same content will be vetoed`, approval });
@@ -919,7 +1020,7 @@ function notePendingFloor(fl) {
 async function noteExecution(e, live) {
   if (e.kind === "change_executed") {
     try {
-      const acc = await rpc.account(await vc.changeAddress(e.id));
+      const acc = await readVault(await vc.changeAddress(e.id));
       const change = acc ? readPendingChange(acc.bytes) : null;
       if (change?.executed) spend(policy.approvedChanges, changeApproval(change), `c${BigInt(change.id)}`, `change ${change.id}`, live);
     } catch (err) {
@@ -1106,8 +1207,12 @@ async function tryRefreshPendingTickets(options = {}) {
   }
 }
 
+/** The protocol account, never older than the last read (finding 137) and
+ * only as the Vault program owns it (finding 146): another endpoint is asked for a
+ * wrong owner, so a freeze in flight still reads, or sends unread. */
 async function readProtocolAccount() {
-  const r = await rpc.call("getAccountInfo", [b58encode(vc.protocol), { encoding: "base64", commitment: "confirmed", minContextSlot: protocolSlot }]);
+  const address = b58encode(vc.protocol);
+  const r = await rpc.call("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed", minContextSlot: protocolSlot }], { accept: (res) => ownerProblem(address, res?.value, VAULT_PROGRAM) });
   protocolSlot = Math.max(protocolSlot, r.context?.slot ?? 0);
   return r.value ? { bytes: Uint8Array.from(atob(r.value.data[0]), (c) => c.charCodeAt(0)) } : null;
 }
@@ -1180,7 +1285,7 @@ function checkGuardianSet(which, set) {
 /** Log each Floor program's missing pieces, once per change (A5). */
 async function checkFloor() {
   await checkFloors(floorWatch.map((fc) => [b58encode(fc.protected), async () => {
-    const acc = await rpc.account(fc.config);
+    const acc = await readFloor(fc.config);
     return acc ? decodeFloor(acc.bytes) : null;
   }]), floorReported, checkGuardianSet, log);
 }
@@ -1208,7 +1313,7 @@ async function vetoStillPending(now) {
   }
   for (const v of watched) {
     scans.push([`lifeboat exit scan (${v.mint})`, async () => {
-      const acc = await rpc.account(v.vault);
+      const acc = await readVault(v.vault);
       if (!acc) return;
       const action = pendingExitVeto({ ...decodeVault(acc.bytes), mint: v.mint }, policy, now, state.vetoed);
       if (!action) return;
@@ -1218,7 +1323,7 @@ async function vetoStillPending(now) {
   }
   for (const fc of floorWatch) {
     scans.push([`floor proposal scan (${b58encode(fc.protected)})`, async () => {
-      const acc = await rpc.account(fc.config);
+      const acc = await readFloor(fc.config);
       if (!acc) return;
       const fl = decodeFloor(acc.bytes);
       notePendingFloor(fl);
@@ -1244,7 +1349,7 @@ const keeperErrors = new Map();
 
 /** The execute instruction for an approved change (see keeper.mjs). */
 async function executeChangeIx(action) {
-  const mintOwner = action.kind === 1 ? (await rpc.account(key(action.target)))?.owner ?? null : null;
+  const mintOwner = action.kind === 1 ? (await rpc.account(key(action.target), "confirmed", { owner: TOKEN_PROGRAM_IDS }))?.owner ?? null : null;
   return executeChangeIxFor({
     vaultProgram: cfg.vaultProgram, protocol: vc.protocol, payer: guardian.publicKey, defaultMint: watched[0].mint,
     changeId: action.changeId, kind: action.kind, target: action.target, mintOwner,
@@ -1287,7 +1392,7 @@ async function keepApproved(now) {
   }]];
   for (const fc of floorWatch) {
     scans.push([`keeper floor scan (${b58encode(fc.protected)})`, async () => {
-      const acc = await rpc.account(fc.config);
+      const acc = await readFloor(fc.config);
       if (!acc) return;
       const fl = decodeFloor(acc.bytes);
       notePendingFloor(fl);
@@ -1593,6 +1698,9 @@ async function main() {
         log({ level: "warn", msg: `ingest lagging: the oldest unread transaction on the protocol account is ${lagS}s behind the chain, ${backlog.length} waiting; a freeze comes that much later. Spam on the protocol account, or a slow RPC (docs/07 §6)`, lagS, backlog: backlog.length });
       }
     });
+    // Recipient ages: never awaited lookups, so nothing here holds a pass up.
+    if (freshPending.length) await step("recipient ages", judgeRecipients);
+    else stalls.idle("recipient ages");
     // On its own cadence, or at once after a truncated transaction, whatever
     // the ingest backlog (finding 76).
     if (ticketScanDue(Date.now(), nextTicketScanAt, truncatedSeen)) await scanTickets();
@@ -1605,7 +1713,7 @@ async function main() {
           return;
         }
         // Counters a censoring primary cannot pass (finding 138).
-        const c = await rpc.crossCheckCounters([protocolKey, ...vaultMints.keys()], counterOf);
+        const c = await rpc.crossCheckCounters([protocolKey, ...vaultMints.keys()], counterOf, { owner: VAULT_PROGRAM });
         if (c.switched) log({ level: "warn", msg: `${c.reason}; switched endpoints (docs/09, finding 138)` });
       });
     }

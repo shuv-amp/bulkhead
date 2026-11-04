@@ -178,6 +178,7 @@ TEST_FILES = {
     f"{CORE}/tests/cascade.rs": "cascade",
     "programs/tests/tests/floor.rs": "floor_programs",
     "programs/tests/tests/vault.rs": "vault_programs",
+    "programs/tests/tests/wsol.rs": "vault_programs",  # the Vault on the native mint (finding 152)
 }
 UNCOUNTED = {
     "programs/tests/tests/differential.rs": "a program-vs-model differential, reported in steps (09 §2)",
@@ -291,6 +292,7 @@ KEPT = [
     ("docs/00-DECISION.md", "18 equivalents", "decision log entry of 26 Sep"),
     ("docs/09-VERIFICATION.md", "exactly the 22 equivalents below", "run 9's survivors, 6 Oct"),
     ("docs/12-SUBMISSION.md", "95 findings at submission", "the count when the project was submitted"),
+    ("docs/17-EXTERNAL-REVIEW.md", "all 20 Kani harnesses", "that review's own run, 22 Oct"),
 ]
 
 

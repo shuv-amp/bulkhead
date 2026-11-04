@@ -68,6 +68,27 @@ export const IDS = {
   clock: key("SysvarC1ock11111111111111111111111111111111"),
 };
 
+/** The owner the runtime gives every sysvar account (the Clock among them). */
+export const SYSVAR_OWNER = "Sysvar1111111111111111111111111111111111111";
+/** SPL Token and Token-2022: the owners a token account or a mint may have. */
+export const TOKEN_PROGRAM_IDS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
+
+/**
+ * Why an account an endpoint returned cannot be the one asked for, or null.
+ * `owners` is the program that must own it (or a list of those that may).
+ * Every decoder here checks a discriminator, but any program can write those
+ * bytes into an account of its own, and a lying or broken endpoint can serve
+ * them at the address asked: a correctly shaped account with the wrong owner
+ * was read as the protocol, a vault, a ticket or a Floor config (docs/09,
+ * finding 146). No account (`value` null) is not an owner problem.
+ */
+export function ownerProblem(address, value, owners) {
+  if (value == null) return null;
+  const allowed = Array.isArray(owners) ? owners : [owners];
+  if (allowed.includes(value.owner)) return null;
+  return `account ${address} is owned by ${value.owner ?? "(no owner given)"}, not ${allowed.join(" or ")}`;
+}
+
 // --- ed25519 on-curve check (RFC 8032 point decoding) ----------------------
 const P = 2n ** 255n - 19n;
 const modp = (x) => ((x % P) + P) % P;
@@ -253,16 +274,23 @@ export class Rpc {
    * endpoint can be asked), one whose wait before jitter is over
    * `HURRY_WAIT_MS` is thrown at once, marked `hurried`: a long Retry-After
    * (with `retries` over 2, also the backoff).
+   *
+   * `call`'s `accept(result)` returns why an answer cannot be believed (a
+   * wrong owner, `ownerProblem`), or null. Such an answer is thrown, never
+   * retried, marked `badAnswer`, with no JSON-RPC code: FailoverRpc asks the
+   * next endpoint, as for one that cannot answer. `onBadAnswer(url, why)`
+   * is told first.
    */
-  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000, retries = 6, hurry = false } = {}) {
+  constructor(url, { minGapMs = Number(globalThis.process?.env?.BULKHEAD_RPC_GAP_MS ?? 0), timeoutMs = 30_000, retries = 6, hurry = false, onBadAnswer = null } = {}) {
     this.url = url;
+    this.onBadAnswer = onBadAnswer;
     this.minGapMs = minGapMs;
     this.timeoutMs = timeoutMs;
     this.retries = retries;
     this.hurry = hurry;
     this.nextAt = 0;
   }
-  async call(method, params = []) {
+  async call(method, params = [], { accept = null } = {}) {
     for (let attempt = 0; ; attempt++) {
       if (this.minGapMs) {
         const at = Math.max(Date.now(), this.nextAt);
@@ -306,14 +334,34 @@ export class Rpc {
         if (waitMs != null && attempt < this.retries) err.hurried = true; // left before its retry
         throw err;
       }
+      const why = accept?.(j.result) ?? null;
+      if (why) {
+        try {
+          this.onBadAnswer?.(this.url, why);
+        } catch {
+          // a log line's failure says nothing about the answer
+        }
+        throw badAnswer(method, why);
+      }
       return j.result;
     }
   }
-  /** Reads at "confirmed" by default: guardians must act on what just happened. */
-  async account(k, commitment = "confirmed") {
-    const v = (await this.call("getAccountInfo", [b58encode(key(k)), { encoding: "base64", commitment }])).value;
+  /**
+   * Reads at "confirmed" by default: guardians must act on what just happened.
+   * With `owner` (a program id, or a list), an account owned by any other
+   * program is a bad answer (`ownerProblem`): thrown, and with backups asked
+   * of the next endpoint. With `minContextSlot`, a node behind it refuses.
+   * `slot` is the answer's context slot.
+   */
+  async account(k, commitment = "confirmed", { owner = null, minContextSlot = null } = {}) {
+    const address = b58encode(key(k));
+    const config = { encoding: "base64", commitment };
+    if (minContextSlot) config.minContextSlot = minContextSlot;
+    const r = await this.call("getAccountInfo", [address, config], owner ? { accept: (res) => ownerProblem(address, res?.value, owner) } : {});
+    if (r == null || typeof r !== "object") throw new Error("getAccountInfo: no result");
+    const v = r.value;
     if (!v) return null;
-    return { ...v, bytes: Uint8Array.from(atob(v.data[0]), (c) => c.charCodeAt(0)) };
+    return { ...v, slot: r.context?.slot ?? null, bytes: Uint8Array.from(atob(v.data[0]), (c) => c.charCodeAt(0)) };
   }
   async blockhash() {
     return (await this.latestBlockhash()).blockhash;
@@ -328,14 +376,19 @@ export class Rpc {
    * result. `accounts` (addresses) come back as they are after the run, e.g.
    * the Clock sysvar, to know the exact time the simulation saw.
    */
-  async simulate(feePayer, instructions, accounts = []) {
+  async simulate(feePayer, instructions, accounts = [], { accept = null } = {}) {
     const { message, signers } = compileMessage(feePayer, instructions, await this.blockhash());
     const tx = serializeTransaction(message, signers.map(() => new Uint8Array(64)));
     const b64 = btoa(String.fromCharCode(...tx));
     const opts = { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" };
     if (accounts.length) opts.accounts = { encoding: "base64", addresses: accounts.map((a) => b58encode(key(a))) };
-    return (await this.call("simulateTransaction", [b64, opts])).value;
+    return (await this.call("simulateTransaction", [b64, opts], accept ? { accept: (r) => accept(r?.value) } : {})).value;
   }
+}
+
+/** The error an answer `accept` does not believe becomes (`Rpc.call`). */
+function badAnswer(method, why) {
+  return Object.assign(new Error(`${method}: answer not believed: ${why}`), { badAnswer: why, rpcMethod: method });
 }
 
 /**
@@ -353,6 +406,12 @@ export function endpointTrouble(e) {
   if (code === undefined) return true; // no answer: refused, dropped, timed out
   return code === -32005 || code === -32016 || code === -32019 || code === -32010 || code === -32601 || code === 429 || (code >= 500 && code < 600);
 }
+
+/**
+ * Genesis hashes of the public clusters: the guardian pins its endpoints to
+ * one (findings 114, 117) and the status page names the cluster it reads.
+ */
+export const GENESIS = { "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", devnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", testnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY" };
 
 /** Slots a primary may trail the best endpoint before it is switched away from (~60 s). */
 export const SLOT_LAG_SWITCH = 150;
@@ -386,9 +445,14 @@ export const hostOf = (url) => { try { return new URL(url).host || "(endpoint)";
  * the active endpoint, and a failover or a cross-check could move it onto a
  * backup on another cluster, blind (docs/09, finding 114).
  * `onCluster(url, genesis, at)` reports each endpoint's hash when first learned.
+ *
+ * An answer the call's `accept` does not believe (`Rpc.call`: an account
+ * with the wrong owner) is that endpoint failing, not the call's answer: the
+ * next endpoint is asked, the active one is left if another answers, and
+ * `onBadAnswer(url, why, at)` reports it (docs/09, finding 146).
  */
 export class FailoverRpc extends Rpc {
-  constructor(urls, { onSwitch = () => {}, genesis = null, onCluster = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
+  constructor(urls, { onSwitch = () => {}, genesis = null, onCluster = () => {}, onBadAnswer = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
     super(urls[0], { timeoutMs, retries, ...opts });
     // Each endpoint hurries: a busy one asking for a long wait is left at
     // once, here and in crossCheck, which the guardian's loop waits for.
@@ -399,6 +463,7 @@ export class FailoverRpc extends Rpc {
     this.onSwitch = onSwitch;
     this.genesis = genesis;
     this.onCluster = onCluster;
+    this.onBadAnswer = onBadAnswer;
     this.cluster = urls.map(() => (genesis == null ? "ok" : "unknown")); // "ok", "unknown" or "wrong"
     this.asking = urls.map(() => null); // a genesis ask in flight
   }
@@ -548,9 +613,12 @@ export class FailoverRpc extends Rpc {
    * backup (docs/09, finding 138). Judged only while `active` is still the
    * endpoint the reads were made for, as `crossCheck` does since finding 119.
    * An endpoint that does not answer, or is on another cluster, is skipped.
+   * With `owner`, so is an account owned by another program, reported
+   * (`onBadAnswer`): a lying backup serving its own account with a larger
+   * counter would otherwise win the switch (docs/09, finding 146).
    * Returns `{ switched, reason }`.
    */
-  async crossCheckCounters(addresses, counter, { lagMs = SIGNATURE_LAG_SWITCH_MS, nowMs = Date.now() } = {}) {
+  async crossCheckCounters(addresses, counter, { lagMs = SIGNATURE_LAG_SWITCH_MS, nowMs = Date.now(), owner = null } = {}) {
     this.behind ??= new Map(); // address -> { at: first seen behind, from: endpoint index, active }
     if (this.endpoints.length < 2) return { switched: false, reason: null };
     const quiet = (p) => p.then((v) => v, () => undefined);
@@ -560,6 +628,11 @@ export class FailoverRpc extends Rpc {
       const r = await quiet(e.call("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }]));
       const data = r?.value?.data?.[0];
       if (typeof data !== "string") return null;
+      const why = owner ? ownerProblem(address, r.value, owner) : null;
+      if (why) {
+        this.report("onBadAnswer", e.url, why, i);
+        return null;
+      }
       try {
         return counter(address, Uint8Array.from(atob(data), (c) => c.charCodeAt(0)));
       } catch {
@@ -602,7 +675,7 @@ export class FailoverRpc extends Rpc {
    * move (a slow answer from the old endpoint, or a request sent before
    * another call's switch). The switch reports that endpoint's error.
    */
-  async call(method, params = []) {
+  async call(method, params = [], { accept = null } = {}) {
     const start = this.active;
     const order = this.endpoints.map((_, i) => (start + i) % this.endpoints.length);
     const failedAt = new Map(); // endpoint -> { sentAt: this.switches when sent, error }
@@ -615,13 +688,14 @@ export class FailoverRpc extends Rpc {
       const sentAt = this.switches;
       try {
         if (await this.admit(at)) {
-          const result = await this.endpoints[at].call(method, params);
+          const result = await this.endpoints[at].call(method, params, { accept });
           const evidence = failedAt.get(this.active);
           if (evidence?.sentAt === this.switches) this.switchTo(at, evidence.error);
           else if (this.cluster[this.active] === "wrong") this.switchTo(at, new Error("RPC endpoint serves another cluster"));
           return result;
         }
       } catch (e) {
+        if (e.badAnswer) this.report("onBadAnswer", this.endpoints[at].url, e.badAnswer, at);
         if (!endpointTrouble(e)) throw e;
         failedAt.set(at, { sentAt, error: e });
         last = e;

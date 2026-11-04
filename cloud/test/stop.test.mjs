@@ -23,15 +23,15 @@ const stopped = (() => {
 
 // An endpoint on `genesis`, or a JSON-RPC error `{ code }` it answers
 // getGenesisHash with (undefined: an answer with no hash); `config` is the
-// Floor config it holds, if any, read after `readMs`. Every call to the
-// program fails with FLOR there.
-async function stubRpc(genesis, config, readMs = 0) {
+// Floor config it holds, if any, read after `readMs`, owned by `owner`.
+// Every call to the program fails with FLOR there.
+async function stubRpc(genesis, config, readMs = 0, owner = SYSTEM) {
   const answers = {
     getGenesisHash: genesis,
     getSlot: 100,
     getRecentPrioritizationFees: [],
     getLatestBlockhash: { value: { blockhash: SYSTEM, lastValidBlockHeight: 200 } },
-    getAccountInfo: { value: config ? { data: [config, "base64"], owner: SYSTEM, lamports: 1, executable: false, space: 1000 } : null },
+    getAccountInfo: { value: config ? { data: [config, "base64"], owner, lamports: 1, executable: false, space: 1000 } : null },
     simulateTransaction: { value: { err: { InstructionError: [0, { Custom: FLOR }] } } },
   };
   const server = createServer((req, res) => {
@@ -257,6 +257,29 @@ test("a stop whose primary URL does not parse still stops through a backup", asy
     assert.match(out, /stopped: calls now fail with FLOR/);
     assert.match(out, new RegExp(`RPC \\(endpoint\\) \\(rpc\\) left; now using ${new URL(backup.url).host.replaceAll(".", "\\.")} \\(rpcs\\[1\\]\\)`));
   } finally {
+    backup.server.close();
+  }
+});
+
+test("a stop never takes a Floor config another program owns for Floor's, so a lying endpoint cannot say stopped (finding 146)", async () => {
+  // The primary serves a "stopped" config owned by the token program; the
+  // backup, on the same cluster, has no config. Read unchecked, the stop
+  // said "stopped" and exited 0 while the program ran on.
+  const lying = await stubRpc(GENESIS.devnet, stopped, 0, "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+  const backup = await stubRpc(GENESIS.devnet, null);
+  try {
+    const { code, out } = await runStop(lying.url, [backup.url]);
+    assert.equal(code, 2, out);
+    assert.match(out, /no Floor config for this program/);
+    assert.match(out, /\(rpc\) served an account with the wrong owner: not read from that answer/);
+    assert.doesNotMatch(out, /"stopped/);
+    // Its only endpoint lying: it reads nothing and gives up at the time limit.
+    const alone = await runStop(lying.url, undefined, { maxSeconds: 2 });
+    assert.equal(alone.code, 1, alone.out);
+    assert.match(alone.out, /gave up: Floor's config could not be read within the time limit/);
+    assert.doesNotMatch(alone.out, /"stopped/);
+  } finally {
+    lying.server.close();
     backup.server.close();
   }
 });

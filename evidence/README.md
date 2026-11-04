@@ -6,5 +6,6 @@
 | `solgov_state_2026-09-26.json.gz` | The snapshot above (solgov public API, 26 Sep 2026 04:56 UTC) | — |
 | `solgov_census_2026-09-26.json` | The census output from that snapshot | — |
 | `drift_model_output.md` | The Drift loss tables (a model; assumptions stated) | `python3 reference/drift_model.py` |
+| `binance_model_output.md` | The Binance Solana-leg table (a model; assumptions stated) | `python3 reference/binance_model.py` |
 
 Incident statistics (Zhou et al., IEEE S&P 2023) are cited from arXiv 2208.13035v3 (Table VI, §V-A); the PDF is not redistributed here.

@@ -1,7 +1,7 @@
 // Facts the guardian takes from the chain instead of from log text. Pure
 // functions over RPC results, so every rule is unit-tested (cloud/test).
 
-import { b58decode, b58encode, decodeTicket, key } from "../lib/solana.mjs";
+import { b58decode, b58encode, decodeTicket, key, ownerProblem } from "../lib/solana.mjs";
 import { readPendingChange } from "./policy.mjs";
 
 /** Vault `settle_ticket`. A settlement moves tokens already counted when queued. */
@@ -267,18 +267,40 @@ export function ticketRelease(ticket, vaultMints) {
   };
 }
 
-/** All live tickets for one protocol, filtered by their account discriminator and protocol key. */
-export async function activeTickets(rpc, vaultProgram, protocol) {
-  const protocolKey = b58encode(key(protocol));
-  const discriminator = b58encode(new TextEncoder().encode("BHTICKT1"));
-  const accounts = await rpc.call("getProgramAccounts", [b58encode(key(vaultProgram)), {
+/**
+ * The Vault program's accounts of one protocol with this discriminator. A
+ * node lists a program's accounts by owner, but a lying or broken one can list
+ * anything: a row owned by another program is a bad answer (`ownerProblem`),
+ * asked of the next endpoint, and thrown if every one gives it, never decoded
+ * (docs/09, finding 146). Checked again here for an `rpc` that ignores `accept`.
+ */
+async function programAccounts(rpc, vaultProgram, protocol, discriminator) {
+  const program = b58encode(key(vaultProgram));
+  const foreign = (rows) => {
+    if (!Array.isArray(rows)) return null;
+    for (const row of rows) {
+      const why = ownerProblem(row?.pubkey, row?.account ?? {}, program);
+      if (why) return why;
+    }
+    return null;
+  };
+  const accounts = await rpc.call("getProgramAccounts", [program, {
     encoding: "base64",
     commitment: "confirmed",
     filters: [
-      { memcmp: { offset: 0, bytes: discriminator } },
-      { memcmp: { offset: 8, bytes: protocolKey } },
+      { memcmp: { offset: 0, bytes: b58encode(new TextEncoder().encode(discriminator)) } },
+      { memcmp: { offset: 8, bytes: b58encode(key(protocol)) } },
     ],
-  }]);
+  }], { accept: foreign });
+  const why = foreign(accounts);
+  if (why) throw new Error(`getProgramAccounts: answer not believed: ${why}`);
+  return accounts;
+}
+
+/** All live tickets for one protocol, filtered by their account discriminator and protocol key. */
+export async function activeTickets(rpc, vaultProgram, protocol) {
+  const accounts = await programAccounts(rpc, vaultProgram, protocol, "BHTICKT1");
+  const protocolKey = b58encode(key(protocol));
   if (!Array.isArray(accounts)) throw new Error("getProgramAccounts returned no ticket account list");
   return accounts.map(({ pubkey, account }) => {
     const encoded = account?.data?.[0];
@@ -292,16 +314,8 @@ export async function activeTickets(rpc, vaultProgram, protocol) {
 
 /** Change accounts for one protocol. The caller decides which are still open. */
 export async function activeChanges(rpc, vaultProgram, protocol) {
+  const accounts = await programAccounts(rpc, vaultProgram, protocol, "BHCHNG01");
   const protocolKey = b58encode(key(protocol));
-  const discriminator = b58encode(new TextEncoder().encode("BHCHNG01"));
-  const accounts = await rpc.call("getProgramAccounts", [b58encode(key(vaultProgram)), {
-    encoding: "base64",
-    commitment: "confirmed",
-    filters: [
-      { memcmp: { offset: 0, bytes: discriminator } },
-      { memcmp: { offset: 8, bytes: protocolKey } },
-    ],
-  }]);
   if (!Array.isArray(accounts)) throw new Error("getProgramAccounts returned no change account list");
   return accounts.flatMap(({ pubkey, account }) => {
     const encoded = account?.data?.[0];

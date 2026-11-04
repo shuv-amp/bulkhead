@@ -60,6 +60,21 @@ test("a floor veto can name the proposal, and still be sent without one", () => 
   assert.deepEqual(fc.veto(guardian).data, Uint8Array.of(5));
 });
 
+test("a buffer is frozen and staged, or frozen and pinned, in one transaction (docs/17 §3 item 6)", async () => {
+  const fc = await new FloorClient("11111111111111111111111111111111", "11111111111111111111111111111112").init();
+  const [buffer, writer] = ["11111111111111111111111111111114", "11111111111111111111111111111115"];
+  const [freeze, stage] = fc.freezeAndStage(buffer, writer);
+  assert.equal(b58encode(freeze.programId), "BPFLoaderUpgradeab1e11111111111111111111111");
+  assert.deepEqual([...freeze.data], [4, 0, 0, 0], "loader-v3 SetAuthority, a bincode u32 tag");
+  assert.deepEqual(freeze.accounts.map((a) => [b58encode(a.pubkey), !!a.writable, !!a.signer]), [
+    [buffer, true, false], [writer, false, true], [b58encode(fc.authority), false, false],
+  ], "the buffer, its current authority signing, and Floor's PDA as the new one");
+  assert.deepEqual(stage, fc.stageAbort(buffer));
+  const [freeze2, pin] = fc.freezeAndPin(buffer, writer);
+  assert.deepEqual(freeze2, freeze);
+  assert.deepEqual(pin, fc.pinSnapshot(buffer));
+});
+
 test("cancel_ticket and extend_ticket name the ticket id the guardian decided on", () => {
   const vc = new VaultClient("11111111111111111111111111111111", "11111111111111111111111111111112");
   vc.protocol = key("11111111111111111111111111111113");

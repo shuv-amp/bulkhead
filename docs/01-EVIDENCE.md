@@ -177,3 +177,36 @@ Source: `github.com/0dotxyz/marginfi-v2` (Apache-2.0), commit `35b5c66` (16 Sep 
   1. **Net-flow vs per-owner backing.** In a net-flow limiter, anyone's deposit raises everyone's withdrawal allowance, the attacker's included. In Bulkhead, a deposit backs only its own depositor, so honest inflows never enlarge an attacker's budget.
   2. **Admin-set vs slow loosening.** A limit its admin can raise instantly can't bound the admin. Bulkhead's loosenings wait ≥ 72h and are vetoable. Bulkhead's freezes are repeatable (the admin may be the attacker), with quorum ejection instead of a pause budget.
 - Composability spreads loss, which is why `attest` exposes a venue's worst case to other programs on-chain.
+
+## 10. Binance, 29 October 2026
+
+Accessed 4–5 Nov 2026. No root-cause post-mortem had been published; the intrusion steps are Binance's own account, reported by others.
+
+| Fact | Label | Exact text or figure | Source |
+|---|---|---|---|
+| Loss | reported | "about USD 6.36 billion" at transfer time, across ten chains; Elliptic counts $6.43B | TRM Labs; Elliptic |
+| Speed | reported | most funds left "in about 20 minutes" from 20:05 UTC | TRM Labs |
+| What was compromised | reported | the attacker "gained the ability to make Binance's hot wallet signing system sign transactions across chains" | TRM Labs |
+| No key leaked | reported | "So far, we have found no evidence of any wallet private key leak" (Richard Teng); Blockaid counts eleven hot-wallet keys signing for the attacker | FinanceFeeds |
+| Limits were above the signer | reported | the attackers "moved funds outside the normal withdrawal process"; transfers continued after withdrawals were paused | CoinCentral (Binance's account) |
+| How they reached it | reported | a tampered Homebrew download on a wallet DevOps engineer's machine (June); a fake recruiter's coding assignment that was malware (September); lateral movement through an internal AI tool to a machine holding "a container deployment permission token" (20 Oct); with it, malicious software in the wallet infrastructure (29 Oct) | CoinCentral (Binance's account) |
+| Staging | reported | operator wallet funded through Tornado Cash on 28 Oct; attack code deployed and tested on two wallets, rehearsed on a third about four hours before | TRM Labs |
+| A permission that outlived the response | reported | on Ethereum, one transaction carried 50 pre-signed EIP-7702 authorizations, one per nonce; "One matched"; the hot wallet then delegated to a sweeper and was re-swept six times over about 3.5 hours; rotating keys does not clear a delegation | TRM Labs; FinanceFeeds (Blockaid) |
+| The Solana leg | reported | a Binance Solana wallet sent 970,500 SOL (~USD 96M) "shortly after 20:10 UTC", an ordinary signed transfer | TRM Labs |
+| Fresh destinations | reported | the eleven keys signed transfers "to an address created minutes earlier" | FinanceFeeds (Blockaid) |
+| Response times | reported | Tether froze 971.1M USDT 37 minutes after the main sweep; Circle 823M USDC at 21:04; Binance removed the attackers' permissions at about 00:10 UTC | TRM Labs; Wikipedia |
+| Frozen | reported | about $2.8B as of 3 Nov, almost all stablecoins; BTC and ETH could not be frozen | Chainalysis |
+| Attribution | reported | TraderTraitor (North Korea), "high confidence"; North Korea denies it | TRM Labs; Wikipedia |
+
+**The Solana leg under Bulkhead (label: model).** From `reference/binance_model.py` (output in `evidence/binance_model_output.md`). **Assumption:** the wallet's 970,500 SOL sat in one vault, as wrapped SOL, at the defaults (2%/h and 5%/24h), every payout unbacked. An exchange would set absolute caps to its normal withdrawals instead.
+
+| A freeze lands after | Loss |
+|---|---|
+| 2 min (guardian bot, assumed) | **2.07%**, 20,057 SOL (~$2.0M) |
+| 37 min (Tether's first freeze in this incident) | 3.23%, 31,380 SOL (~$3.1M) |
+| 4 h (when Binance actually revoked access) | 5.83%, 56,612 SOL (~$5.6M) |
+| 24 h (nobody) | 10.00%, 97,050 SOL (~$9.6M) |
+
+**How we say it:** "Binance's withdrawal limits lived above its signer; the attackers took the signer and went around them. Bulkhead's limit is where the money is: a signer that does whatever the attacker wants still gets what the program allows." The Solana leg was 1.5% of the loss, and Bulkhead is Solana-only.
+**How we never say it:** "Bulkhead would have saved Binance." An exchange is not who it is built for, and BTC, ETH, Tron and XRP are out of its reach.
+

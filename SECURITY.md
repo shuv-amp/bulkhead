@@ -6,7 +6,7 @@
 
 | Component | State | Checked by |
 |---|---|---|
-| `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 20 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
+| `bulkhead-core` (the math) | Built | An independent Python reference with a differential runner, golden vectors, property tests, exhaustive checks, 21 Kani harnesses, mutation testing (`docs/09-VERIFICATION.md`) |
 | Programs: Floor, Vault, and Harbor (a demo protocol) | Built for sBPF v3 | LiteSVM on the real agave runtime and loader (scenarios, negative tests, compute), a program-vs-model differential, and an end-to-end run on a local validator |
 | Bulkhead Cloud (guardian bot, status page, client) | Built | Unit tests, the JavaScript limiter port against the Python reference on every case and the Rust core on all but arbitrary bucket states, the end-to-end run |
 | Devnet deployment | Deployed 28 Sep 2026; upgraded in place 29 Sep, 6 Oct, 7 Oct, twice on 8 Oct, six times on 9 Oct, once on 10 Oct, once on 11 Oct and once on 15 Oct (below) | All three programs run the canonical build (Linux x86_64; CI publishes it) of `main` at PR #85 (Harbor unchanged since 6 Oct), matched byte for byte with the upgrade authority checked |
@@ -36,7 +36,7 @@ The demo market's admin and guardian keys are also team-held. On devnet that is 
 
 ## Reporting a vulnerability
 
-Please report privately. Do not open a public issue. Email the maintainer listed on the GitHub profile of `shuv-amp`. We will acknowledge within 72 hours and credit you unless you prefer otherwise.
+Please report privately. Do not open a public issue. Use GitHub's private vulnerability reporting: [Report a vulnerability](https://github.com/shuv-amp/bulkhead/security/advisories/new) (the repository's **Security** tab). The report stays private to you and the maintainers until a fix and an advisory are published. We will acknowledge within 72 hours and credit you unless you prefer otherwise.
 
 ## Responsible disclosure by us
 

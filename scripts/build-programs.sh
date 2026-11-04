@@ -13,8 +13,8 @@ CLI_VERSION="${AGAVE_CLI_VERSION:-4.3.0}"
 TOOLS_VERSION="${PLATFORM_TOOLS_VERSION:-v1.57}"
 TOOLS="${PLATFORM_TOOLS:-$HOME/.cache/solana/$TOOLS_VERSION/platform-tools}"
 if ! command -v cargo-build-sbf >/dev/null; then
-  echo "cargo-build-sbf not found: install the Agave CLI v$CLI_VERSION with" >&2
-  echo "  sh -c \"\$(curl -sSfL https://release.anza.xyz/v$CLI_VERSION/install)\"" >&2
+  echo "cargo-build-sbf not found: install the Agave CLI v$CLI_VERSION, checked against its pinned hash, with" >&2
+  echo "  scripts/fetch-toolchain.sh agave" >&2
   exit 127
 fi
 found=$(cargo-build-sbf --version 2>/dev/null | head -1)
@@ -23,14 +23,20 @@ if [ "$found" != "cargo-build-sbf $CLI_VERSION" ]; then
   exit 1
 fi
 if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
-  # First run: download platform-tools. An error here used to be swallowed,
-  # and the build then failed on a missing rustc a few lines down.
+  # First run: download platform-tools and check it against the pinned hash
+  # (finding 149). cargo-build-sbf's own download checked nothing, and timed
+  # out on some hosts. An error here used to be swallowed (finding 141).
   echo "== platform-tools $TOOLS_VERSION not in $TOOLS: downloading"
-  cargo-build-sbf --install-only --tools-version "$TOOLS_VERSION"
+  PLATFORM_TOOLS="$TOOLS" scripts/fetch-toolchain.sh platform-tools
   if [ ! -x "$TOOLS/rust/bin/rustc" ]; then
     echo "platform-tools $TOOLS_VERSION did not install into $TOOLS (a download timeout? re-run, or set PLATFORM_TOOLS)" >&2
     exit 1
   fi
+fi
+if [ ! -f "$TOOLS/.bulkhead-sha256" ]; then
+  # A tree from before finding 149, or from another installer: usable, but
+  # nothing says it is the pinned tarball. Remove it to fetch a checked one.
+  echo "warning: $TOOLS was not installed by scripts/fetch-toolchain.sh; its contents are unchecked" >&2
 fi
 for p in programs/floor programs/vault; do
   RUSTC="$TOOLS/rust/bin/rustc" cargo-build-sbf --no-rustup-override --tools-version "$TOOLS_VERSION" --arch v3 \

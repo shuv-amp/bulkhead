@@ -5,7 +5,7 @@
 // veto proposals, and (under Floor) abort. It can never move funds or choose a
 // recipient; the programs enforce that, not this file.
 
-import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, MAX_GUARDIANS, guardianMarginProblem } from "../lib/solana.mjs";
+import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, MAX_GUARDIANS, guardianMarginProblem, GENESIS } from "../lib/solana.mjs";
 import { ALERT_FORMATS } from "./alert.mjs";
 
 const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
@@ -189,6 +189,11 @@ const POLICY_RULES = {
   minPriorityMicroLamports: ["int", 0, 1e12],
   freezeMinPriorityMicroLamports: ["int", 0, 1e12],
   freezeDeadlineS: ["int", 10, 300],
+  freshRecipientAgeS: ["int", 0, 30 * 86_400],
+  freshRecipientAlertFraction: ["fraction"],
+  freshRecipientWeight: ["weight"],
+  freshRecipientUnknownIsFresh: ["bool"],
+  freshRecipientLookupsPerPass: ["int", 1, 64],
 };
 const BASE58_KEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -202,6 +207,8 @@ function checkField(name, v, [kind, lo, hi]) {
     case "array": if (!Array.isArray(v)) bad("a list"); break;
     case "keys": if (!Array.isArray(v) || !v.every((k) => typeof k === "string" && BASE58_KEY.test(k))) bad("a list of base58 addresses"); break;
     case "price": if (v !== "auto" && (typeof v !== "number" || !Number.isInteger(v) || v < 0)) bad('"auto" or a whole number of micro-lamports per compute unit'); break;
+    // At least 1: a weight can only add to what counts, never take away.
+    case "weight": if (typeof v !== "number" || !(v >= 1 && v <= 10)) bad("a number from 1 to 10 (1 counts fresh recipients as any other)"); break;
   }
 }
 
@@ -342,12 +349,41 @@ export const DEFAULT_POLICY = {
   /** How long a freeze keeps signing again at a doubled price before it is
    * handed to the next loop pass (and alerted). */
   freezeDeadlineS: 90,
+  /** Fresh recipients (`freshRecipientCheck`): an owner first seen on chain
+   * less than this many seconds before an unbacked payout to it is "fresh".
+   * Stolen funds go to addresses made minutes before (the Oct 2026 Binance
+   * theft); honest payouts mostly go to older ones. Solana keeps no creation
+   * time, so the age is the owner's oldest signature, from one page of
+   * `getSignaturesForAddress` (`recipientFirstSeen`), looked up in the
+   * background, at most `freshRecipientLookupsPerPass` at a time, and cached.
+   * An attacker can age an address in advance, and a node with short history
+   * makes old owners look new, so this only ever adds caution: it never
+   * raises a threshold, delays or holds back a freeze. 0 turns it off
+   * (docs/09, finding 150). */
+  freshRecipientAgeS: 86_400,
+  /** Alert (urgent, not a freeze) once unbacked outflow to fresh recipients
+   * reaches this fraction of the 1-hour freeze threshold within the hour, or
+   * of the 24-hour one within the day; at most once per `outflowAlertEveryS`
+   * per mint. 0 turns the alert off. */
+  freshRecipientAlertFraction: 0.1,
+  /** 1 (the default): fresh recipients only alert. Above 1, unbacked outflow
+   * to fresh recipients counts that many times toward every freeze rule: at
+   * 2, half the threshold paid to fresh owners freezes. Never below 1. */
+  freshRecipientWeight: 1,
+  /** A recipient whose age could not be read (the lookup failed or timed
+   * out, the node gave no block time, or its newest page of signatures is all
+   * inside the window) is "unknown". By default unknown is not fresh; true
+   * counts it as fresh. Never as old: an unknown age holds nothing back. */
+  freshRecipientUnknownIsFresh: false,
+  /** Age lookups started per loop pass, and in flight at once. A payout to a
+   * recipient not yet looked up is judged again once its lookup returns. */
+  freshRecipientLookupsPerPass: 4,
 };
 
 /** The settings a guardian config may have (cloud/guardian/main.mjs). */
 const CONFIG_KEYS = new Set(["rpc", "rpcs", "vaultProgram", "protocolProgram", "mints", "guardianKey", "pollMs", "policy", "floorProgram", "floorProtected", "alert", "stateFile", "stallAlertS", "lagAlertS", "ingestBudgetMs", "ingestConcurrency", "freshnessCheckS", "startupMaxSignatures", "cluster", "minBalanceSol", "liveness"]);
-/** Genesis hashes of the clusters a config may name (`cluster`). */
-export const GENESIS = { "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", devnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", testnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY" };
+/** Genesis hashes of the clusters a config may name (`cluster`): lib/solana.mjs. */
+export { GENESIS };
 const CLUSTERS = new Set([...Object.keys(GENESIS), "localnet"]);
 
 /**
@@ -685,12 +721,13 @@ export function watchedEvents(logs, { vaultProgram = null, protocol = null, floo
 /** How long outflows are kept: the longest rule's window (the 72-hour rule). */
 export const OUTFLOW_KEEP_S = 3 * DAY_S;
 
-function sumsFor(state, mint, now) {
+/** `mint`'s outflow over each rule's window at `now`; with `where`, only the rows it keeps. */
+function sumsFor(state, mint, now, where = () => true) {
   // Drop only what is already older than the longest window. An outflow
   // dated after `now` stays: a decision made at an earlier timestamp must not
   // erase it, and it does not count until `now` catches up.
   state.outflows = state.outflows.filter((o) => o.t > now || now - o.t <= OUTFLOW_KEEP_S);
-  const rows = state.outflows.filter((o) => o.mint === mint);
+  const rows = state.outflows.filter((o) => o.mint === mint && where(o));
   const sumSince = (secs) => rows.filter((o) => o.t <= now && now - o.t <= secs).reduce((s, o) => s + o.amount, 0n);
   return { lastHour: sumSince(HOUR_S), lastDay: sumSince(DAY_S), last72h: sumSince(OUTFLOW_KEEP_S) };
 }
@@ -782,6 +819,142 @@ export function outflowAlerts(state, mint, ctx, policy = DEFAULT_POLICY, alert =
   if (hot >= (policy.sustainedDays ?? 2) && due(rec.sustainedS, DAY_S)) {
     rec.sustainedS = ctx.now;
     out.push({ code: "sustained", mint, msg: `sustained drip: unbacked outflow reached ${(f * 100).toFixed(0)}% of the 24h freeze threshold on ${hot} of the last 3 days. A patient attacker under the thresholds is not frozen by this bot; only the on-chain limits bound it. Decide whether to freeze (docs/15, A2)` });
+  }
+  return out;
+}
+
+// --- fresh recipients (policy.freshRecipientAgeS) ---------------------------
+
+/** Signatures one age lookup asks for: a single page, newest first. */
+export const FRESH_LOOKUP_LIMIT = 100;
+/** How long an unknown age stands before its owner is looked up again. */
+export const FRESH_RETRY_S = 300;
+/** Payouts that may wait for a lookup; past it the oldest are judged unknown. */
+export const FRESH_PENDING_MAX = 1_000;
+/** Owners whose age is kept (the oldest kept are forgotten first). */
+export const FRESH_CACHE_MAX = 10_000;
+
+/**
+ * When `owner` first appeared on chain, from one `getSignaturesForAddress`
+ * page asked for `limit` rows (newest first) at `checkedS`. Solana keeps no
+ * creation time; an address's oldest signature is the next best thing, and
+ * one page is the cheapest look at it:
+ *   - a short page holds the whole history: its oldest row's block time is
+ *     `firstS` (`exact`); an empty one means nothing before `checkedS`;
+ *   - a full page only bounds it: the oldest row is no older than the first
+ *     (`exact` false), which can prove an owner old but never fresh;
+ *   - no list, or no block time on the oldest row: "unknown".
+ * A node with short history makes an old owner look new: more caution only.
+ */
+export function recipientFirstSeen(rows, limit, checkedS) {
+  if (!Array.isArray(rows)) return { status: "unknown", why: "no signature list", checkedS };
+  if (!rows.length) return { status: "dated", firstS: checkedS, exact: true, checkedS };
+  const oldest = rows.at(-1)?.blockTime;
+  if (!Number.isInteger(oldest)) return { status: "unknown", why: "no block time", checkedS };
+  return { status: "dated", firstS: oldest, exact: rows.length < limit, checkedS };
+}
+
+/**
+ * A payout's recipient at its time `t`: "fresh" (first seen less than `ageS`
+ * before), "old", "unknown" (a failed lookup, or a busy owner whose newest
+ * page is all inside the window), or null (not looked up yet: not counted).
+ */
+export function recipientFreshness(entry, t, ageS) {
+  if (!entry || !(ageS > 0)) return null;
+  if (entry.status !== "dated") return "unknown";
+  if (entry.firstS <= t - ageS) return "old";
+  return entry.exact ? "fresh" : "unknown";
+}
+
+/** Whether `entry` (an owner's age, or undefined) needs a lookup at `nowS`. */
+export function needsLookup(entry, nowS) {
+  return !entry || (entry.status === "unknown" && nowS - entry.checkedS >= FRESH_RETRY_S);
+}
+
+/** Whether a live release is a payout whose recipient's age matters: unbacked,
+ * to a named owner (not a truncated log's), not allowlisted. */
+export function freshCandidate(e, policy = DEFAULT_POLICY) {
+  return e?.kind === "released" && (policy.freshRecipientAgeS ?? 0) > 0 && typeof e.owner === "string" && BASE58_KEY.test(e.owner)
+    && !policy.allowlistedOwners.includes(e.owner) && (e.instant ?? 0n) + (e.queued ?? 0n) > 0n;
+}
+
+/**
+ * The owners to look up now, oldest payout first: those of `pending`
+ * payouts (`{ mint, owner, t }`) whose age is missing or an unknown one due
+ * again, not already in flight, so that at most `max` are in flight.
+ */
+export function freshLookups(pending, ages, inflight, nowS, max) {
+  const out = [];
+  for (const p of pending) {
+    if (inflight.size + out.length >= max) break;
+    if (inflight.has(p.owner) || out.includes(p.owner) || !needsLookup(ages.get(p.owner), nowS)) continue;
+    out.push(p.owner);
+  }
+  return out;
+}
+
+/**
+ * Splits `pending` into payouts whose recipient's age is settled (`ready`:
+ * looked up, or an unknown age not due again) and those still waiting. Past
+ * `maxPending` waiting, the oldest are ready too, their owners' ages set to
+ * unknown: an attacker paying many new addresses cannot grow the queue, and
+ * what it cannot look up is unknown, never old.
+ */
+export function readyPayouts(pending, ages, inflight, nowS, maxPending = FRESH_PENDING_MAX) {
+  const ready = [];
+  const waiting = [];
+  for (const p of pending) (!inflight.has(p.owner) && !needsLookup(ages.get(p.owner), nowS) ? ready : waiting).push(p);
+  for (const p of waiting.splice(0, Math.max(0, waiting.length - maxPending))) {
+    if (!ages.has(p.owner)) ages.set(p.owner, { status: "unknown", why: "too many payouts waiting for a lookup", checkedS: nowS });
+    ready.push(p);
+  }
+  return { ready, waiting };
+}
+
+/**
+ * What unbacked outflow of `mint` to fresh recipients calls for at
+ * `ctx.now`. `freshOf(owner, t)` gives a recorded payout's recipient as
+ * `recipientFreshness` does. An unknown one counts as fresh only with
+ * `freshRecipientUnknownIsFresh`.
+ *   alert:  fresh outflow reached `freshRecipientAlertFraction` of the
+ *           1-hour freeze threshold within the hour, or of the 24-hour one
+ *           within the day; at most once per `outflowAlertEveryS` per mint.
+ *   freeze: with `freshRecipientWeight` above 1, fresh outflow counts that
+ *           many times toward every freeze rule (`brokenRule`), unless the
+ *           protocol is frozen or a freeze is on its way.
+ * Weights are at least 1 and the sums only grow, so this can add a freeze
+ * `assess` did not make, never take one away, and runs after it.
+ */
+export function freshRecipientCheck(state, mint, ctx, policy = DEFAULT_POLICY, freshOf = () => null) {
+  const ageS = policy.freshRecipientAgeS ?? 0;
+  if (!(ageS > 0)) return [];
+  const counts = (o) => {
+    const f = freshOf(o.owner, o.t);
+    return f === "fresh" || (f === "unknown" && policy.freshRecipientUnknownIsFresh === true);
+  };
+  const all = sumsFor(state, mint, ctx.now);
+  const fresh = sumsFor(state, mint, ctx.now, counts);
+  if (fresh.last72h === 0n) return [];
+  const limits = limitsFor(ctx, policy);
+  const out = [];
+  const w = Math.max(1, policy.freshRecipientWeight ?? 1);
+  if (w > 1 && !(state.freezing || ctx.now < state.frozenUntil)) {
+    const plus = (a, b) => a + scaleBy(b, w - 1);
+    const reason = brokenRule({ lastHour: plus(all.lastHour, fresh.lastHour), lastDay: plus(all.lastDay, fresh.lastDay), last72h: plus(all.last72h, fresh.last72h) }, limits, policy);
+    if (reason) {
+      state.freezing = true;
+      out.push({ type: "freeze", secs: policy.freezeSecs, reason: `${reason}, outflow to recipients first seen in the last ${ageS}s counted ${w}× (freshRecipientWeight)` });
+    }
+  }
+  const f = policy.freshRecipientAlertFraction ?? 0;
+  const over = (sum, limit) => f > 0 && limit !== null && sum > 0n && sum >= scaleBy(limit, f);
+  if (over(fresh.lastHour, limits.limit) || over(fresh.lastDay, limits.limit24h)) {
+    const alerted = (state.freshAlertedS ??= new Map()).get(mint);
+    if (alerted === undefined || ctx.now - alerted >= (policy.outflowAlertEveryS ?? 6 * HOUR_S)) {
+      state.freshAlertedS.set(mint, ctx.now);
+      const then = w > 1 ? `they count ${w}× toward the freeze thresholds` : "the bot freezes only past the thresholds (freshRecipientWeight 1)";
+      out.push({ code: "fresh_recipient", mint, msg: `unbacked outflow to fresh recipients: ${fresh.lastHour} in the last hour and ${fresh.lastDay} in 24 hours went to owners first seen on chain under ${ageS}s before (stolen funds go to new addresses); check these payouts are honest; ${then}` });
+    }
   }
   return out;
 }

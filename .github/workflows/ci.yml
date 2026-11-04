@@ -142,7 +142,7 @@ jobs:
           rustup toolchain install "$NIGHTLY" --profile minimal --component clippy
       - name: Agave CLI v4.3.0 (cargo-build-sbf, solana-test-validator)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+          scripts/fetch-toolchain.sh agave
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       # The LiteSVM harness's dependencies (agave) take most of this job to
       # compile. Cached by exact lockfile, never restored from an older one, so
@@ -155,7 +155,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cache/solana/v1.57
             programs/tests/target
-          key: programs-${{ runner.os }}-${{ hashFiles('programs/tests/Cargo.lock', 'programs/tests/rust-toolchain.toml', 'Cargo.lock') }}
+          key: programs-${{ runner.os }}-${{ hashFiles('programs/tests/Cargo.lock', 'programs/tests/rust-toolchain.toml', 'Cargo.lock', 'scripts/fetch-toolchain.sh') }}
       - name: Build, LiteSVM tests, end to end
         env:
           E2E: "1"
@@ -196,7 +196,7 @@ jobs:
           rustup toolchain install "$NIGHTLY" --profile minimal
       - name: Agave CLI v4.3.0
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+          scripts/fetch-toolchain.sh agave
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - name: Restore the LiteSVM harness build and platform-tools
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -206,7 +206,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cache/solana/v1.57
             programs/tests/target
-          key: programs-${{ runner.os }}-${{ hashFiles('programs/tests/Cargo.lock', 'programs/tests/rust-toolchain.toml', 'Cargo.lock') }}
+          key: programs-${{ runner.os }}-${{ hashFiles('programs/tests/Cargo.lock', 'programs/tests/rust-toolchain.toml', 'Cargo.lock', 'scripts/fetch-toolchain.sh') }}
       - name: Build the programs
         run: scripts/build-programs.sh
       - name: Scenarios
@@ -277,7 +277,7 @@ jobs:
         run: cd fuzz && cargo +"$NIGHTLY" clippy --all-targets -- -D warnings
 
   kani:
-    # Bounded model checking of the core's 20 harnesses (proofs.rs). Kani is
+    # Bounded model checking of the core's 21 harnesses (proofs.rs). Kani is
     # installed at a pinned version from crates.io, not through an action.
     needs: changes
     if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.kani == 'true'
@@ -449,7 +449,7 @@ jobs:
           persist-credentials: false
       - name: Agave CLI v4.3.0
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+          scripts/fetch-toolchain.sh agave
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - name: Build natively
         run: scripts/build-programs.sh
