@@ -354,6 +354,12 @@ export function endpointTrouble(e) {
   return code === -32005 || code === -32016 || code === -32019 || code === -32010 || code === -32601 || code === 429 || (code >= 500 && code < 600);
 }
 
+/**
+ * Genesis hashes of the public clusters: the guardian pins its endpoints to
+ * one (findings 114, 117) and the status page names the cluster it reads.
+ */
+export const GENESIS = { "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", devnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", testnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY" };
+
 /** Slots a primary may trail the best endpoint before it is switched away from (~60 s). */
 export const SLOT_LAG_SWITCH = 150;
 /** How long a backup may show a signature the primary does not before the switch. */
