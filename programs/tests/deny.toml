@@ -12,6 +12,7 @@ ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained, via agave crates; test-only" },
   { id = "RUSTSEC-2025-0141", reason = "bincode 1: unmaintained, agave's account serialization; test-only" },
   { id = "RUSTSEC-2025-0161", reason = "libsecp256k1: unmaintained, agave's secp256k1 precompile; test-only" },
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5: timing side channels on secret integers, fixed only in 0.7.6, which elliptic-curve 0.13 (k256, under agave's secp256k1_recover syscall) cannot use; test-only, recovers public keys from public signatures in a local VM, no secrets" },
 ]
 
 [licenses]
