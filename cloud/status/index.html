@@ -47,6 +47,13 @@
   .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
   .err { color: var(--bad); white-space: pre-wrap; }
   footer { color: var(--muted); font-size: 12px; margin-top: 22px; }
+  .source { margin: 0 0 16px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
+  .source b { font-family: var(--mono); font-size: 14px; }
+  .source.warn { border-color: var(--warn); } .source.bad { border-color: var(--bad); }
+  /* An unverified source gets no healthy styling: green would vouch for it. */
+  .unverified .ok { color: var(--muted); }
+  .unverified .pill.ok { background: transparent; border: 1px solid var(--line); }
+  .card button { grid-column: auto; margin-top: 8px; }
   @media (max-width: 560px) { form { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -54,6 +61,7 @@
 <main>
   <h1>Bulkhead status</h1>
   <p class="sub">The worst case, live, from the chain's own state: the same formulas as the Vault's <code>attest</code> instruction (checked equal to it in the end-to-end test).</p>
+  <p id="src" class="source" aria-live="polite">No RPC yet: every figure below comes from the RPC named here, so check its host before trusting anything.</p>
   <form id="f">
     <label>RPC <input name="rpc" placeholder="http://127.0.0.1:8899"></label>
     <label>Vault program <input name="vault" placeholder="Bulkhead Vault program id"></label>
@@ -64,23 +72,28 @@
     <button>Load</button>
   </form>
   <div id="out" aria-live="polite"></div>
-  <footer>Refreshes every 10 seconds. Guardians can stop, never steal; loosening waits at least 72 hours. <a href="https://github.com/shuv-amp/bulkhead">Source</a></footer>
+  <footer>Refreshes every 10 seconds. Guardians can stop, never steal; loosening waits at least 72 hours. The page asks the RPC for its genesis hash and names its cluster; an RPC that is not the cluster's public one is cross-checked against it; a link's RPC on your own machine or network is queried only after you confirm. <a href="https://github.com/shuv-amp/bulkhead">Source</a></footer>
 </main>
 <script type="module">
 import { Rpc, decodeProtocol, decodeVault, decodeFloor, b58encode, key } from "../lib/solana.mjs";
+import { rpcGate, judgeSource, publicCluster, crossCheck, formatUnits, PUBLIC_RPC } from "../lib/source.mjs";
 import { VaultClient, FloorClient } from "../lib/bulkhead.mjs";
 import { readOpenChanges, openExit, duration, FLOOR_PROPOSAL_KINDS } from "../lib/changes.mjs";
 import { attestLocal } from "../lib/limits.mjs";
 
 const form = document.getElementById("f");
 const out = document.getElementById("out");
+const src = document.getElementById("src");
 const params = new URLSearchParams(location.search);
 for (const [k, v] of params) if (form.elements[k]) form.elements[k].value = v;
+// Inputs from a link, not typed here: a link's RPC on the reader's own
+// machine or network is queried only once the reader confirms (F-03).
+let fromLink = params.has("rpc");
+const confirmed = new Set(); // RPC URLs the reader confirmed
+let awaitingConfirm = null; // the RPC URL the confirm button is for
 
-const fmt = (raw, decimals) => {
-  const n = Number(raw) / 10 ** decimals;
-  return n.toLocaleString(undefined, { maximumFractionDigits: n < 100 ? 2 : 0 });
-};
+// u64/u128 amounts, exactly (F-07): Number() is not exact past 2^53.
+const fmt = (raw, decimals) => formatUnits(raw, decimals);
 // `now` is the chain's clock, the one the row's colour is judged by.
 const until = (s, now) => {
   const d = Math.round(s - now);
@@ -143,8 +156,26 @@ function floorPending(fl, now) {
 // Program ids published in SECURITY.md. A link may name any program: a copy
 // of the Vault deployed by anyone has the same layout and can report itself
 // sealed, guarded and safe (docs/09, finding 85).
-const KNOWN_VAULTS = { HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b: "the devnet deployment" };
-const KNOWN_FLOORS = { HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E: "the devnet deployment" };
+// Each one's cluster is a claim the RPC's genesis hash must match (F-11).
+const KNOWN_VAULTS = { __proto__: null, HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b: { name: "the devnet deployment", cluster: "devnet" } };
+const KNOWN_FLOORS = { __proto__: null, HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E: { name: "the devnet deployment", cluster: "devnet" } };
+
+// Genesis hashes by RPC URL (a chain's never changes), and cross-checks
+// against the cluster's public RPC, kept a minute so a 10 s refresh does not
+// hammer a rate-limited public endpoint.
+const genesisOf = new Map();
+const crossChecked = new Map();
+const CROSS_CHECK_KEEP_MS = 60_000;
+
+/** The line at the top of the page: which host every figure comes from.
+ * Only the newest refresh (`mine`) writes it, as with the cards. */
+function showSource(mine, host, detail, level) {
+  if (mine !== generation) return;
+  const b = document.createElement("b");
+  b.textContent = host;
+  src.className = `source${level ? ` ${level}` : ""}`;
+  src.replaceChildren("Data from ", b, detail ? ` · ${detail}` : "");
+}
 
 // A missing account is a wrong id or cluster, not a crash.
 async function need(rpc, k, what) {
@@ -153,21 +184,80 @@ async function need(rpc, k, what) {
   return acc;
 }
 
-async function render() {
+async function render(mine) {
   const f = Object.fromEntries(new FormData(form));
   if (!f.rpc || !f.vault || !f.protocol || !f.mints) {
+    src.className = "source"; // synchronous: this is the newest refresh
+    src.textContent = "No RPC yet: every figure below comes from the RPC named here, so check its host before trusting anything.";
     return `<div class="card"><p>Enter an RPC, the Vault and protocol program ids and at least one mint, then press Load. <a href="?rpc=https%3A%2F%2Fapi.devnet.solana.com&vault=HK5FbaLtvNSPHj9HYbuStfVxXktkoMejJ9GEjn8WCY1b&protocol=6w9t76W2w8q38xTvUPuDDzSwrjTKbq4dM8nAckYXScYh&mints=CBK36QrH6fzjrDYwkKHF6jeEAEfHcm8iSVN9BZrCxHSB&floor=HARLZqMwqocBnbhbSTWkd5i8EHmjHXLHr1T9su3SR31E&protected=CvZEMDwMaD8zDsWjvj8RgR2M2MNyFeoW5b4DYEz6eWbs">Load the devnet deployment</a>.</p></div>`;
   }
+  // Nothing is fetched before the RPC passes the gate (F-03).
+  const gate = rpcGate(f.rpc);
+  if (gate.refuse) {
+    showSource(mine, f.rpc, "refused", "bad");
+    return `<div class="card err">Refused to read the RPC ${esc(f.rpc)}: ${esc(gate.refuse)}.</div>`;
+  }
+  if (gate.confirm && fromLink && !confirmed.has(f.rpc)) {
+    awaitingConfirm = f.rpc;
+    showSource(mine, gate.host, "not queried: on your own machine or network", "warn");
+    return `<div class="card"><h2>Confirm the RPC</h2>
+      <p>This link asks your browser to query <b class="mono">${esc(gate.host)}</b>, ${esc(gate.confirm)}. A link can use this page to make your browser send requests to services on your own machine or network that the web cannot reach, so nothing has been sent.</p>
+      <p>Query it only if you run that node yourself. Otherwise put a public RPC in the form above and press Load.</p>
+      <button type="button" data-confirm>Query ${esc(gate.host)}</button></div>`;
+  }
   const rpc = new Rpc(f.rpc);
+  // Which chain this is (F-11). The hash is the RPC's own answer: it catches
+  // a wrong cluster, not a lying RPC; the cross-check below is for that.
+  let genesis = genesisOf.get(f.rpc) ?? null;
+  let genesisError = null;
+  if (!genesis) {
+    try {
+      const got = await rpc.call("getGenesisHash", []);
+      if (typeof got === "string") genesisOf.set(f.rpc, (genesis = got));
+      else genesisError = "no hash in the answer";
+    } catch (e) {
+      genesisError = e.message;
+    }
+  }
+  const named = publicCluster(f.rpc);
+  const claims = [];
+  if (KNOWN_VAULTS[f.vault]) claims.push({ cluster: KNOWN_VAULTS[f.vault].cluster, why: `The Vault program ${f.vault} (${KNOWN_VAULTS[f.vault].name})` });
+  if (f.floor && KNOWN_FLOORS[f.floor]) claims.push({ cluster: KNOWN_FLOORS[f.floor].cluster, why: `The Floor program ${f.floor} (${KNOWN_FLOORS[f.floor].name})` });
+  if (named) claims.push({ cluster: named, why: `The RPC address ${gate.host}` });
+  const source = judgeSource({ url: f.rpc, genesis, genesisError, claims });
+  const chain = source.cluster ? `${source.cluster} (genesis ${source.genesis})` : source.genesis ? `unknown chain (genesis ${source.genesis})` : "chain unknown";
+  showSource(mine, source.host, `${chain}${named && source.trusted ? ", its public RPC" : ""}`, source.trusted ? "" : "bad");
+
   const vc = await new VaultClient(f.vault, f.protocol).init();
   const protocol = decodeProtocol((await need(rpc, vc.protocol, "protocol")).bytes);
   const slot = await rpc.call("getSlot", [{ commitment: "confirmed" }]);
   const now = await rpc.call("getBlockTime", [slot]);
+
+  // A link may pair real ids with an RPC that makes numbers up: when the RPC
+  // is not the cluster's public one, ask that one too. A read that fails
+  // (CORS, 429, timeout) is "could not cross-check", never "verified".
+  let cross = null;
+  const publicUrl = source.trusted && !named ? PUBLIC_RPC[source.cluster] : null;
+  const publicHost = publicUrl ? new URL(publicUrl).host : null;
+  if (publicUrl) {
+    const k = `${f.rpc}|${f.vault}|${f.protocol}`;
+    const kept = crossChecked.get(k);
+    if (kept && Date.now() - kept.at < CROSS_CHECK_KEEP_MS) cross = kept.result;
+    else {
+      cross = await crossCheck({ publicRpc: new Rpc(publicUrl, { retries: 0, timeoutMs: 8_000 }), protocolKey: vc.protocol, linkProtocol: protocol, linkSlot: slot });
+      crossChecked.set(k, { at: Date.now(), result: cross });
+    }
+    const said = { agrees: [`agrees with ${publicHost}`, ""], disagrees: [`DISAGREES with ${publicHost}`, "bad"], failed: [`could not cross-check with ${publicHost}`, "warn"] }[cross.state];
+    showSource(mine, source.host, `${chain} · ${said[0]}`, said[1]);
+  }
+  const verified = source.trusted && cross?.state !== "disagrees";
   const live = protocol.guardians.filter((_, i) => now - protocol.lastHeartbeat[i] <= protocol.heartbeatIntervalS).length;
   let html = "";
   let headline = [];
   const mints = f.mints.split(",").map((m) => m.trim()).filter(Boolean);
   const warnings = [];
+  for (const p of source.problems) warnings.push(`${esc(p)} Nothing below is styled as healthy: trust none of it until you have checked this RPC.`);
+  if (cross?.state === "disagrees") warnings.push(`${esc(source.host)} disagrees with ${esc(publicHost)}, the cluster's public RPC: ${esc(cross.detail)}. One of them is wrong or lying; nothing below is styled as healthy.`);
   if (!KNOWN_VAULTS[f.vault]) warnings.push(`The Vault program ${esc(f.vault)} is not a published Bulkhead deployment (SECURITY.md). Anyone can deploy a copy that reports itself safe: trust nothing below until you have checked this id.`);
   if (f.floor && !KNOWN_FLOORS[f.floor]) warnings.push(`The Floor program ${esc(f.floor)} is not a published Bulkhead deployment (SECURITY.md).`);
   // The headline sums only the vaults named in the link: one left out is
@@ -223,7 +313,7 @@ async function render() {
       const councilBar = n >= 8 && fl.threshold * 4 >= n * 3;
       html += `<div class="card">
         <h2>Floor · upgrade key</h2>
-        <div class="big ${fl.status === "live" ? "ok" : "bad"}">${fl.status === "live" ? "Live" : "Stopped"}</div>
+        <div class="big ${fl.status === "live" ? "ok" : "bad"}">${fl.status === "live" ? (verified ? "Live" : "Live (unverified source)") : "Stopped"}</div>
         <div class="row"><span>New code waits</span><span>${Math.round(fl.upgradeDelayS / 3600)} hours${fl.upgradeDelayS >= 604800 ? ' <span class="pill ok">Stage-1-grade exit window</span>' : ""}</span></div>
         <div class="row"><span>Stop button staged</span><span class="${fl.abortStaged ? "ok" : "bad"}">${fl.abortStaged ? "yes" : "no"}</span></div>
         <div class="row"><span>Snapshot for instant restore</span>${
@@ -245,10 +335,16 @@ async function render() {
   }
   // Whose data this is and from when: a link can name any RPC, and a stale
   // page must not pass for a live one.
-  const host = (() => { try { return new URL(f.rpc).host; } catch { return f.rpc; } })();
-  const source = `<p class="mono">Read from ${esc(host)} at slot ${esc(slot)}, chain time ${new Date(now * 1000).toLocaleString()} (shown ${new Date().toLocaleTimeString()}). Vault program ${esc(f.vault)}${KNOWN_VAULTS[f.vault] ? ` (${KNOWN_VAULTS[f.vault]})` : ""}, protocol ${esc(f.protocol)}, mints ${esc(mints.join(", "))}. Trust it only as far as you trust that RPC and these ids.</p>`;
+  const checked = !cross
+    ? named && source.trusted ? ` It is ${esc(source.cluster)}'s public RPC.` : ""
+    : cross.state === "agrees"
+      ? ` Cross-checked against ${esc(publicHost)}: ${esc(cross.detail)} (one account and the slot, not every figure).`
+      : cross.state === "failed"
+        ? ` Could not cross-check against ${esc(publicHost)} (${esc(cross.detail)}): the figures are only as true as ${esc(source.host)}.`
+        : "";
+  const about = `<p class="mono">Read from ${esc(source.host)}, ${esc(chain)}, at slot ${esc(slot)}, chain time ${new Date(now * 1000).toLocaleString()} (shown ${new Date().toLocaleTimeString()}).${checked} Vault program ${esc(f.vault)}${KNOWN_VAULTS[f.vault] ? ` (${esc(KNOWN_VAULTS[f.vault].name)})` : ""}, protocol ${esc(f.protocol)}, mints ${esc(mints.join(", "))}. Trust it only as far as you trust that RPC and these ids.</p>`;
   const banner = warnings.map((w) => `<p class="headline bad">${w}</p>`).join("");
-  return `${banner}<p class="headline">Worst case right now: <b>${esc(headline.join("; "))}</b>.</p>${source}<div class="grid">${html}</div>`;
+  return `${banner}<div class="${verified ? "" : "unverified"}"><p class="headline">${verified ? "" : "Unverified: "}Worst case right now: <b>${esc(headline.join("; "))}</b>.</p>${about}<div class="grid">${html}</div></div>`;
 }
 
 // One refresh at a time on the timer, and only the newest result is shown: a
@@ -260,7 +356,7 @@ async function refresh() {
   running = true;
   let html;
   try {
-    html = await render();
+    html = await render(mine);
   } catch (e) {
     html = `<div class="card err">${esc(e.message)}</div>`;
   } finally {
@@ -270,7 +366,13 @@ async function refresh() {
 }
 form.addEventListener("submit", (e) => {
   e.preventDefault();
+  fromLink = false; // the reader pressed Load on what the form shows
   history.replaceState(null, "", "?" + new URLSearchParams(new FormData(form)));
+  refresh();
+});
+out.addEventListener("click", (e) => {
+  if (!e.target.closest("button[data-confirm]") || !awaitingConfirm) return;
+  confirmed.add(awaitingConfirm);
   refresh();
 });
 refresh();

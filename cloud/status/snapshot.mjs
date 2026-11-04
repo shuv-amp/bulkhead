@@ -6,6 +6,7 @@
 import { Rpc, decodeProtocol, decodeVault, b58encode, key } from "../lib/solana.mjs";
 import { VaultClient } from "../lib/bulkhead.mjs";
 import { attestLocal } from "../lib/limits.mjs";
+import { formatUnits } from "../lib/source.mjs";
 import { readOpenChanges, openExit, duration } from "../lib/changes.mjs";
 import { Keypair } from "../lib/signer.mjs";
 
@@ -29,7 +30,8 @@ const p = decodeProtocol((await need(vc.protocol, "protocol")).bytes);
 const slot = await rpc.call("getSlot", [{ commitment: "confirmed" }]);
 const now = await rpc.call("getBlockTime", [slot]);
 const live = p.guardians.filter((_, i) => now - p.lastHeartbeat[i] <= p.heartbeatIntervalS).length;
-const fmt = (raw, d) => (Number(raw) / 10 ** d).toLocaleString("en-US", { maximumFractionDigits: 0 });
+// Exact for any u64/u128 (F-07): Number(raw) is not past 2^53.
+const fmt = (raw, d) => formatUnits(raw, d, "en-US");
 console.log(`protocol  sealed ${p.sealed}, frozen ${p.frozenUntil > now ? `for ${((p.frozenUntil - now) / 3600).toFixed(1)}h` : "no"}, live guardians ${live}/${p.guardians.length} (quorum ${p.threshold}), loosening waits ${p.loosenDelayS / 3600}h`);
 // Every loosening has a countdown (docs/02 §4).
 try {

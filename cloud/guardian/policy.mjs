@@ -5,7 +5,7 @@
 // veto proposals, and (under Floor) abort. It can never move funds or choose a
 // recipient; the programs enforce that, not this file.
 
-import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, MAX_GUARDIANS, guardianMarginProblem } from "../lib/solana.mjs";
+import { b58encode, Reader, decodeChange, parseLogs, GUARDIAN_MARGIN, MAX_GUARDIANS, guardianMarginProblem, GENESIS } from "../lib/solana.mjs";
 import { ALERT_FORMATS } from "./alert.mjs";
 
 const hex = (bytes) => Array.from(bytes ?? [], (x) => x.toString(16).padStart(2, "0")).join("");
@@ -346,8 +346,8 @@ export const DEFAULT_POLICY = {
 
 /** The settings a guardian config may have (cloud/guardian/main.mjs). */
 const CONFIG_KEYS = new Set(["rpc", "rpcs", "vaultProgram", "protocolProgram", "mints", "guardianKey", "pollMs", "policy", "floorProgram", "floorProtected", "alert", "stateFile", "stallAlertS", "lagAlertS", "ingestBudgetMs", "ingestConcurrency", "freshnessCheckS", "startupMaxSignatures", "cluster", "minBalanceSol", "liveness"]);
-/** Genesis hashes of the clusters a config may name (`cluster`). */
-export const GENESIS = { "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", devnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", testnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY" };
+/** Genesis hashes of the clusters a config may name (`cluster`): lib/solana.mjs. */
+export { GENESIS };
 const CLUSTERS = new Set([...Object.keys(GENESIS), "localnet"]);
 
 /**
