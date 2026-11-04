@@ -328,7 +328,7 @@ test("active ticket scan returns every protocol ticket, including old ids beyond
       Buffer.from("BHTICKT1"), protocol, key(HARBOR), key(OTHER), key(TOKEN), key(VAULT),
       u64le(BigInt(i + 1)), u64le(50n), i64le(1_000), i64le(700_000), i64le(0), Uint8Array.of(254), new Uint8Array(7),
     );
-    return { pubkey: `ticket-${i + 1}`, account: { data: [Buffer.from(bytes).toString("base64"), "base64"] } };
+    return { pubkey: `ticket-${i + 1}`, account: { owner: VAULT, data: [Buffer.from(bytes).toString("base64"), "base64"] } };
   });
   let request;
   const rpc = { call: async (...args) => { request = args; return accounts; } };

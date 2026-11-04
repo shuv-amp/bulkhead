@@ -24,6 +24,8 @@ const URGENT_WARNINGS = [
   // node, and Floor's stop and ejection, none of which used to alert.
   /unbacked outflow at \d+% of the 24h freeze threshold/,
   /sustained drip/,
+  // Payouts to owners first seen on chain minutes before (freshRecipientCheck).
+  /unbacked outflow to fresh recipients/,
   /ingest lagging/,
   /RPC endpoint is (behind|missing recent transactions)/,
   /no 72-hour figure/,

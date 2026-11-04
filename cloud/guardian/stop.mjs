@@ -71,8 +71,10 @@ if (cfg.cluster === undefined) log({ level: "warn", msg: "config.cluster is not 
 // cluster is never read from (finding 117).
 const urls = [cfg.rpc, ...(cfg.rpcs ?? [])];
 const endpointName = (i) => `${hostOf(urls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
+const badAnswer = (at, why) => log({ level: "error", msg: `RPC endpoint ${endpointName(at)} served an account with the wrong owner: not read from that answer (external audit, F-01)`, error: why });
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(urls, {
+    onBadAnswer: (url, why, at) => badAnswer(at, why),
     onSwitch: (from, to, e, fromAt, toAt) => log({ level: "warn", msg: `RPC ${endpointName(fromAt)} left; now using ${endpointName(toAt)}`, cause: e?.message?.slice(0, 120) }),
     genesis,
     onCluster: (url, got, at) => {
@@ -84,7 +86,7 @@ const rpc = cfg.rpcs?.length
       }
     },
   })
-  : new Rpc(cfg.rpc);
+  : new Rpc(cfg.rpc, { onBadAnswer: (url, why) => badAnswer(0, why) });
 // Every endpoint is asked at once, without waiting: one on another cluster
 // is reported even while the primary answers everything.
 if (genesis != null && rpc instanceof FailoverRpc) for (let i = 0; i < urls.length; i++) rpc.admit(i).catch(() => {});
@@ -135,8 +137,10 @@ async function checkCluster() {
 await checkCluster();
 const slotAtStart = await rpc.call("getSlot", [{ commitment: "processed" }]).catch(() => null);
 
+/** Floor's config, only as the Floor program owns it: a wrong owner is
+ * another endpoint's to answer, never read as "stopped" (external audit, F-01). */
 async function readConfig() {
-  const acc = await rpc.account(fc.config);
+  const acc = await rpc.account(fc.config, "confirmed", { owner: b58encode(fc.program) });
   if (!acc) {
     log({ level: "error", msg: "no Floor config for this program" });
     process.exit(2);
