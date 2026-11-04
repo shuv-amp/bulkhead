@@ -166,7 +166,7 @@ jobs:
           { echo '### Program builds (Linux x86_64, Agave v4.3.0, platform-tools v1.57)'; echo '```'; cat SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           cp SHA256SUMS target/deploy/
       - name: Keep the binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: programs
           path: |
@@ -264,7 +264,7 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
       - name: Keep crashing inputs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
