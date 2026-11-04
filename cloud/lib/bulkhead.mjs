@@ -86,7 +86,7 @@ export class VaultClient {
     const { vault, vaultTokens } = await this.vault(mint);
     // The figures are believed only from the Vault's own return data, and the
     // time only from the Clock sysvar: an endpoint answering otherwise is
-    // lying or broken, and the next one is asked (external audit, F-01).
+    // lying or broken, and the next one is asked (docs/09, finding 146).
     const accept = (v) => {
       if (!v || v.err) return null;
       if (v.returnData?.programId !== b58(this.program)) return `attest's return data came from ${v.returnData?.programId ?? "no program"}, not the Vault program ${b58(this.program)}`;

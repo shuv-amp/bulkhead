@@ -9,11 +9,11 @@
 //
 // Run it on another host than every guardian, from cron or CI. With no live
 // guardian every guarantee is delay-only, and a guardian's own liveness
-// alerts stop with its process (external audit, F-10(a)). It holds no key
+// alerts stop with its process (docs/09, finding 151). It holds no key
 // and sends nothing; `--config` takes a guardian's config for the endpoints,
 // cluster, programs, mints and alert webhook (flags add to it). With
 // `--cluster`, only endpoints whose genesis hash matches are read (findings
-// 114, 117), and every account only as its program owns it (F-01).
+// 114, 117), and every account only as its program owns it (finding 146).
 //
 // It prints one JSON line: per guardian set (the Vault protocol's, each Floor
 // config's) each key's heartbeat age and deadline, the live count against the
@@ -202,7 +202,7 @@ export async function readSnapshot(s) {
   const rpc = new FailoverRpc(s.rpcs, {
     genesis: s.cluster && s.cluster !== "localnet" ? GENESIS[s.cluster] : null,
     onCluster: (url, got, at) => { if (got !== GENESIS[s.cluster]) notes.push(`endpoint ${name(at)} serves another cluster than ${s.cluster} (genesis ${got}): not read`); },
-    onBadAnswer: (url, why, at) => notes.push(`endpoint ${name(at)} served an account with the wrong owner (${why}): not read; replace it (F-01)`),
+    onBadAnswer: (url, why, at) => notes.push(`endpoint ${name(at)} served an account with the wrong owner (${why}): not read; replace it (finding 146)`),
   });
   const program = b58encode(key(s.vaultProgram));
   const vc = await new VaultClient(s.vaultProgram, s.protocolProgram ?? s.vaultProgram).init();

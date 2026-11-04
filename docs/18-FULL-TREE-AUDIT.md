@@ -5,6 +5,20 @@
 **Method:** hostile line-by-line review of all on-chain and off-chain code, hand-traced attack transactions, numeric edge-case derivation, supply-chain inspection, and a full-tree + full-history secrets scan. ~17,500 lines of security-relevant code read in full.
 **Reviewer:** independent AI-agent review (ZCode). This is **not** a substitute for a human audit; it is a full-tree adversarial pass in the style of `docs/16` and `docs/17`.
 
+
+**Status (5 Nov 2026).** Kept as written on 24 Oct; what became of each item is recorded in `09 §4`:
+
+| Item | Status |
+|---|---|
+| F-01 owner checks in the guardian | Fixed, finding 146 |
+| F-02 `floor_check.py` private RPCs | Fixed, finding 148 |
+| F-03, F-07, F-11 status page | Fixed, finding 147 |
+| F-04 Pyth `write_authority` | Stated; no stronger documented check exists. The verifying key set is trust assumption 2 in `04` |
+| F-05 single upgrade key | Open, operational: the team's keys. `17 §3` item 7 commits to a timelocked multisig or Floor before the TVL-capped phase |
+| F-06 Harbor raw-byte owner check, F-08 `e_machine` flag | Informational; unchanged (a demo program; the gate is exact by design) |
+| F-09 release on any `v*` tag | Open, operational: a GitHub tag ruleset restricting who may push `v*` |
+| F-10 decay to delay-only | (a) watchdog, finding 151; (b) a recovery key and outside heartbeat monitoring are launch requirements, `04` T29; (c) instead of a dead-man switch, the recovery key vetoes while no guardian is alive, finding 154; a bounded switch is left for the audit |
+
 ---
 
 ## 1. Executive summary

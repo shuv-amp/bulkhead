@@ -1,5 +1,5 @@
 // Every account the guardian decodes is read only as the program that must
-// own it owns it (external audit, F-01): a correctly shaped account with the
+// own it owns it (docs/09, finding 146): a correctly shaped account with the
 // wrong owner is a lying or broken endpoint's, never decoded, and with
 // backups the next endpoint is asked. One test per class of read.
 import { test } from "node:test";
@@ -30,7 +30,7 @@ test("ownerProblem names the owner found and the one wanted; no account is not a
   assert.match(ownerProblem(PROTOCOL, {}, VAULT), /owned by \(no owner given\)/);
 });
 
-test("a Vault or Floor account with the wrong owner is a bad answer on one endpoint, never decoded (F-01)", async () => {
+test("a Vault or Floor account with the wrong owner is a bad answer on one endpoint, never decoded (finding 146)", async () => {
   const lying = await rpcServer((method, params) => (method === "getAccountInfo" ? accountInfo(params[0] === PROTOCOL ? shaped : floorBytes({ program: GUARDIAN }), WRONG, 7) : null));
   try {
     const told = [];
@@ -53,7 +53,7 @@ test("a Vault or Floor account with the wrong owner is a bad answer on one endpo
   }
 });
 
-test("with backups, a wrong owner moves the read to the next endpoint and off the lying one (F-01)", async () => {
+test("with backups, a wrong owner moves the read to the next endpoint and off the lying one (finding 146)", async () => {
   const lying = await rpcServer((method) => (method === "getAccountInfo" ? accountInfo(shaped, WRONG) : null));
   const honest = await rpcServer((method) => (method === "getAccountInfo" ? accountInfo(protocolBytes({ frozenUntil: 5 }), VAULT) : null));
   try {
@@ -78,7 +78,7 @@ test("with backups, a wrong owner moves the read to the next endpoint and off th
   }
 });
 
-test("a ticket or change scan listing an account another program owns decodes none of it (F-01)", async () => {
+test("a ticket or change scan listing an account another program owns decodes none of it (finding 146)", async () => {
   const ticket = new Uint8Array(200);
   ticket.set(new TextEncoder().encode("BHTICKT1"));
   ticket.set(key(PROTOCOL), 8);
@@ -103,7 +103,7 @@ test("a ticket or change scan listing an account another program owns decodes no
   }
 });
 
-test("the freshness counters never switch to a backup serving another program's account (F-01, finding 138)", async () => {
+test("the freshness counters never switch to a backup serving another program's account (findings 146 and 138)", async () => {
   // A protocol account whose next ticket id is `n`.
   const at = (n, owner) => {
     const d = protocolBytes();
@@ -128,7 +128,7 @@ test("the freshness counters never switch to a backup serving another program's 
   }
 });
 
-test("attest believes only the Vault's return data and the Clock sysvar, and asks a backup otherwise (F-01)", async () => {
+test("attest believes only the Vault's return data and the Clock sysvar, and asks a backup otherwise (finding 146)", async () => {
   const vc = await new VaultClient(VAULT, GUARDIAN).init();
   const ret = new Uint8Array(64);
   new DataView(ret.buffer).setBigUint64(8, 400n, true); // worst1h
@@ -154,7 +154,7 @@ test("attest believes only the Vault's return data and the Clock sysvar, and ask
   }
 });
 
-test("a Floor config read as Floor owns it decodes; one Floor does not own is refused (F-01)", async () => {
+test("a Floor config read as Floor owns it decodes; one Floor does not own is refused (finding 146)", async () => {
   const bytes = floorBytes({ program: GUARDIAN, guardians: [GUARDIAN], heartbeats: [5], threshold: 1 });
   const s = await rpcServer(() => accountInfo(bytes, FLOOR));
   try {
@@ -184,7 +184,7 @@ async function runGuardian(rpc, rpcs, until, killMs = 20_000) {
   return { code, out };
 }
 
-test("the guardian reads the protocol from a backup when its primary serves it with the wrong owner, and alerts (F-01)", async () => {
+test("the guardian reads the protocol from a backup when its primary serves it with the wrong owner, and alerts (finding 146)", async () => {
   const vc = await new VaultClient(VAULT, GUARDIAN).init();
   const protocol = b58encode(vc.protocol);
   const node = (owner) => (method, params) => {
@@ -214,7 +214,7 @@ test("the guardian reads the protocol from a backup when its primary serves it w
   }
 });
 
-test("a guardian whose only endpoint serves the protocol with the wrong owner reads nothing from it (F-01)", async () => {
+test("a guardian whose only endpoint serves the protocol with the wrong owner reads nothing from it (finding 146)", async () => {
   const vc = await new VaultClient(VAULT, GUARDIAN).init();
   const protocol = b58encode(vc.protocol);
   const only = await rpcServer((method, params) => {

@@ -153,7 +153,7 @@ let clusterChecked = false; // the start's check is over: later news is logged
 // An account owned by another program than the one that must own it is a
 // lying or broken endpoint: nothing is read from that answer, the read goes
 // to the next endpoint (or fails, with one), and it is said once per endpoint
-// and cause every 10 minutes (external audit, F-01).
+// and cause every 10 minutes (docs/09, finding 146).
 const badAnswers = new Map();
 function badAnswer(at, why) {
   const k = `${at}:${why}`;
@@ -161,7 +161,7 @@ function badAnswer(at, why) {
   if (badAnswers.size > 1_000) badAnswers.clear();
   badAnswers.set(k, Date.now());
   const endpoint = endpointName(at);
-  log({ level: "error", msg: `RPC endpoint ${endpoint} served an account with the wrong owner: nothing is read from that answer, and ${rpcUrls.length > 1 ? "the next endpoint is asked" : "the read fails"}. A lying or broken endpoint: replace it (external audit, F-01)`, error: why, endpoint });
+  log({ level: "error", msg: `RPC endpoint ${endpoint} served an account with the wrong owner: nothing is read from that answer, and ${rpcUrls.length > 1 ? "the next endpoint is asked" : "the read fails"}. A lying or broken endpoint: replace it (docs/09, finding 146)`, error: why, endpoint });
 }
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(rpcUrls, {
@@ -188,7 +188,7 @@ const vc = await must(() => new VaultClient(cfg.vaultProgram, cfg.protocolProgra
 protocolLabel = b58encode(vc.protocol);
 // Every account read names the program that must own it (`Rpc.account`'s
 // `owner`): the protocol, vaults, tickets and changes are the Vault's
-// (external audit, F-01). Floor configs are Floor's (`floorOwned`, below).
+// (docs/09, finding 146). Floor configs are Floor's (`floorOwned`, below).
 const VAULT_PROGRAM = b58encode(vc.program);
 const vaultOwned = { owner: VAULT_PROGRAM };
 const readVault = (address) => rpc.account(address, "confirmed", vaultOwned);
@@ -382,7 +382,7 @@ const warned72h = new Set();
 async function refreshWorst72h(mint, clockS) {
   try {
     const { vault, vaultTokens } = await vc.vault(mint);
-    // The token account is the vault's own token program's (F-01).
+    // The token account is the vault's own token program's (finding 146).
     const [v, t] = await Promise.all([readVault(vault), rpc.account(vaultTokens, "confirmed", { owner: TOKEN_PROGRAM_IDS })]);
     if (!v || !t) throw new Error("vault account missing");
     const decoded = decodeVault(v.bytes);
@@ -403,7 +403,7 @@ async function refreshWorst72h(mint, clockS) {
  * unbacked outflow (every instant one and every settlement adds to it). A
  * backup reporting a larger one than the primary proves the primary is
  * behind on writes to that very account (finding 138). Read only from
- * accounts the Vault program owns (crossCheckCounters' `owner`; F-01).
+ * accounts the Vault program owns (crossCheckCounters' `owner`; finding 146).
  */
 function counterOf(address, bytes) {
   if (address === protocolKey) return decodeProtocol(bytes).nextTicketId;
@@ -475,7 +475,7 @@ async function freezeSend(ixs, secs, basePrice) {
 }
 
 /** Decoded account, null when it does not exist, undefined when it could not
- * be read (an account with the wrong owner included: F-01). */
+ * be read (an account with the wrong owner included: finding 146). */
 async function readDecoded(read, address, decodeBytes) {
   try {
     const acc = await read(address);
@@ -1208,7 +1208,7 @@ async function tryRefreshPendingTickets(options = {}) {
 }
 
 /** The protocol account, never older than the last read (finding 137) and
- * only as the Vault program owns it (F-01): another endpoint is asked for a
+ * only as the Vault program owns it (finding 146): another endpoint is asked for a
  * wrong owner, so a freeze in flight still reads, or sends unread. */
 async function readProtocolAccount() {
   const address = b58encode(vc.protocol);

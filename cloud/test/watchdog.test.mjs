@@ -1,6 +1,6 @@
 // The watchdog (cloud/guardian/watchdog.mjs): a single-shot check of the
 // guardian sets from another host, so a dead guardian fleet is heard about
-// even when no guardian is running to say so (external audit, F-10(a)).
+// even when no guardian is running to say so (docs/09, finding 151).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";

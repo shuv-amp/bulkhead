@@ -71,7 +71,7 @@ if (cfg.cluster === undefined) log({ level: "warn", msg: "config.cluster is not 
 // cluster is never read from (finding 117).
 const urls = [cfg.rpc, ...(cfg.rpcs ?? [])];
 const endpointName = (i) => `${hostOf(urls[i])} (${i > 0 ? `rpcs[${i - 1}]` : "rpc"})`;
-const badAnswer = (at, why) => log({ level: "error", msg: `RPC endpoint ${endpointName(at)} served an account with the wrong owner: not read from that answer (external audit, F-01)`, error: why });
+const badAnswer = (at, why) => log({ level: "error", msg: `RPC endpoint ${endpointName(at)} served an account with the wrong owner: not read from that answer (docs/09, finding 146)`, error: why });
 const rpc = cfg.rpcs?.length
   ? new FailoverRpc(urls, {
     onBadAnswer: (url, why, at) => badAnswer(at, why),
@@ -138,7 +138,7 @@ await checkCluster();
 const slotAtStart = await rpc.call("getSlot", [{ commitment: "processed" }]).catch(() => null);
 
 /** Floor's config, only as the Floor program owns it: a wrong owner is
- * another endpoint's to answer, never read as "stopped" (external audit, F-01). */
+ * another endpoint's to answer, never read as "stopped" (docs/09, finding 146). */
 async function readConfig() {
   const acc = await rpc.account(fc.config, "confirmed", { owner: b58encode(fc.program) });
   if (!acc) {

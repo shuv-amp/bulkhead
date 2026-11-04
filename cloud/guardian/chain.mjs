@@ -272,7 +272,7 @@ export function ticketRelease(ticket, vaultMints) {
  * node lists a program's accounts by owner, but a lying or broken one can list
  * anything: a row owned by another program is a bad answer (`ownerProblem`),
  * asked of the next endpoint, and thrown if every one gives it, never decoded
- * (external audit, F-01). Checked again here for an `rpc` that ignores `accept`.
+ * (docs/09, finding 146). Checked again here for an `rpc` that ignores `accept`.
  */
 async function programAccounts(rpc, vaultProgram, protocol, discriminator) {
   const program = b58encode(key(vaultProgram));

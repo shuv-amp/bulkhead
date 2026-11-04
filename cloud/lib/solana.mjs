@@ -79,8 +79,8 @@ export const TOKEN_PROGRAM_IDS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
  * Every decoder here checks a discriminator, but any program can write those
  * bytes into an account of its own, and a lying or broken endpoint can serve
  * them at the address asked: a correctly shaped account with the wrong owner
- * was read as the protocol, a vault, a ticket or a Floor config (external
- * audit, F-01). No account (`value` null) is not an owner problem.
+ * was read as the protocol, a vault, a ticket or a Floor config (docs/09,
+ * finding 146). No account (`value` null) is not an owner problem.
  */
 export function ownerProblem(address, value, owners) {
   if (value == null) return null;
@@ -449,7 +449,7 @@ export const hostOf = (url) => { try { return new URL(url).host || "(endpoint)";
  * An answer the call's `accept` does not believe (`Rpc.call`: an account
  * with the wrong owner) is that endpoint failing, not the call's answer: the
  * next endpoint is asked, the active one is left if another answers, and
- * `onBadAnswer(url, why, at)` reports it (external audit, F-01).
+ * `onBadAnswer(url, why, at)` reports it (docs/09, finding 146).
  */
 export class FailoverRpc extends Rpc {
   constructor(urls, { onSwitch = () => {}, genesis = null, onCluster = () => {}, onBadAnswer = () => {}, timeoutMs = 10_000, retries = 1, ...opts } = {}) {
@@ -615,7 +615,7 @@ export class FailoverRpc extends Rpc {
    * An endpoint that does not answer, or is on another cluster, is skipped.
    * With `owner`, so is an account owned by another program, reported
    * (`onBadAnswer`): a lying backup serving its own account with a larger
-   * counter would otherwise win the switch (external audit, F-01).
+   * counter would otherwise win the switch (docs/09, finding 146).
    * Returns `{ switched, reason }`.
    */
   async crossCheckCounters(addresses, counter, { lagMs = SIGNATURE_LAG_SWITCH_MS, nowMs = Date.now(), owner = null } = {}) {

@@ -261,7 +261,7 @@ test("a stop whose primary URL does not parse still stops through a backup", asy
   }
 });
 
-test("a stop never takes a Floor config another program owns for Floor's, so a lying endpoint cannot say stopped (F-01)", async () => {
+test("a stop never takes a Floor config another program owns for Floor's, so a lying endpoint cannot say stopped (finding 146)", async () => {
   // The primary serves a "stopped" config owned by the token program; the
   // backup, on the same cluster, has no config. Read unchecked, the stop
   // said "stopped" and exited 0 while the program ran on.

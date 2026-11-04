@@ -358,7 +358,8 @@ export const DEFAULT_POLICY = {
    * background, at most `freshRecipientLookupsPerPass` at a time, and cached.
    * An attacker can age an address in advance, and a node with short history
    * makes old owners look new, so this only ever adds caution: it never
-   * raises a threshold, delays or holds back a freeze. 0 turns it off. */
+   * raises a threshold, delays or holds back a freeze. 0 turns it off
+   * (docs/09, finding 150). */
   freshRecipientAgeS: 86_400,
   /** Alert (urgent, not a freeze) once unbacked outflow to fresh recipients
    * reaches this fraction of the 1-hour freeze threshold within the hour, or
